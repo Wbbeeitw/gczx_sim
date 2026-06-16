@@ -15,7 +15,11 @@
 import collections
 import math
 import os
+os.environ["MUJOCO_GL"] = "egl"
+os.environ["PYOPENGL_PLATFORM"] = "egl"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import pathlib
+
 
 import imageio
 import numpy as np
@@ -25,8 +29,6 @@ from libero.libero.envs import OffScreenRenderEnv
 
 from toolkits.eval_scripts_openpi import setup_logger, setup_policy
 
-os.environ["MUJOCO_GL"] = "egl"
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
@@ -61,7 +63,9 @@ def _get_libero_env(task, resolution, seed):
     env_args = {
         "bddl_file_name": task_bddl_file,
         "camera_heights": resolution,
+        "render_gpu_device_id": 0,
         "camera_widths": resolution,
+        "render_gpu_device_id": 0,
     }
     env = OffScreenRenderEnv(**env_args)
     env.seed(

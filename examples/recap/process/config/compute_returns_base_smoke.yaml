@@ -1,0 +1,18 @@
+data:
+  data_root: null
+  train_data_paths:
+  - dataset_path: /workspace/datasets/recap_libero10_task0/libero10_task0_sft
+    type: sft
+  - dataset_path: /workspace/datasets/recap_libero10_task0/libero10_task0_train
+    type: rollout
+  dataset_type: sft
+  gamma: 1.0
+  failure_reward: -300.0
+  tag: base_fail300_smoke
+  num_workers: 32
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  job:
+    chdir: false

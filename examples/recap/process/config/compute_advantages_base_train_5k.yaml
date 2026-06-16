@@ -1,0 +1,28 @@
+# @package _global_
+defaults:
+- model/value@advantage.model
+
+advantage:
+  value_checkpoint: /workspace/RLinf/logs/value_sft/libero_sft_value_base_3k-20260613-14:08:37/value_sft/checkpoints/global_step_5000/actor/model_state_dict
+  num_samples: 10
+  batch_size: 32
+  num_dataloader_workers_per_gpu: 12
+  positive_advantage_threshold_quantile: 0.3
+  save_video: false
+  tag: base_train_5k_N10_q30
+  returns_tag: base_fail300_smoke
+  model:
+    critic_expert_variant: gemma_1m
+    tokenizer_path: /workspace/models/gemma-3-270m
+    siglip_path: /workspace/models/siglip2-so400m-patch14-224
+    gemma3_path: /workspace/models/gemma-3-270m
+
+data:
+  data_root: /workspace/datasets/recap_libero10_task0
+  train_data_paths:
+  - dataset_path: /workspace/datasets/recap_libero10_task0/libero10_task0_train
+    robot_type: libero
+    type: rollout
+    weight: 1.0
+  gamma: 1.0
+  advantage_lookahead_step: 10

@@ -21,3 +21,33 @@ rlinf/envs/maniskill/assets
 PKG-INFO
 *.egg-info/
 .claude/settings.json
+
+# Model weights and checkpoints
+*.pt
+*.pth
+*.safetensors
+*.bin
+*.ckpt
+*.gguf
+
+# Local data, logs and outputs
+logs/*
+outputs/*
+datasets/
+workspace/
+_local_backups/
+
+# Sensitive project files
+CLAUDE.md
+AGENTS.md
+
+# Temporary debug scripts
+test_eval_debug*.py
+test_import_order.py
+test_main.py
+
+# Temporary environments and files
+.docx_env/
+recap_plan_extracted.txt
+NUL
+*.bak
