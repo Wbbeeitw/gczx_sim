@@ -78,6 +78,12 @@ _REPACK_KEYS = {
         "actions": "actions",
         "prompt": "prompt",
     },
+    "maniskill": {
+        "observation/image": "observation.images.base_camera",
+        "observation/state": "observation.state",
+        "actions": "action",
+        "prompt": "task",
+    },
 }
 
 
@@ -207,6 +213,8 @@ class ValueDataset(Dataset):
         max_samples: Optional[int] = None,
         tag: Optional[str] = None,
         episode_percentage: Optional[float] = None,
+        episode_start: Optional[int] = None,
+        episode_end: Optional[int] = None,
         shuffle_episodes: bool = False,
         episode_seed: int = 42,
         **kwargs,
@@ -219,6 +227,7 @@ class ValueDataset(Dataset):
             "asset_id",
             "extra_delta_transform",
             "action_norm_skip_dims",
+            "weight",
         }
         unexpected = set(kwargs) - _known_unused
         if unexpected:
@@ -245,6 +254,7 @@ class ValueDataset(Dataset):
             root=local_path,
             delta_timestamps=delta_timestamps,
             download_videos=False,
+            episodes=list(range(self.dataset_meta.total_episodes)),
         )
         self._base.hf_dataset.set_transform(decode_image_struct_batch)
 
@@ -270,6 +280,17 @@ class ValueDataset(Dataset):
                 selected = set(rng.choice(all_eps, size=num, replace=False).tolist())
             else:
                 selected = set(all_eps[:num])
+            idx = self._base.episode_data_index
+            self._indices = [
+                i
+                for ep in sorted(selected)
+                for i in range(idx["from"][ep].item(), idx["to"][ep].item())
+            ]
+        elif episode_start is not None or episode_end is not None:
+            total = self.dataset_meta.total_episodes
+            start = episode_start if episode_start is not None else 0
+            end = episode_end if episode_end is not None else total
+            selected = set(range(start, end))
             idx = self._base.episode_data_index
             self._indices = [
                 i
@@ -318,7 +339,7 @@ class ValueDataset(Dataset):
             transforms_list.append(
                 libero_policy.LiberoInputs(model_type=model_type_enum)
             )
-        elif robot in ("franka", "franka_co_train"):
+        elif robot in ("franka", "franka_co_train", "maniskill"):
             transforms_list.append(
                 franka_policy.FrankaEEInputs(
                     action_dim=action_dim,
