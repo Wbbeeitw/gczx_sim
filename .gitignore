@@ -29,25 +29,25 @@ PKG-INFO
 *.bin
 *.ckpt
 *.gguf
-
 # Local data, logs and outputs
-logs/*
-outputs/*
 datasets/
 workspace/
 _local_backups/
-
 # Sensitive project files
 CLAUDE.md
 AGENTS.md
-
 # Temporary debug scripts
 test_eval_debug*.py
 test_import_order.py
 test_main.py
-
 # Temporary environments and files
 .docx_env/
 recap_plan_extracted.txt
 NUL
 *.bak
+# Local server-only phase/progress scratch files
+examples/recap/process/compute_phase_bias*.py
+examples/recap/process/compute_success_phase_bias.py
+examples/recap/process/gen_phase_progress_gt.py
+examples/recap/process/config/compute_advantages_maniskill_eval.yaml
+examples/recap/process/outputs/
