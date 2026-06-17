@@ -51,3 +51,10 @@ test_main.py
 recap_plan_extracted.txt
 NUL
 *.bak
+
+# Local server-only phase/progress scratch files (do not sync to GitHub)
+examples/recap/process/compute_phase_bias*.py
+examples/recap/process/compute_success_phase_bias.py
+examples/recap/process/gen_phase_progress_gt.py
+examples/recap/process/config/compute_advantages_maniskill_eval.yaml
+examples/recap/process/outputs/
