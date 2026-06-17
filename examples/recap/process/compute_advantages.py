@@ -210,6 +210,13 @@ KEY_MAPPINGS = {
         "state": "observation/state",
         "task": "prompt",
     },
+    "maniskill": {
+        "observation.images.base_camera": "observation/image",
+        "observation.state": "observation/state",
+        "image": "observation/image",
+        "state": "observation/state",
+        "task": "prompt",
+    },
     "droid": {
         "observation.exterior_image_1_left": "observation/exterior_image_1_left",
         "observation.wrist_image_left": "observation/wrist_image_left",
@@ -371,6 +378,7 @@ def load_lerobot_dataset(
 
     dataset = LeRobotDataset(
         str(dataset_path),
+        episodes=list(range(meta.total_episodes)),
         download_videos=False,
     )
     dataset.hf_dataset.set_transform(decode_image_struct_batch)

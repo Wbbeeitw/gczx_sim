@@ -1,0 +1,43 @@
+# Default configuration for the LIBERO-10 task0 z/p probe experiment.
+#
+# All paths are relative to the remote workspace. Override them via
+# run_probe.py command-line flags if needed.
+
+dataset_path: /workspace/datasets/recap_libero10_task0/libero10_task0_train
+value_checkpoint: /workspace/results/value_sft_maniskill/checkpoints/global_step_5000
+siglip_path: /workspace/models/siglip2-so400m-patch14-224
+gemma3_path: /workspace/models/gemma-3-270m
+
+# Path to raw advantages parquet (used for the value-MSE correction comparison).
+# If null, the analysis will only report z/p prediction metrics.
+advantages_path: null
+
+output_root: /workspace/results/phase_progress_probe
+
+extract:
+  batch_size: 16
+  num_workers: 0
+  val_episode_ratio: 0.2
+  seed: 42
+
+train:
+  hidden_dim: 256
+  dropout: 0.1
+  lr: 0.001
+  weight_decay: 0.0001
+  batch_size: 256
+  max_epochs: 200
+  early_stop_patience: 20
+  lr_patience: 10
+  phase_loss_weight: 1.0
+  progress_loss_weight: 1.0
+  global_progress_loss_weight: 0.0
+  use_class_weights: true
+  label_smoothing: 0.0
+  seed: 42
+
+predict:
+  batch_size: 512
+  return_min: -700.0
+  return_max: 0.0
+  num_phases: 5
