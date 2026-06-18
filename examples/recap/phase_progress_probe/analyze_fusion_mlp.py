@@ -57,6 +57,7 @@ def _collect_predictions(
     advantages_path: Path,
     return_min: float,
     return_max: float,
+    zp_source: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Prepare per-frame z/p and fusion predictions for train+val rows."""
     adv_df = pd.read_parquet(advantages_path)
@@ -73,6 +74,7 @@ def _collect_predictions(
             adv_df=adv_df,
             return_min=return_min,
             return_max=return_max,
+            zp_source=zp_source,
         )
         pred_parts.append(pred_df[[
             "episode_index",
@@ -89,21 +91,30 @@ def _collect_predictions(
         row_index = torch.tensor(pred_df["row_index"].values, dtype=torch.long)
         features = feature_data["features"].float().index_select(0, row_index)
         phase_probs = zpred["phase_probs"].float().index_select(0, row_index)
+        phase_true_onehot = torch.nn.functional.one_hot(
+            feature_data["phase"].long(), num_classes=head.num_phases
+        ).float().index_select(0, row_index)
         phase_progress = zpred["phase_progress_pred"].float().index_select(0, row_index)
         global_progress = zpred["global_progress_pred"].float().index_select(0, row_index)
+        if zp_source == "oracle":
+            phase_repr = phase_true_onehot
+            phase_progress = feature_data["phase_progress"].float().index_select(0, row_index)
+            global_progress = feature_data["global_progress"].float().index_select(0, row_index)
+        else:
+            phase_repr = phase_probs
         raw_value = torch.tensor(pred_df["value_current"].values, dtype=torch.float32)
 
         loader = DataLoader(
-            TensorDataset(features, phase_probs, phase_progress, global_progress, raw_value),
+            TensorDataset(features, phase_repr, phase_progress, global_progress, raw_value),
             batch_size=batch_size,
             shuffle=False,
         )
         bias_pred: list[torch.Tensor] = []
         with torch.no_grad():
-            for feat, probs, prog, glob, raw in loader:
+            for feat, phase_in, prog, glob, raw in loader:
                 out = fusion_model(
                     feat.to(device),
-                    probs.to(device),
+                    phase_in.to(device),
                     prog.to(device),
                     glob.to(device),
                     raw.to(device),
@@ -154,6 +165,7 @@ def main() -> None:
     )
     parser.add_argument("--return_min", type=float, default=-700.0)
     parser.add_argument("--return_max", type=float, default=0.0)
+    parser.add_argument("--zp_source", choices=["predicted", "oracle"], default="predicted")
     parser.add_argument("--num_phases", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=1024)
     args = parser.parse_args()
@@ -185,6 +197,7 @@ def main() -> None:
         advantages_path=Path(args.advantages_path),
         return_min=args.return_min,
         return_max=args.return_max,
+        zp_source=args.zp_source,
     )
     pred_metrics = _compute_prediction_metrics(pred_df, args.num_phases)
 

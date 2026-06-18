@@ -111,6 +111,7 @@ def _build_rows(
     adv_df: pd.DataFrame,
     return_min: float,
     return_max: float,
+    zp_source: str,
 ) -> pd.DataFrame:
     """Merge cached features, predicted z/p, and raw advantage values."""
     rows = pd.DataFrame(
@@ -137,6 +138,16 @@ def _build_rows(
         merged["return"], return_min=return_min, return_max=return_max
     )
     merged["target_bias"] = merged["value_current"] - merged["return_norm"]
+    if zp_source == "oracle":
+        merged["phase_input"] = merged["phase_true"]
+        merged["phase_progress_input"] = merged["phase_progress_true"]
+        merged["global_progress_input"] = merged["global_progress_true"]
+    elif zp_source == "predicted":
+        merged["phase_input"] = merged["phase_pred"]
+        merged["phase_progress_input"] = merged["phase_progress_pred"]
+        merged["global_progress_input"] = merged["global_progress_pred"]
+    else:
+        raise ValueError(f"Unsupported zp_source: {zp_source}")
     return merged.sort_values(["episode_index", "frame_index"]).reset_index(drop=True)
 
 
@@ -148,6 +159,7 @@ def _gather_feature_payload(
     advantages_path: Path,
     return_min: float,
     return_max: float,
+    zp_source: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Prepare train/val payloads for fusion training."""
     adv_df = pd.read_parquet(advantages_path)
@@ -163,13 +175,19 @@ def _gather_feature_payload(
             adv_df=adv_df,
             return_min=return_min,
             return_max=return_max,
+            zp_source=zp_source,
         )
         payloads[split] = {
             "merged": merged,
             "all_features": feature_data["features"].float(),
             "all_phase_probs": zpred["phase_probs"].float(),
+            "all_phase_true_onehot": F.one_hot(
+                feature_data["phase"].long(), num_classes=head.num_phases
+            ).float(),
             "all_phase_progress_pred": zpred["phase_progress_pred"].float(),
             "all_global_progress_pred": zpred["global_progress_pred"].float(),
+            "all_phase_progress_true": feature_data["phase_progress"].float(),
+            "all_global_progress_true": feature_data["global_progress"].float(),
         }
 
     return payloads["train"], payloads["val"]
@@ -182,9 +200,11 @@ def _build_tensor_dataset(payload: dict[str, Any]) -> TensorDataset:
 
     return TensorDataset(
         payload["all_features"].index_select(0, row_index),
+        torch.tensor(merged["phase_input"].values, dtype=torch.long),
         payload["all_phase_probs"].index_select(0, row_index),
-        payload["all_phase_progress_pred"].index_select(0, row_index),
-        payload["all_global_progress_pred"].index_select(0, row_index),
+        payload["all_phase_true_onehot"].index_select(0, row_index),
+        torch.tensor(merged["phase_progress_input"].values, dtype=torch.float32),
+        torch.tensor(merged["global_progress_input"].values, dtype=torch.float32),
         torch.tensor(merged["value_current"].values, dtype=torch.float32),
         torch.tensor(merged["target_bias"].values, dtype=torch.float32),
     )
@@ -196,6 +216,7 @@ def evaluate(
     data_loader: DataLoader,
     criterion: nn.Module,
     device: torch.device,
+    zp_source: str,
 ) -> dict[str, float]:
     """Evaluate fusion bias prediction."""
     model.eval()
@@ -204,10 +225,20 @@ def evaluate(
     all_pred: list[torch.Tensor] = []
     all_true: list[torch.Tensor] = []
 
-    for features, phase_probs, phase_progress, global_progress, raw_value, target_bias in data_loader:
+    for (
+        features,
+        phase_input,
+        phase_probs,
+        phase_true_onehot,
+        phase_progress,
+        global_progress,
+        raw_value,
+        target_bias,
+    ) in data_loader:
+        phase_repr = phase_true_onehot if zp_source == "oracle" else phase_probs
         pred = model(
             features.to(device),
-            phase_probs.to(device),
+            phase_repr.to(device),
             phase_progress.to(device),
             global_progress.to(device),
             raw_value.to(device),
@@ -258,11 +289,21 @@ def train(
         epoch_samples = 0
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.max_epochs}")
-        for features, phase_probs, phase_progress, global_progress, raw_value, target_bias in pbar:
+        for (
+            features,
+            phase_input,
+            phase_probs,
+            phase_true_onehot,
+            phase_progress,
+            global_progress,
+            raw_value,
+            target_bias,
+        ) in pbar:
             optimizer.zero_grad()
+            phase_repr = phase_true_onehot if args.zp_source == "oracle" else phase_probs
             pred = model(
                 features.to(device),
-                phase_probs.to(device),
+                phase_repr.to(device),
                 phase_progress.to(device),
                 global_progress.to(device),
                 raw_value.to(device),
@@ -279,7 +320,7 @@ def train(
             pbar.set_postfix({"loss": epoch_loss / epoch_samples})
 
         train_loss = epoch_loss / epoch_samples
-        val_metrics = evaluate(model, val_loader, criterion, device)
+        val_metrics = evaluate(model, val_loader, criterion, device, args.zp_source)
         scheduler.step(val_metrics["loss"])
 
         logger.info(
@@ -334,6 +375,7 @@ def main() -> None:
     )
     parser.add_argument("--return_min", type=float, default=-700.0)
     parser.add_argument("--return_max", type=float, default=0.0)
+    parser.add_argument("--zp_source", choices=["predicted", "oracle"], default="predicted")
     parser.add_argument("--num_phases", type=int, default=5)
     parser.add_argument("--hidden_dim", type=int, default=256)
     parser.add_argument("--dropout", type=float, default=0.1)
@@ -380,6 +422,7 @@ def main() -> None:
         advantages_path=Path(args.advantages_path),
         return_min=args.return_min,
         return_max=args.return_max,
+        zp_source=args.zp_source,
     )
     logger.info(
         "Fusion rows: train=%d val=%d",
