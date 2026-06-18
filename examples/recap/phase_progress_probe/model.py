@@ -78,13 +78,14 @@ class VLMBackboneFeatureExtractor(nn.Module):
         """
         value_model = self.value_model
 
-        images = observation["images"]
-        image_masks = observation.get("image_masks", {})
-        lang_tokens = observation["tokenized_prompt"]
-        lang_masks = observation["tokenized_prompt_mask"]
-
-        batch_size = lang_tokens.shape[0]
-        device = lang_tokens.device
+        (
+            images,
+            image_masks,
+            lang_tokens,
+            lang_masks,
+            _,
+            _,
+        ) = value_model._preprocess_observation(observation)
 
         # Build prefix embeddings and padding mask.
         prefix_embs, prefix_pad_masks = value_model.embed_prefix(
