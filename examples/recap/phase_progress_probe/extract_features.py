@@ -38,11 +38,11 @@ logger = logging.getLogger(__name__)
 def _collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
     """Collate a list of dataset samples.
 
-    The ``transformed`` dict is collated with the default PyTorch collator;
-    scalar label fields are stacked explicitly so they end up as tensors.
+    Scalar label fields are stacked explicitly so they end up as tensors.
+    The transformed samples stay as a Python list and are batch-prepared by
+    ``ValueCriticModel._prepare_observation_batch`` so prompt/image handling
+    matches the value model's normal inference path.
     """
-    from torch.utils.data._utils.collate import default_collate
-
     labels = {
         "episode_index": torch.tensor([b["episode_index"] for b in batch], dtype=torch.long),
         "frame_index": torch.tensor([b["frame_index"] for b in batch], dtype=torch.long),
@@ -54,7 +54,7 @@ def _collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
             [b["global_progress"] for b in batch], dtype=torch.float32
         ),
     }
-    transformed = default_collate([b["transformed"] for b in batch])
+    transformed = [b["transformed"] for b in batch]
     return {"labels": labels, "transformed": transformed}
 
 
@@ -72,7 +72,9 @@ def extract_split(
 
     for batch in tqdm(data_loader, desc=f"Extracting {output_path.stem}"):
         transformed = batch["transformed"]
-        observation = feature_extractor.value_model._prepare_observation(transformed)
+        observation = feature_extractor.value_model._prepare_observation_batch(
+            transformed
+        )
         features = feature_extractor.extract_prefix_features(observation)
 
         all_features.append(features.cpu())
