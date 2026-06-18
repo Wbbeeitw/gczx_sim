@@ -1010,6 +1010,7 @@ class ValueCriticModel(nn.Module):
         batch_size: int = 64,
         pretransformed: bool = False,
         already_cpu_prepared: bool = False,
+        return_distribution: bool = False,
     ) -> list[dict]:
         """Batch inference for multiple observations.
 
@@ -1019,9 +1020,10 @@ class ValueCriticModel(nn.Module):
             pretransformed: If True, skip _input_transform (already applied).
             already_cpu_prepared: If True, obs are output of _prepare_observation_cpu.
                 Skip all preprocessing, just stack tensors and move to device.
+            return_distribution: If True, also return categorical logits/probs.
 
         Returns:
-            List of dictionaries with "value" key.
+            List of dictionaries with "value" key, and optionally "logits"/"probs".
         """
         import numpy as np
 
@@ -1083,10 +1085,22 @@ class ValueCriticModel(nn.Module):
 
                 observation = self._prepare_observation_batch(inputs_list)
 
-            values = self.predict_value(observation).cpu()
+            if return_distribution:
+                out = self.predict(observation)
+                values = out.predicted_values.cpu()
+                logits = out.logits.cpu()
+                probs = out.probs.cpu()
+            else:
+                values = self.predict_value(observation).cpu()
+                logits = None
+                probs = None
 
             for i in range(len(batch_obs)):
-                all_outputs.append({"value": float(values[i])})
+                result = {"value": float(values[i])}
+                if return_distribution:
+                    result["logits"] = logits[i].numpy().astype(np.float32)
+                    result["probs"] = probs[i].numpy().astype(np.float32)
+                all_outputs.append(result)
 
         return all_outputs
 

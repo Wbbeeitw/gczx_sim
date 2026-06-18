@@ -650,6 +650,12 @@ def compute_advantages_for_dataset(
     prefetch_factor = cfg.advantage.get("prefetch_factor", 2)
 
     # Periodically flushed to disk to prevent OOM
+    save_value_distribution = bool(
+        cfg.advantage.get("save_value_distribution", False)
+    )
+    if rank == 0 and save_value_distribution:
+        logger.info("  Saving 201-bin value logits/probs to advantages parquet")
+
     results = {
         "episode_index": [],
         "frame_index": [],
@@ -661,6 +667,11 @@ def compute_advantages_for_dataset(
         "reward_sum_raw": [],
         "num_valid_rewards": [],
     }
+    if save_value_distribution:
+        results["value_logits_current"] = []
+        results["value_probs_current"] = []
+        results["value_logits_next"] = []
+        results["value_probs_next"] = []
 
     v_curr_stats = RunningStats("V(o_t)")
     v_next_stats = RunningStats("V(o_N)")
@@ -749,6 +760,12 @@ def compute_advantages_for_dataset(
     meta_return = np.full(extended_size, np.nan, dtype=np.float64)
     meta_reward = np.full(extended_size, np.nan, dtype=np.float64)
     filled_mask = np.zeros(extended_size, dtype=bool)
+    v_logits = None
+    v_probs = None
+    if save_value_distribution:
+        num_bins = int(getattr(value_model, "num_bins", 0))
+        v_logits = np.full((extended_size, num_bins), np.nan, dtype=np.float32)
+        v_probs = np.full((extended_size, num_bins), np.nan, dtype=np.float32)
 
     def process_value_batch(obs_list: list[dict], meta_list: list[dict]):
         """Run GPU inference for V(o_t) and store batch results."""
@@ -757,6 +774,7 @@ def compute_advantages_for_dataset(
             batch_size=batch_size,
             pretransformed=cpu_prep_in_workers,
             already_cpu_prepared=cpu_prep_in_workers,
+            return_distribution=save_value_distribution,
         )
         if len(batch_results) != len(meta_list):
             raise RuntimeError(
@@ -776,6 +794,13 @@ def compute_advantages_for_dataset(
             meta_frame_idx[local_idx] = int(meta_info["frame_index"])
             meta_return[local_idx] = float(meta_info["true_return"])
             meta_reward[local_idx] = float(meta_info["reward"])
+            if save_value_distribution:
+                if "logits" not in result or "probs" not in result:
+                    raise RuntimeError(
+                        "save_value_distribution=True but infer_batch returned no logits/probs"
+                    )
+                v_logits[local_idx] = np.asarray(result["logits"], dtype=np.float32)
+                v_probs[local_idx] = np.asarray(result["probs"], dtype=np.float32)
             filled_mask[local_idx] = True
 
     # Prefetch next batch while GPU processes current batch
@@ -917,6 +942,15 @@ def compute_advantages_for_dataset(
         results["reward_sum"].append(reward_sum)
         results["reward_sum_raw"].append(reward_sum_raw)
         results["num_valid_rewards"].append(num_valid)
+        if save_value_distribution:
+            results["value_logits_current"].append(v_logits[i].copy())
+            results["value_probs_current"].append(v_probs[i].copy())
+            if is_next_pad:
+                results["value_logits_next"].append(np.zeros_like(v_logits[i]))
+                results["value_probs_next"].append(np.zeros_like(v_probs[i]))
+            else:
+                results["value_logits_next"].append(v_logits[next_local_idx].copy())
+                results["value_probs_next"].append(v_probs[next_local_idx].copy())
 
         if (i + 1) % flush_every_samples == 0:
             flush_results_to_disk()
