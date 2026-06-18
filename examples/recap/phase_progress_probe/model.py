@@ -131,17 +131,29 @@ class PhaseProgressHead(nn.Module):
         num_phases: int = 5,
         hidden_dim: int = 256,
         dropout: float = 0.1,
+        trunk_depth: int = 1,
     ):
         super().__init__()
         self.feature_dim = feature_dim
         self.num_phases = num_phases
+        self.trunk_depth = trunk_depth
 
-        self.trunk = nn.Sequential(
-            nn.Linear(feature_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout) if dropout > 0.0 else nn.Identity(),
-        )
+        if trunk_depth < 1:
+            raise ValueError(f"trunk_depth must be >= 1, got {trunk_depth}")
+
+        trunk_layers: list[nn.Module] = []
+        in_dim = feature_dim
+        for _ in range(trunk_depth):
+            trunk_layers.extend(
+                [
+                    nn.Linear(in_dim, hidden_dim),
+                    nn.LayerNorm(hidden_dim),
+                    nn.ReLU(inplace=True),
+                    nn.Dropout(dropout) if dropout > 0.0 else nn.Identity(),
+                ]
+            )
+            in_dim = hidden_dim
+        self.trunk = nn.Sequential(*trunk_layers)
         self.phase_head = nn.Linear(hidden_dim, num_phases)
         self.progress_head = nn.Sequential(
             nn.Linear(hidden_dim, 1),
@@ -208,6 +220,7 @@ class PhaseProgressProbe(nn.Module):
         num_phases: int = 5,
         head_hidden_dim: int = 256,
         head_dropout: float = 0.1,
+        head_trunk_depth: int = 1,
         device: str = "cuda",
         **checkpoint_kwargs: Any,
     ) -> "PhaseProgressProbe":
@@ -218,6 +231,7 @@ class PhaseProgressProbe(nn.Module):
             num_phases: Number of semantic phases.
             head_hidden_dim: Hidden dimension of the head.
             head_dropout: Dropout rate in the head.
+            head_trunk_depth: Number of shared MLP layers in the head trunk.
             device: Device to load the model on.
             **checkpoint_kwargs: Passed to ``ValueCriticModel.from_checkpoint``.
 
@@ -235,6 +249,7 @@ class PhaseProgressProbe(nn.Module):
             num_phases=num_phases,
             hidden_dim=head_hidden_dim,
             dropout=head_dropout,
+            trunk_depth=head_trunk_depth,
         )
         return cls(feature_extractor, head).to(device)
 

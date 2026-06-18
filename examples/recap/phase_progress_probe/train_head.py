@@ -286,6 +286,7 @@ def main() -> None:
     parser.add_argument("--num_phases", type=int, default=5)
     parser.add_argument("--hidden_dim", type=int, default=256)
     parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--trunk_depth", type=int, default=1)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--batch_size", type=int, default=256)
@@ -362,6 +363,7 @@ def main() -> None:
         num_phases=args.num_phases,
         hidden_dim=args.hidden_dim,
         dropout=args.dropout,
+        trunk_depth=args.trunk_depth,
     ).to(device)
 
     logger.info("Head parameters: %d", sum(p.numel() for p in head.parameters()))
@@ -377,6 +379,7 @@ def main() -> None:
                 "num_phases": args.num_phases,
                 "hidden_dim": args.hidden_dim,
                 "dropout": args.dropout,
+                "trunk_depth": args.trunk_depth,
             },
             "args": vars(args),
             "train_info": train_info,
