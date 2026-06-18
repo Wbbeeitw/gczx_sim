@@ -123,10 +123,10 @@ def _build_features(image_shape, state_dim, action_dim):
             "shape": (1,),
             "names": ["return"],
         },
-        "task": {
+        "prompt": {
             "dtype": "string",
             "shape": (1,),
-            "names": ["task"],
+            "names": ["prompt"],
         },
     }
 
@@ -240,7 +240,7 @@ def main():
                     "observation/image": img,
                     "observation/wrist_image": wrist_img,
                     "observation/state": state,
-                    "task": str(task_description),
+                    "prompt": str(task_description),
                 }
                 action_chunk = policy.infer(observation)["actions"]
                 action_plan = list(action_chunk[: args.action_chunk])
@@ -261,7 +261,7 @@ def main():
                     "state": state.astype(np.float32),
                     "actions": action.astype(np.float32),
                     "reward": np.array([float(reward)], dtype=np.float32),
-                    "task": str(task_description),
+                    "prompt": str(task_description),
                     "done": np.array([False], dtype=bool),
                     "is_success": np.array([False], dtype=bool),
                 }
