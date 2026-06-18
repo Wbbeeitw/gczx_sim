@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import logging
 from pathlib import Path
@@ -32,6 +33,23 @@ from tqdm import tqdm
 from model import PhaseProgressHead
 
 logger = logging.getLogger(__name__)
+
+
+def _build_plateau_scheduler(
+    optimizer: torch.optim.Optimizer,
+    lr_patience: int,
+) -> torch.optim.lr_scheduler.ReduceLROnPlateau:
+    """Build a ReduceLROnPlateau scheduler compatible with older torch."""
+    kwargs: dict[str, Any] = {
+        "mode": "min",
+        "factor": 0.5,
+        "patience": lr_patience,
+    }
+    if "verbose" in inspect.signature(
+        torch.optim.lr_scheduler.ReduceLROnPlateau.__init__
+    ).parameters:
+        kwargs["verbose"] = True
+    return torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, **kwargs)
 
 
 def _compute_metrics(
@@ -165,13 +183,7 @@ def train(
         lr=args.lr,
         weight_decay=args.weight_decay,
     )
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode="min",
-        factor=0.5,
-        patience=args.lr_patience,
-        verbose=True,
-    )
+    scheduler = _build_plateau_scheduler(optimizer, args.lr_patience)
 
     best_val_loss = float("inf")
     best_epoch = -1
