@@ -119,6 +119,7 @@ class PhaseProbeDataset(Dataset):
         val_episode_ratio: float = 0.2,
         label_name: str = "phase_progress_semantic",
         seed: int = 42,
+        max_episodes: Optional[int] = None,
     ):
         super().__init__()
         if split not in ("train", "val"):
@@ -136,9 +137,17 @@ class PhaseProbeDataset(Dataset):
         total_episodes = self.dataset_meta.total_episodes
         rng = np.random.default_rng(seed)
         shuffled_eps = rng.permutation(total_episodes).tolist()
-        n_val = max(1, int(total_episodes * val_episode_ratio))
-        val_eps = set(shuffled_eps[:n_val])
-        train_eps = set(shuffled_eps[n_val:])
+        if max_episodes is not None:
+            if max_episodes <= 1:
+                raise ValueError(f"max_episodes must be > 1, got {max_episodes}")
+            shuffled_eps = shuffled_eps[: min(max_episodes, total_episodes)]
+        selected_pool = shuffled_eps
+        n_pool = len(selected_pool)
+        n_val = max(1, int(n_pool * val_episode_ratio))
+        if n_val >= n_pool:
+            n_val = n_pool - 1
+        val_eps = set(selected_pool[:n_val])
+        train_eps = set(selected_pool[n_val:])
         selected_eps = train_eps if split == "train" else val_eps
 
         # Load full LeRobot dataset without delta_timestamps for speed.
@@ -251,6 +260,7 @@ def build_datasets(
     val_episode_ratio: float = 0.2,
     label_name: str = "phase_progress_semantic",
     seed: int = 42,
+    max_episodes: Optional[int] = None,
 ) -> tuple[PhaseProbeDataset, PhaseProbeDataset]:
     """Build train and validation PhaseProbeDatasets."""
     common_kwargs = {
@@ -262,6 +272,7 @@ def build_datasets(
         "val_episode_ratio": val_episode_ratio,
         "label_name": label_name,
         "seed": seed,
+        "max_episodes": max_episodes,
     }
     train_ds = PhaseProbeDataset(split="train", **common_kwargs)
     val_ds = PhaseProbeDataset(split="val", **common_kwargs)
