@@ -600,6 +600,7 @@ def main() -> None:
             },
             f,
             indent=2,
+            default=float,
         )
 
     logger.info(
