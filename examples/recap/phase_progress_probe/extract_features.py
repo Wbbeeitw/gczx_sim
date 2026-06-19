@@ -115,6 +115,7 @@ def main() -> None:
     parser.add_argument("--val_episode_ratio", type=float, default=0.2)
     parser.add_argument("--max_episodes", type=int, default=None)
     parser.add_argument("--episode_subset_path", default=None)
+    parser.add_argument("--episode_split_path", default=None)
     parser.add_argument("--label_name", default="phase_progress_semantic")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--num_workers", type=int, default=0)
@@ -163,6 +164,7 @@ def main() -> None:
         val_episode_ratio=args.val_episode_ratio,
         max_episodes=args.max_episodes,
         episode_subset_path=args.episode_subset_path,
+        episode_split_path=args.episode_split_path,
         label_name=args.label_name,
         seed=args.seed,
     )

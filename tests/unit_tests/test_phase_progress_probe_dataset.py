@@ -83,9 +83,23 @@ def _load_dataset_module():
             return None
         return types.SimpleNamespace(episodes=payload["selected_episodes"])
 
+    def resolve_episode_split_for_dataset(raw_spec, dataset_path):
+        dataset_name = Path(dataset_path).name
+        payload = raw_spec.get(dataset_name) or raw_spec.get(str(dataset_path))
+        if payload is None:
+            return None
+        return types.SimpleNamespace(
+            selected_episodes=payload["selected_episodes"],
+            train_episodes=payload["train_episodes"],
+            val_episodes=payload["val_episodes"],
+        )
+
     episode_subset_utils_stub.load_episode_subset_file = load_episode_subset_file
     episode_subset_utils_stub.resolve_episode_subset_for_dataset = (
         resolve_episode_subset_for_dataset
+    )
+    episode_subset_utils_stub.resolve_episode_split_for_dataset = (
+        resolve_episode_split_for_dataset
     )
     sys.modules["examples"] = examples_stub
     sys.modules["examples.recap"] = recap_stub
@@ -197,3 +211,59 @@ def test_build_datasets_respects_explicit_episode_subset(monkeypatch, tmp_path):
 
     assert len(train_ds._indices) == 6
     assert len(val_ds._indices) == 2
+
+
+def test_build_datasets_respects_explicit_episode_split(monkeypatch, tmp_path):
+    module = _load_dataset_module()
+
+    class FakeMetadata:
+        def __init__(self, name, root):
+            self.total_episodes = 10
+
+    class FakeHF:
+        def set_transform(self, transform):
+            self.transform = transform
+
+    class FakeDataset:
+        def __init__(self, name, root, episodes, download_videos):
+            self.hf_dataset = FakeHF()
+            self.episode_data_index = {
+                "from": torch.arange(0, 20, 2),
+                "to": torch.arange(2, 22, 2),
+            }
+
+        def __getitem__(self, idx):
+            raise AssertionError("not needed")
+
+    split_path = tmp_path / "split.json"
+    split_path.write_text(
+        json.dumps(
+            {
+                "fake": {
+                    "selected_episodes": [1, 3, 5, 7],
+                    "train_episodes": [1, 7],
+                    "val_episodes": [3, 5],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(module, "LeRobotDatasetMetadata", FakeMetadata)
+    monkeypatch.setattr(module, "LeRobotDataset", FakeDataset)
+    monkeypatch.setattr(module, "_load_task_descriptions", lambda path: {})
+    monkeypatch.setattr(module, "_load_phase_labels", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        module.PhaseProbeDataset,
+        "_build_transform",
+        staticmethod(lambda **kwargs: (lambda sample: sample)),
+    )
+
+    train_ds, val_ds = module.build_datasets(
+        dataset_path="/tmp/fake",
+        episode_split_path=str(split_path),
+        seed=0,
+    )
+
+    assert len(train_ds._indices) == 4
+    assert len(val_ds._indices) == 4

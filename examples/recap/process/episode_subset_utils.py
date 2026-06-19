@@ -18,6 +18,16 @@ class EpisodeSubsetSpec:
     num_frames: int | None = None
 
 
+@dataclass(frozen=True)
+class EpisodeSplitSpec:
+    """Explicit train/val split for one dataset."""
+
+    selected_episodes: list[int]
+    train_episodes: list[int]
+    val_episodes: list[int]
+    num_frames: int | None = None
+
+
 def load_episode_subset_file(path: str | Path) -> Any:
     """Load a JSON episode subset specification."""
     with open(path, encoding="utf-8") as f:
@@ -41,6 +51,37 @@ def _coerce_episode_spec(value: Any) -> EpisodeSubsetSpec:
     num_frames = value.get("num_frames")
     return EpisodeSubsetSpec(
         episodes=sorted(set(episodes)),
+        num_frames=int(num_frames) if num_frames is not None else None,
+    )
+
+
+def _coerce_split_spec(value: Any) -> EpisodeSplitSpec:
+    """Normalize one split payload into an EpisodeSplitSpec."""
+    if not isinstance(value, dict):
+        raise ValueError(f"Unsupported episode split payload: {type(value)!r}")
+
+    raw_selected = value.get("selected_episodes", value.get("episodes"))
+    raw_train = value.get("train_episodes")
+    raw_val = value.get("val_episodes")
+    if raw_selected is None or raw_train is None or raw_val is None:
+        raise ValueError(
+            "Episode split payload must include 'selected_episodes', "
+            "'train_episodes', and 'val_episodes'"
+        )
+
+    selected = sorted(set(int(ep) for ep in raw_selected))
+    train = sorted(set(int(ep) for ep in raw_train))
+    val = sorted(set(int(ep) for ep in raw_val))
+    if set(train) | set(val) != set(selected):
+        raise ValueError("Train/val episode union must exactly match selected_episodes")
+    if set(train) & set(val):
+        raise ValueError("Train/val episode lists must be disjoint")
+
+    num_frames = value.get("num_frames")
+    return EpisodeSplitSpec(
+        selected_episodes=selected,
+        train_episodes=train,
+        val_episodes=val,
         num_frames=int(num_frames) if num_frames is not None else None,
     )
 
@@ -75,6 +116,31 @@ def resolve_episode_subset_for_dataset(
             return _coerce_episode_spec(raw_spec[key])
 
     return None
+
+
+def resolve_episode_split_for_dataset(
+    raw_spec: Any,
+    dataset_path: str | Path,
+) -> EpisodeSplitSpec | None:
+    """Resolve an explicit train/val split spec for one dataset path/name."""
+    dataset_path = Path(dataset_path)
+    dataset_name = dataset_path.name
+
+    if not isinstance(raw_spec, dict):
+        raise ValueError(f"Unsupported episode split spec root: {type(raw_spec)!r}")
+
+    candidate: Any | None = None
+    if all(k in raw_spec for k in ("selected_episodes", "train_episodes", "val_episodes")):
+        candidate = raw_spec
+    else:
+        for key in (str(dataset_path), dataset_name):
+            if key in raw_spec:
+                candidate = raw_spec[key]
+                break
+
+    if candidate is None:
+        return None
+    return _coerce_split_spec(candidate)
 
 
 def compute_frame_indices_for_episodes(
@@ -161,3 +227,22 @@ def sample_balanced_episode_ids(
         selected.update(fill)
 
     return sorted(int(ep) for ep in selected)
+
+
+def split_episode_ids(
+    episode_ids: list[int],
+    val_episode_ratio: float,
+    seed: int,
+) -> tuple[list[int], list[int]]:
+    """Split a fixed episode list into train/val ids with a deterministic seed."""
+    if not episode_ids:
+        raise ValueError("episode_ids must not be empty")
+    rng = np.random.default_rng(seed)
+    shuffled = rng.permutation(sorted(set(int(ep) for ep in episode_ids))).tolist()
+    n_pool = len(shuffled)
+    n_val = max(1, int(n_pool * val_episode_ratio))
+    if n_val >= n_pool:
+        n_val = n_pool - 1
+    val_eps = sorted(int(ep) for ep in shuffled[:n_val])
+    train_eps = sorted(int(ep) for ep in shuffled[n_val:])
+    return train_eps, val_eps

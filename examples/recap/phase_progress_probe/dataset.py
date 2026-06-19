@@ -34,6 +34,7 @@ from torch.utils.data import Dataset
 
 from examples.recap.process.episode_subset_utils import (
     load_episode_subset_file,
+    resolve_episode_split_for_dataset,
     resolve_episode_subset_for_dataset,
 )
 from rlinf.data.datasets.recap.utils import decode_image_struct_batch
@@ -125,6 +126,7 @@ class PhaseProbeDataset(Dataset):
         seed: int = 42,
         max_episodes: Optional[int] = None,
         episode_subset_path: Optional[str] = None,
+        episode_split_path: Optional[str] = None,
     ):
         super().__init__()
         if split not in ("train", "val"):
@@ -141,7 +143,18 @@ class PhaseProbeDataset(Dataset):
         )
         total_episodes = self.dataset_meta.total_episodes
         rng = np.random.default_rng(seed)
-        if episode_subset_path is not None:
+        if episode_split_path is not None:
+            raw_spec = load_episode_subset_file(episode_split_path)
+            split_spec = resolve_episode_split_for_dataset(raw_spec, self.dataset_path)
+            if split_spec is None:
+                raise ValueError(
+                    f"No episode split entry found for dataset '{self.dataset_path.name}' "
+                    f"in {episode_split_path}"
+                )
+            selected_eps = (
+                split_spec.train_episodes if split == "train" else split_spec.val_episodes
+            )
+        elif episode_subset_path is not None:
             raw_spec = load_episode_subset_file(episode_subset_path)
             subset_spec = resolve_episode_subset_for_dataset(raw_spec, self.dataset_path)
             if subset_spec is None:
@@ -154,6 +167,13 @@ class PhaseProbeDataset(Dataset):
                 raise ValueError(
                     f"Episode subset for dataset '{self.dataset_path.name}' is empty"
                 )
+            n_pool = len(selected_pool)
+            n_val = max(1, int(n_pool * val_episode_ratio))
+            if n_val >= n_pool:
+                n_val = n_pool - 1
+            val_eps = set(selected_pool[:n_val])
+            train_eps = set(selected_pool[n_val:])
+            selected_eps = train_eps if split == "train" else val_eps
         else:
             shuffled_eps = rng.permutation(total_episodes).tolist()
             if max_episodes is not None:
@@ -161,13 +181,13 @@ class PhaseProbeDataset(Dataset):
                     raise ValueError(f"max_episodes must be > 1, got {max_episodes}")
                 shuffled_eps = shuffled_eps[: min(max_episodes, total_episodes)]
             selected_pool = shuffled_eps
-        n_pool = len(selected_pool)
-        n_val = max(1, int(n_pool * val_episode_ratio))
-        if n_val >= n_pool:
-            n_val = n_pool - 1
-        val_eps = set(selected_pool[:n_val])
-        train_eps = set(selected_pool[n_val:])
-        selected_eps = train_eps if split == "train" else val_eps
+            n_pool = len(selected_pool)
+            n_val = max(1, int(n_pool * val_episode_ratio))
+            if n_val >= n_pool:
+                n_val = n_pool - 1
+            val_eps = set(selected_pool[:n_val])
+            train_eps = set(selected_pool[n_val:])
+            selected_eps = train_eps if split == "train" else val_eps
 
         # Load full LeRobot dataset without delta_timestamps for speed.
         self._base = LeRobotDataset(
@@ -281,6 +301,7 @@ def build_datasets(
     seed: int = 42,
     max_episodes: Optional[int] = None,
     episode_subset_path: Optional[str] = None,
+    episode_split_path: Optional[str] = None,
 ) -> tuple[PhaseProbeDataset, PhaseProbeDataset]:
     """Build train and validation PhaseProbeDatasets."""
     common_kwargs = {
@@ -294,6 +315,7 @@ def build_datasets(
         "seed": seed,
         "max_episodes": max_episodes,
         "episode_subset_path": episode_subset_path,
+        "episode_split_path": episode_split_path,
     }
     train_ds = PhaseProbeDataset(split="train", **common_kwargs)
     val_ds = PhaseProbeDataset(split="val", **common_kwargs)
