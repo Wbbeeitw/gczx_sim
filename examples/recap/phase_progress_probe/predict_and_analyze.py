@@ -49,15 +49,18 @@ def _predict_all(
     features_dir: Path,
     device: torch.device,
     batch_size: int,
+    splits: list[str],
 ) -> pd.DataFrame:
-    """Load cached train+val features and run the head over them."""
+    """Load cached features for the requested splits and run the head over them."""
     parts = []
-    for split in ("train", "val"):
+    split_labels: list[np.ndarray] = []
+    for split in splits:
         path = features_dir / f"{split}.pt"
         if not path.exists():
             raise FileNotFoundError(f"Missing cached features: {path}")
         data = torch.load(path, weights_only=True)
         parts.append(data)
+        split_labels.append(np.full(len(data["episode_index"]), split, dtype=object))
 
     all_features = torch.cat([p["features"] for p in parts], dim=0)
     all_episode = torch.cat([p["episode_index"] for p in parts], dim=0)
@@ -65,6 +68,7 @@ def _predict_all(
     all_phase = torch.cat([p["phase"] for p in parts], dim=0)
     all_phase_progress = torch.cat([p["phase_progress"] for p in parts], dim=0)
     all_global_progress = torch.cat([p["global_progress"] for p in parts], dim=0)
+    all_split = np.concatenate(split_labels, axis=0)
 
     dataset = TensorDataset(all_features)
     loader = DataLoader(
@@ -86,6 +90,7 @@ def _predict_all(
 
     df = pd.DataFrame(
         {
+            "split": all_split,
             "episode_index": all_episode.numpy(),
             "frame_index": all_frame.numpy(),
             "phase_true": all_phase.numpy(),
@@ -295,6 +300,13 @@ def main() -> None:
     parser.add_argument("--return_max", type=float, default=0.0)
     parser.add_argument("--num_phases", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=512)
+    parser.add_argument(
+        "--splits",
+        nargs="+",
+        choices=["train", "val"],
+        default=["train", "val"],
+        help="Which cached feature splits to analyze.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -312,8 +324,14 @@ def main() -> None:
     logger.info("Loading head from %s", args.head_checkpoint)
     head = _load_head(args.head_checkpoint, device)
 
-    logger.info("Predicting z/p for all frames")
-    pred_df = _predict_all(head, Path(args.features_dir), device, args.batch_size)
+    logger.info("Predicting z/p for splits: %s", ",".join(args.splits))
+    pred_df = _predict_all(
+        head,
+        Path(args.features_dir),
+        device,
+        args.batch_size,
+        args.splits,
+    )
     pred_df = pred_df.sort_values(["episode_index", "frame_index"]).reset_index(drop=True)
 
     pred_path = output_dir / "phase_predictions.parquet"

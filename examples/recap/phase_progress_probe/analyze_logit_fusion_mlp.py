@@ -70,8 +70,9 @@ def _collect_rows_from_features(
     return_min: float,
     return_max: float,
     zp_source: str,
+    splits: list[str],
 ) -> tuple[pd.DataFrame | None, pd.DataFrame]:
-    """Collect train+val rows aligned to cached features."""
+    """Collect requested rows aligned to cached features."""
     adv_df = pd.read_parquet(advantages_path)
     pred_parts: list[pd.DataFrame] = []
     merged_parts: list[pd.DataFrame] = []
@@ -80,7 +81,7 @@ def _collect_rows_from_features(
     if zp_source == "predicted" and head is None:
         raise ValueError("Predicted z/p mode requires --head_checkpoint.")
 
-    for split in ("train", "val"):
+    for split in splits:
         feature_data = torch.load(features_dir / f"{split}.pt", weights_only=True)
         zpred = _predict_zp(head, feature_data["features"], batch_size=batch_size, device=device) if head is not None else None
 
@@ -208,6 +209,13 @@ def main() -> None:
     parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--zp_source", choices=["oracle", "predicted"], default="oracle")
     parser.add_argument("--batch_size", type=int, default=1024)
+    parser.add_argument(
+        "--splits",
+        nargs="+",
+        choices=["train", "val"],
+        default=["train", "val"],
+        help="Which cached feature splits to analyze.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -240,6 +248,7 @@ def main() -> None:
             return_min=args.return_min,
             return_max=args.return_max,
             zp_source=args.zp_source,
+            splits=args.splits,
         )
         if pred_df is not None:
             pred_metrics = _compute_prediction_metrics(pred_df, args.num_phases)

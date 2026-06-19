@@ -58,13 +58,14 @@ def _collect_predictions(
     return_min: float,
     return_max: float,
     zp_source: str,
+    splits: list[str],
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Prepare per-frame z/p and fusion predictions for train+val rows."""
+    """Prepare per-frame z/p and fusion predictions for requested rows."""
     adv_df = pd.read_parquet(advantages_path)
     pred_parts: list[pd.DataFrame] = []
     merged_parts: list[pd.DataFrame] = []
 
-    for split in ("train", "val"):
+    for split in splits:
         feature_data = torch.load(features_dir / f"{split}.pt", weights_only=True)
         zpred = _predict_zp(head, feature_data["features"], batch_size=batch_size, device=device)
         pred_df = _build_rows(
@@ -168,6 +169,13 @@ def main() -> None:
     parser.add_argument("--zp_source", choices=["predicted", "oracle"], default="predicted")
     parser.add_argument("--num_phases", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=1024)
+    parser.add_argument(
+        "--splits",
+        nargs="+",
+        choices=["train", "val"],
+        default=["train", "val"],
+        help="Which cached feature splits to analyze.",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -198,6 +206,7 @@ def main() -> None:
         return_min=args.return_min,
         return_max=args.return_max,
         zp_source=args.zp_source,
+        splits=args.splits,
     )
     pred_metrics = _compute_prediction_metrics(pred_df, args.num_phases)
 

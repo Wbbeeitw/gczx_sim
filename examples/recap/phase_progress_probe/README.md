@@ -79,6 +79,15 @@ python examples/recap/phase_progress_probe/predict_and_analyze.py \
   --output_dir /workspace/results/phase_progress_probe/analysis \
   --advantages_path /path/to/advantages.parquet \
   --return_min -700.0 --return_max 0.0
+
+# evaluate only the fixed validation split
+python examples/recap/phase_progress_probe/predict_and_analyze.py \
+  --features_dir /workspace/results/phase_progress_probe/features \
+  --head_checkpoint /workspace/results/phase_progress_probe/head/head.pt \
+  --output_dir /workspace/results/phase_progress_probe/analysis_val \
+  --advantages_path /path/to/advantages.parquet \
+  --return_min -700.0 --return_max 0.0 \
+  --splits val
 ```
 
 ## Outputs
