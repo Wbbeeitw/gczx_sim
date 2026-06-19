@@ -32,6 +32,10 @@ from lerobot.common.datasets.lerobot_dataset import (
 )
 from torch.utils.data import Dataset
 
+from examples.recap.process.episode_subset_utils import (
+    load_episode_subset_file,
+    resolve_episode_subset_for_dataset,
+)
 from rlinf.data.datasets.recap.utils import decode_image_struct_batch
 from rlinf.models.embodiment.openpi.policies import libero_policy
 
@@ -120,6 +124,7 @@ class PhaseProbeDataset(Dataset):
         label_name: str = "phase_progress_semantic",
         seed: int = 42,
         max_episodes: Optional[int] = None,
+        episode_subset_path: Optional[str] = None,
     ):
         super().__init__()
         if split not in ("train", "val"):
@@ -136,12 +141,26 @@ class PhaseProbeDataset(Dataset):
         )
         total_episodes = self.dataset_meta.total_episodes
         rng = np.random.default_rng(seed)
-        shuffled_eps = rng.permutation(total_episodes).tolist()
-        if max_episodes is not None:
-            if max_episodes <= 1:
-                raise ValueError(f"max_episodes must be > 1, got {max_episodes}")
-            shuffled_eps = shuffled_eps[: min(max_episodes, total_episodes)]
-        selected_pool = shuffled_eps
+        if episode_subset_path is not None:
+            raw_spec = load_episode_subset_file(episode_subset_path)
+            subset_spec = resolve_episode_subset_for_dataset(raw_spec, self.dataset_path)
+            if subset_spec is None:
+                raise ValueError(
+                    f"No episode subset entry found for dataset '{self.dataset_path.name}' "
+                    f"in {episode_subset_path}"
+                )
+            selected_pool = subset_spec.episodes
+            if not selected_pool:
+                raise ValueError(
+                    f"Episode subset for dataset '{self.dataset_path.name}' is empty"
+                )
+        else:
+            shuffled_eps = rng.permutation(total_episodes).tolist()
+            if max_episodes is not None:
+                if max_episodes <= 1:
+                    raise ValueError(f"max_episodes must be > 1, got {max_episodes}")
+                shuffled_eps = shuffled_eps[: min(max_episodes, total_episodes)]
+            selected_pool = shuffled_eps
         n_pool = len(selected_pool)
         n_val = max(1, int(n_pool * val_episode_ratio))
         if n_val >= n_pool:
@@ -261,6 +280,7 @@ def build_datasets(
     label_name: str = "phase_progress_semantic",
     seed: int = 42,
     max_episodes: Optional[int] = None,
+    episode_subset_path: Optional[str] = None,
 ) -> tuple[PhaseProbeDataset, PhaseProbeDataset]:
     """Build train and validation PhaseProbeDatasets."""
     common_kwargs = {
@@ -273,6 +293,7 @@ def build_datasets(
         "label_name": label_name,
         "seed": seed,
         "max_episodes": max_episodes,
+        "episode_subset_path": episode_subset_path,
     }
     train_ds = PhaseProbeDataset(split="train", **common_kwargs)
     val_ds = PhaseProbeDataset(split="val", **common_kwargs)

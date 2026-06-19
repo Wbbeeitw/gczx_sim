@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import types
@@ -66,6 +67,33 @@ def _load_dataset_module():
     openpi_policies_stub.libero_policy = libero_policy_stub
     sys.modules["rlinf.models.embodiment.openpi.policies"] = openpi_policies_stub
 
+    examples_stub = types.ModuleType("examples")
+    recap_stub = types.ModuleType("examples.recap")
+    process_stub = types.ModuleType("examples.recap.process")
+    episode_subset_utils_stub = types.ModuleType("examples.recap.process.episode_subset_utils")
+
+    def load_episode_subset_file(path):
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+
+    def resolve_episode_subset_for_dataset(raw_spec, dataset_path):
+        dataset_name = Path(dataset_path).name
+        payload = raw_spec.get(dataset_name) or raw_spec.get(str(dataset_path))
+        if payload is None:
+            return None
+        return types.SimpleNamespace(episodes=payload["selected_episodes"])
+
+    episode_subset_utils_stub.load_episode_subset_file = load_episode_subset_file
+    episode_subset_utils_stub.resolve_episode_subset_for_dataset = (
+        resolve_episode_subset_for_dataset
+    )
+    sys.modules["examples"] = examples_stub
+    sys.modules["examples.recap"] = recap_stub
+    sys.modules["examples.recap.process"] = process_stub
+    sys.modules["examples.recap.process.episode_subset_utils"] = (
+        episode_subset_utils_stub
+    )
+
     spec = importlib.util.spec_from_file_location("phase_progress_probe_dataset", module_path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -113,4 +141,59 @@ def test_build_datasets_respects_max_episodes_before_split(monkeypatch):
     )
 
     assert len(train_ds._indices) == 8
+    assert len(val_ds._indices) == 2
+
+
+def test_build_datasets_respects_explicit_episode_subset(monkeypatch, tmp_path):
+    module = _load_dataset_module()
+
+    class FakeMetadata:
+        def __init__(self, name, root):
+            self.total_episodes = 10
+
+    class FakeHF:
+        def set_transform(self, transform):
+            self.transform = transform
+
+    class FakeDataset:
+        def __init__(self, name, root, episodes, download_videos):
+            self.hf_dataset = FakeHF()
+            self.episode_data_index = {
+                "from": torch.arange(0, 20, 2),
+                "to": torch.arange(2, 22, 2),
+            }
+
+        def __getitem__(self, idx):
+            raise AssertionError("not needed")
+
+    subset_path = tmp_path / "subset.json"
+    subset_path.write_text(
+        json.dumps(
+            {
+                "fake": {
+                    "selected_episodes": [1, 3, 5, 7],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(module, "LeRobotDatasetMetadata", FakeMetadata)
+    monkeypatch.setattr(module, "LeRobotDataset", FakeDataset)
+    monkeypatch.setattr(module, "_load_task_descriptions", lambda path: {})
+    monkeypatch.setattr(module, "_load_phase_labels", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        module.PhaseProbeDataset,
+        "_build_transform",
+        staticmethod(lambda **kwargs: (lambda sample: sample)),
+    )
+
+    train_ds, val_ds = module.build_datasets(
+        dataset_path="/tmp/fake",
+        episode_subset_path=str(subset_path),
+        val_episode_ratio=0.25,
+        seed=0,
+    )
+
+    assert len(train_ds._indices) == 6
     assert len(val_ds._indices) == 2
