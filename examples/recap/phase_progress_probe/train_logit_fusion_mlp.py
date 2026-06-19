@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Train a 201-bin logit-space fusion MLP using exported value distributions."""
+"""Train a 201-bin logit-space fusion MLP using oracle or predicted z/p."""
 
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
 from logit_fusion_model import LogitFusionMLP
+from model import PhaseProgressHead
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,45 @@ def _normalize_return(
     return (values - return_min) / ret_range - 1.0
 
 
+def _load_head(head_path: str, device: torch.device) -> PhaseProgressHead:
+    """Load a trained z/p head."""
+    ckpt = torch.load(head_path, map_location="cpu", weights_only=False)
+    config = ckpt["config"]
+    head = PhaseProgressHead(**config)
+    head.load_state_dict(ckpt["state_dict"])
+    head.to(device)
+    head.eval()
+    return head
+
+
+@torch.no_grad()
+def _predict_zp(
+    head: PhaseProgressHead,
+    features: torch.Tensor,
+    batch_size: int,
+    device: torch.device,
+) -> dict[str, torch.Tensor]:
+    """Run the trained z/p head over cached features."""
+    loader = DataLoader(TensorDataset(features), batch_size=batch_size, shuffle=False)
+    phase_probs: list[torch.Tensor] = []
+    phase_pred: list[torch.Tensor] = []
+    phase_progress: list[torch.Tensor] = []
+    global_progress: list[torch.Tensor] = []
+    for (batch,) in loader:
+        out = head(batch.to(device))
+        probs = F.softmax(out["phase_logits"], dim=-1).cpu()
+        phase_probs.append(probs)
+        phase_pred.append(probs.argmax(dim=-1))
+        phase_progress.append(out["phase_progress"].cpu())
+        global_progress.append(out["global_progress"].cpu())
+    return {
+        "phase_probs": torch.cat(phase_probs, dim=0),
+        "phase_pred": torch.cat(phase_pred, dim=0),
+        "phase_progress_pred": torch.cat(phase_progress, dim=0),
+        "global_progress_pred": torch.cat(global_progress, dim=0),
+    }
+
+
 def _split_by_episode(
     df: pd.DataFrame,
     val_episode_ratio: float,
@@ -82,7 +122,7 @@ def _split_by_episode(
     return train_df.reset_index(drop=True), val_df.reset_index(drop=True)
 
 
-def _prepare_dataframe(
+def _prepare_legacy_dataframe(
     parquet_path: Path,
     return_min: float,
     return_max: float,
@@ -110,7 +150,8 @@ def _prepare_dataframe(
 
     if zp_source != "oracle":
         raise ValueError(
-            f"Current logit fusion prototype only supports zp_source='oracle', got {zp_source}"
+            "Parquet-only logit fusion requires oracle z/p. "
+            "Use --features_dir and --head_checkpoint for predicted mode."
         )
 
     df["phase_input"] = df["phase"].astype(int)
@@ -119,8 +160,8 @@ def _prepare_dataframe(
     return df
 
 
-def _build_dataset(df: pd.DataFrame, num_phases: int) -> TensorDataset:
-    """Convert dataframe rows into a TensorDataset."""
+def _build_legacy_dataset(df: pd.DataFrame, num_phases: int) -> TensorDataset:
+    """Convert a parquet-only oracle dataframe into a TensorDataset."""
     logits = np.stack(df["value_logits_current"].to_numpy()).astype(np.float32)
     phase = torch.tensor(df["phase_input"].values, dtype=torch.long)
     phase_onehot = F.one_hot(phase, num_classes=num_phases).to(torch.float32)
@@ -132,6 +173,133 @@ def _build_dataset(df: pd.DataFrame, num_phases: int) -> TensorDataset:
     return TensorDataset(
         torch.tensor(logits, dtype=torch.float32),
         phase_onehot,
+        phase_progress,
+        global_progress,
+        raw_value,
+        return_norm,
+    )
+
+
+def _build_rows(
+    split_name: str,
+    feature_data: dict[str, torch.Tensor],
+    zpred: dict[str, torch.Tensor] | None,
+    adv_df: pd.DataFrame,
+    return_min: float,
+    return_max: float,
+    zp_source: str,
+) -> pd.DataFrame:
+    """Merge cached split metadata, optional predictions, and exported logits."""
+    rows = pd.DataFrame(
+        {
+            "row_index": np.arange(len(feature_data["episode_index"]), dtype=np.int64),
+            "episode_index": feature_data["episode_index"].numpy(),
+            "frame_index": feature_data["frame_index"].numpy(),
+            "phase_true": feature_data["phase"].numpy(),
+            "phase_progress_true": feature_data["phase_progress"].numpy(),
+            "global_progress_true": feature_data["global_progress"].numpy(),
+            "split": split_name,
+        }
+    )
+    if zpred is not None:
+        rows["phase_pred"] = zpred["phase_pred"].numpy()
+        rows["phase_progress_pred"] = zpred["phase_progress_pred"].numpy()
+        rows["global_progress_pred"] = zpred["global_progress_pred"].numpy()
+
+    merged = rows.merge(
+        adv_df,
+        on=["episode_index", "frame_index"],
+        how="inner",
+    )
+    merged["return_norm"] = _normalize_return(
+        merged["return"], return_min=return_min, return_max=return_max
+    )
+    if zp_source == "oracle":
+        merged["phase_progress_input"] = merged["phase_progress_true"]
+        merged["global_progress_input"] = merged["global_progress_true"]
+    elif zp_source == "predicted":
+        if zpred is None:
+            raise ValueError("Predicted z/p mode requires a trained head and cached features.")
+        merged["phase_progress_input"] = merged["phase_progress_pred"]
+        merged["global_progress_input"] = merged["global_progress_pred"]
+    else:
+        raise ValueError(f"Unsupported zp_source: {zp_source}")
+    return merged.sort_values(["episode_index", "frame_index"]).reset_index(drop=True)
+
+
+def _gather_feature_payload(
+    features_dir: Path,
+    head: PhaseProgressHead | None,
+    batch_size: int,
+    device: torch.device,
+    advantages_path: Path,
+    return_min: float,
+    return_max: float,
+    zp_source: str,
+    num_phases: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Prepare train/val payloads aligned to cached feature splits."""
+    adv_df = pd.read_parquet(advantages_path)
+    payloads: dict[str, dict[str, Any]] = {}
+
+    for split in ("train", "val"):
+        feature_data = torch.load(features_dir / f"{split}.pt", weights_only=True)
+        zpred = None
+        if head is not None:
+            zpred = _predict_zp(head, feature_data["features"], batch_size=batch_size, device=device)
+
+        merged = _build_rows(
+            split_name=split,
+            feature_data=feature_data,
+            zpred=zpred,
+            adv_df=adv_df,
+            return_min=return_min,
+            return_max=return_max,
+            zp_source=zp_source,
+        )
+        payloads[split] = {
+            "merged": merged,
+            "all_phase_probs": zpred["phase_probs"].float() if zpred is not None else None,
+            "all_phase_true_onehot": F.one_hot(
+                feature_data["phase"].long(), num_classes=num_phases
+            ).float(),
+            "all_phase_progress_pred": (
+                zpred["phase_progress_pred"].float() if zpred is not None else None
+            ),
+            "all_global_progress_pred": (
+                zpred["global_progress_pred"].float() if zpred is not None else None
+            ),
+            "all_phase_progress_true": feature_data["phase_progress"].float(),
+            "all_global_progress_true": feature_data["global_progress"].float(),
+        }
+
+    return payloads["train"], payloads["val"]
+
+
+def _build_dataset(payload: dict[str, Any], zp_source: str) -> TensorDataset:
+    """Create logit-fusion tensors aligned with merged feature rows."""
+    merged = payload["merged"]
+    row_index = torch.tensor(merged["row_index"].values, dtype=torch.long)
+    logits = np.stack(merged["value_logits_current"].to_numpy()).astype(np.float32)
+    raw_value = torch.tensor(merged["value_current"].values, dtype=torch.float32)
+    return_norm = torch.tensor(merged["return_norm"].values, dtype=torch.float32)
+
+    if zp_source == "oracle":
+        phase_repr = payload["all_phase_true_onehot"].index_select(0, row_index)
+        phase_progress = payload["all_phase_progress_true"].index_select(0, row_index)
+        global_progress = payload["all_global_progress_true"].index_select(0, row_index)
+    elif zp_source == "predicted":
+        if payload["all_phase_probs"] is None:
+            raise ValueError("Predicted z/p dataset requires predicted phase probabilities.")
+        phase_repr = payload["all_phase_probs"].index_select(0, row_index)
+        phase_progress = payload["all_phase_progress_pred"].index_select(0, row_index)
+        global_progress = payload["all_global_progress_pred"].index_select(0, row_index)
+    else:
+        raise ValueError(f"Unsupported zp_source: {zp_source}")
+
+    return TensorDataset(
+        torch.tensor(logits, dtype=torch.float32),
+        phase_repr,
         phase_progress,
         global_progress,
         raw_value,
@@ -304,6 +472,8 @@ def train(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--advantages_path", required=True)
+    parser.add_argument("--features_dir", default=None)
+    parser.add_argument("--head_checkpoint", default=None)
     parser.add_argument(
         "--output_dir",
         default="/workspace/results/phase_progress_probe/logit_fusion",
@@ -313,12 +483,13 @@ def main() -> None:
     parser.add_argument("--num_bins", type=int, default=201)
     parser.add_argument("--num_phases", type=int, default=5)
     parser.add_argument("--alpha", type=float, default=1.0)
-    parser.add_argument("--zp_source", choices=["oracle"], default="oracle")
+    parser.add_argument("--zp_source", choices=["oracle", "predicted"], default="oracle")
     parser.add_argument("--val_episode_ratio", type=float, default=0.2)
     parser.add_argument("--hidden_dim", type=int, default=256)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--depth", type=int, default=2)
     parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--predict_batch_size", type=int, default=1024)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--max_epochs", type=int, default=100)
@@ -345,33 +516,77 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("Using device: %s", device)
 
-    df = _prepare_dataframe(
-        parquet_path=Path(args.advantages_path),
-        return_min=args.return_min,
-        return_max=args.return_max,
-        zp_source=args.zp_source,
-    )
-    train_df, val_df = _split_by_episode(
-        df=df,
-        val_episode_ratio=args.val_episode_ratio,
-        seed=args.seed,
-    )
-    logger.info("Logit fusion rows: train=%d val=%d", len(train_df), len(val_df))
+    train_loader: DataLoader
+    val_loader: DataLoader
+    if args.zp_source == "predicted" and not args.head_checkpoint:
+        raise ValueError("Predicted z/p mode requires --head_checkpoint.")
+    if args.zp_source == "predicted" and not args.features_dir:
+        raise ValueError("Predicted z/p mode requires --features_dir.")
 
-    train_loader = DataLoader(
-        _build_dataset(train_df, num_phases=args.num_phases),
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=0,
-        pin_memory=True,
-    )
-    val_loader = DataLoader(
-        _build_dataset(val_df, num_phases=args.num_phases),
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=0,
-        pin_memory=True,
-    )
+    if args.features_dir is not None:
+        features_dir = Path(args.features_dir)
+        head = None
+        if args.head_checkpoint is not None:
+            logger.info("Loading z/p head from %s", args.head_checkpoint)
+            head = _load_head(args.head_checkpoint, device)
+        logger.info("Preparing logit fusion payloads from %s", features_dir)
+        train_payload, val_payload = _gather_feature_payload(
+            features_dir=features_dir,
+            head=head,
+            batch_size=args.predict_batch_size,
+            device=device,
+            advantages_path=Path(args.advantages_path),
+            return_min=args.return_min,
+            return_max=args.return_max,
+            zp_source=args.zp_source,
+            num_phases=args.num_phases,
+        )
+        logger.info(
+            "Logit fusion rows: train=%d val=%d",
+            len(train_payload["merged"]),
+            len(val_payload["merged"]),
+        )
+        train_loader = DataLoader(
+            _build_dataset(train_payload, zp_source=args.zp_source),
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=0,
+            pin_memory=True,
+        )
+        val_loader = DataLoader(
+            _build_dataset(val_payload, zp_source=args.zp_source),
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=0,
+            pin_memory=True,
+        )
+    else:
+        df = _prepare_legacy_dataframe(
+            parquet_path=Path(args.advantages_path),
+            return_min=args.return_min,
+            return_max=args.return_max,
+            zp_source=args.zp_source,
+        )
+        train_df, val_df = _split_by_episode(
+            df=df,
+            val_episode_ratio=args.val_episode_ratio,
+            seed=args.seed,
+        )
+        logger.info("Logit fusion rows: train=%d val=%d", len(train_df), len(val_df))
+        train_loader = DataLoader(
+            _build_legacy_dataset(train_df, num_phases=args.num_phases),
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=0,
+            pin_memory=True,
+        )
+        val_loader = DataLoader(
+            _build_legacy_dataset(val_df, num_phases=args.num_phases),
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=0,
+            pin_memory=True,
+        )
 
     atoms = torch.linspace(args.return_min, args.return_max, args.num_bins)
     atoms = (atoms - args.return_min) / (args.return_max - args.return_min) - 1.0
