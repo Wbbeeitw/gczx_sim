@@ -59,6 +59,11 @@ from rlinf.data.datasets.recap.utils import (
     load_returns_sidecar,
 )
 from rlinf.models.embodiment.value_model.modeling_critic import ValueCriticModel
+from examples.recap.process.episode_subset_utils import (
+    compute_frame_indices_for_episodes,
+    load_episode_subset_file,
+    resolve_episode_subset_for_dataset,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -400,6 +405,56 @@ def load_lerobot_dataset(
     return dataset, tasks, meta, returns_sidecar
 
 
+def _resolve_selected_frame_indices(
+    cfg: DictConfig,
+    dataset_path: Path,
+    dataset: LeRobotDataset,
+) -> list[int] | None:
+    """Resolve an optional episode subset into explicit global frame indices."""
+    episode_subset_path = cfg.advantage.get("episode_subset_path", None)
+    if not episode_subset_path:
+        return None
+
+    raw_spec = load_episode_subset_file(episode_subset_path)
+    subset_spec = resolve_episode_subset_for_dataset(raw_spec, dataset_path)
+    if subset_spec is None:
+        raise ValueError(
+            f"No episode subset entry found for dataset '{dataset_path.name}' in {episode_subset_path}"
+        )
+    if not subset_spec.episodes:
+        raise ValueError(f"Episode subset for dataset '{dataset_path.name}' is empty")
+
+    frame_indices = compute_frame_indices_for_episodes(
+        dataset.episode_data_index["to"],
+        subset_spec.episodes,
+    )
+    logger.info(
+        "Episode subset enabled for %s: %d episodes, %d frames",
+        dataset_path.name,
+        len(subset_spec.episodes),
+        len(frame_indices),
+    )
+    return frame_indices
+
+
+def _resolve_selected_frame_budget(
+    cfg: DictConfig,
+    dataset_path: Path,
+) -> int | None:
+    """Resolve optional frame budget from an episode subset JSON."""
+    episode_subset_path = cfg.advantage.get("episode_subset_path", None)
+    if not episode_subset_path:
+        return None
+
+    raw_spec = load_episode_subset_file(episode_subset_path)
+    subset_spec = resolve_episode_subset_for_dataset(raw_spec, dataset_path)
+    if subset_spec is None:
+        raise ValueError(
+            f"No episode subset entry found for dataset '{dataset_path.name}' in {episode_subset_path}"
+        )
+    return subset_spec.num_frames
+
+
 def build_obs(
     sample: dict,
     robot_type: str,
@@ -563,6 +618,7 @@ def compute_advantages_for_dataset(
     global_return_max: float = 0.0,
     global_pbar: tqdm | None = None,
     returns_sidecar: dict[int, dict[str, np.ndarray]] | None = None,
+    selected_indices: list[int] | None = None,
 ) -> pd.DataFrame:
     """Compute advantages for dataset (or shard in distributed mode).
 
@@ -605,20 +661,31 @@ def compute_advantages_for_dataset(
     gamma_powers = np.array([gamma**i for i in range(action_horizon)], dtype=np.float64)
 
     max_samples = cfg.advantage.get("max_samples", None)
-    total_samples = (
-        len(dataset) if max_samples is None else min(len(dataset), max_samples)
-    )
+    if selected_indices is None:
+        selected_indices = list(range(len(dataset)))
+        if max_samples is not None:
+            selected_indices = selected_indices[: min(len(selected_indices), max_samples)]
+    elif max_samples is not None:
+        selected_indices = selected_indices[: min(len(selected_indices), max_samples)]
+
+    total_samples = len(selected_indices)
 
     shard_start, shard_end = get_shard_indices(total_samples, rank, world_size)
     shard_size = shard_end - shard_start
 
-    # Extend range so idx + lookahead can be looked up for V(o_{t+N})
-    extended_end = (
-        shard_start
-        if shard_size == 0
-        else min(shard_end + action_horizon, len(dataset))
+    shard_selected_indices = selected_indices[shard_start:shard_end]
+    extended_global_indices = sorted(
+        {
+            idx
+            for gidx in shard_selected_indices
+            for idx in range(
+                gidx,
+                min(gidx + action_horizon + 1, len(dataset)),
+            )
+        }
     )
-    extended_size = extended_end - shard_start
+    extended_size = len(extended_global_indices)
+    global_to_local = {gidx: i for i, gidx in enumerate(extended_global_indices)}
 
     ep_ends = {}
     for ep_idx in range(len(dataset.episode_data_index["to"])):
@@ -637,10 +704,10 @@ def compute_advantages_for_dataset(
 
     if world_size > 1:
         logger.info(
-            f"  [Rank {rank}] Processing samples {shard_start} to {shard_end} ({shard_size} samples)"
+            f"  [Rank {rank}] Processing selected samples {shard_start} to {shard_end} ({shard_size} samples)"
         )
         logger.info(
-            f"  [Rank {rank}] Extended inference range: {shard_start} to {extended_end} ({extended_size} samples)"
+            f"  [Rank {rank}] Extended inference set size: {extended_size} samples"
         )
 
     num_dataloader_workers_per_gpu = cfg.advantage.get(
@@ -735,8 +802,8 @@ def compute_advantages_for_dataset(
         prepare_observation_cpu=worker_cpu_prep if cpu_prep_in_workers else None,
         returns_sidecar=returns_sidecar,
     )
-    extended_indices = list(range(shard_start, extended_end))
-    extended_dataset = torch.utils.data.Subset(advantage_dataset, extended_indices)
+    extended_dataset = torch.utils.data.Subset(advantage_dataset, extended_global_indices)
+    shard_selected_set = set(shard_selected_indices)
 
     dataloader = torch.utils.data.DataLoader(
         extended_dataset,
@@ -783,10 +850,12 @@ def compute_advantages_for_dataset(
             )
 
         for result, meta_info in zip(batch_results, meta_list):
-            local_idx = int(meta_info["global_idx"]) - shard_start
+            global_idx = int(meta_info["global_idx"])
+            local_idx = global_to_local.get(global_idx, -1)
             if local_idx < 0 or local_idx >= extended_size:
                 raise RuntimeError(
-                    f"local_idx out of range: {local_idx}, extended_size={extended_size}"
+                    "local_idx out of range for selected subset: "
+                    f"global_idx={global_idx}, local_idx={local_idx}, extended_size={extended_size}"
                 )
 
             v_values[local_idx] = float(result["value"])
@@ -850,7 +919,9 @@ def compute_advantages_for_dataset(
             _t_infer_total += _t_infer
 
             n_samples = sum(
-                1 for item in batch[1] if int(item["global_idx"]) < shard_end
+                1
+                for item in batch[1]
+                if int(item["global_idx"]) in shard_selected_set
             )
             pbar.update(n_samples)
             if rank == 0:
@@ -882,8 +953,8 @@ def compute_advantages_for_dataset(
             )
 
     # Phase 2: compute advantages using precomputed V(o_t) values
-    for i in range(shard_size):
-        gidx = shard_start + i
+    for gidx in shard_selected_indices:
+        i = global_to_local[gidx]
         ep_idx = int(meta_ep_idx[i])
         frame_idx = int(meta_frame_idx[i])
         true_return = float(meta_return[i])
@@ -899,10 +970,10 @@ def compute_advantages_for_dataset(
             v_next = 0.0
             next_local_idx = None
         else:
-            next_local_idx = next_gidx - shard_start
+            next_local_idx = global_to_local.get(next_gidx, -1)
             if next_local_idx < 0 or next_local_idx >= extended_size:
                 raise RuntimeError(
-                    "next_local_idx out of range: "
+                    "next_local_idx out of range for selected subset: "
                     f"{next_local_idx}, extended_size={extended_size}, "
                     f"gidx={gidx}, next_gidx={next_gidx}"
                 )
@@ -952,7 +1023,7 @@ def compute_advantages_for_dataset(
                 results["value_logits_next"].append(v_logits[next_local_idx].copy())
                 results["value_probs_next"].append(v_probs[next_local_idx].copy())
 
-        if (i + 1) % flush_every_samples == 0:
+        if len(results["episode_index"]) % flush_every_samples == 0:
             flush_results_to_disk()
 
     flush_results_to_disk()
@@ -1130,7 +1201,11 @@ def main(cfg: DictConfig) -> None:
         grand_total = 0
         for ds_cfg in cfg.data.train_data_paths:
             ds_meta = LeRobotDatasetMetadata(str(ds_cfg.dataset_path))
-            n = ds_meta.total_frames
+            selected_budget = _resolve_selected_frame_budget(
+                cfg,
+                Path(ds_cfg.dataset_path),
+            )
+            n = selected_budget if selected_budget is not None else ds_meta.total_frames
             if max_samples is not None:
                 n = min(n, max_samples)
             shard_start, shard_end = get_shard_indices(n, rank, world_size)
@@ -1168,6 +1243,7 @@ def main(cfg: DictConfig) -> None:
             dataset, tasks, meta, returns_sidecar = load_lerobot_dataset(
                 ds_path, returns_tag=returns_tag
             )
+            selected_indices = _resolve_selected_frame_indices(cfg, ds_path, dataset)
 
             local_df = compute_advantages_for_dataset(
                 value_model=value_model,
@@ -1182,6 +1258,7 @@ def main(cfg: DictConfig) -> None:
                 global_return_max=global_return_max,
                 global_pbar=global_pbar,
                 returns_sidecar=returns_sidecar,
+                selected_indices=selected_indices,
             )
 
             if world_size > 1:
