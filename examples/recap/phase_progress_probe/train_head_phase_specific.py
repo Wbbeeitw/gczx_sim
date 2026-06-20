@@ -59,6 +59,37 @@ def _gather_phase_progress(
     return progress_all.gather(1, phase_true.unsqueeze(1)).squeeze(1)
 
 
+def _is_better_checkpoint(
+    metrics: dict[str, float],
+    best_metrics: dict[str, float] | None,
+    min_delta: float,
+) -> bool:
+    """Select the best checkpoint using late-phase-aware metrics."""
+    if best_metrics is None:
+        return True
+
+    comparisons = [
+        ("late_phase_acc", True),
+        ("macro_phase_acc", True),
+        ("progress_mae", False),
+        ("loss", False),
+    ]
+    for key, higher_is_better in comparisons:
+        current = float(metrics[key])
+        best = float(best_metrics[key])
+        if higher_is_better:
+            if current > best + min_delta:
+                return True
+            if current < best - min_delta:
+                return False
+        else:
+            if current < best - min_delta:
+                return True
+            if current > best + min_delta:
+                return False
+    return False
+
+
 def _compute_metrics(
     phase_logits: torch.Tensor,
     phase_progress_pred: torch.Tensor,
@@ -216,6 +247,7 @@ def train(
 
     best_val_loss = float("inf")
     best_epoch = -1
+    best_val_metrics: dict[str, float] | None = None
     best_state_dict: dict[str, torch.Tensor] | None = None
     patience_counter = 0
     history: list[dict[str, Any]] = []
@@ -289,9 +321,14 @@ def train(
             }
         )
 
-        if val_metrics["loss"] < best_val_loss - args.early_stop_delta:
+        if _is_better_checkpoint(
+            metrics=val_metrics,
+            best_metrics=best_val_metrics,
+            min_delta=args.early_stop_delta,
+        ):
             best_val_loss = val_metrics["loss"]
             best_epoch = epoch
+            best_val_metrics = {k: float(v) for k, v in val_metrics.items()}
             best_state_dict = {
                 k: v.detach().cpu().clone() for k, v in head.state_dict().items()
             }
@@ -309,6 +346,7 @@ def train(
     return {
         "best_epoch": best_epoch,
         "best_val_loss": best_val_loss,
+        "best_val_metrics": best_val_metrics,
         "history": history,
     }
 

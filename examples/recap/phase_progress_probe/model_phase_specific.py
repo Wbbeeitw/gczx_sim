@@ -89,6 +89,7 @@ class PhaseSpecificProgressHead(nn.Module):
         x = self.trunk(features)
         phase_logits = self.phase_head(x)
         phase_probs = F.softmax(phase_logits, dim=-1)
+        phase_pred = phase_logits.argmax(dim=-1)
 
         progress_all = torch.cat([head(x) for head in self.progress_heads], dim=-1)
         progress_all = progress_all.clamp(0.0, 1.0)
@@ -97,13 +98,22 @@ class PhaseSpecificProgressHead(nn.Module):
             self.num_phases, dtype=progress_all.dtype, device=progress_all.device
         )
         expected_phase = (phase_probs * phase_indices).sum(dim=-1)
-        phase_progress = (phase_probs * progress_all).sum(dim=-1)
-        global_progress = (expected_phase + phase_progress) / self.num_phases
+        phase_progress_soft = (phase_probs * progress_all).sum(dim=-1)
+        phase_progress_hard = progress_all.gather(1, phase_pred.unsqueeze(1)).squeeze(1)
+        global_progress_soft = (expected_phase + phase_progress_soft) / self.num_phases
+        global_progress_hard = (
+            phase_pred.to(progress_all.dtype) + phase_progress_hard
+        ) / self.num_phases
 
         return {
             "phase_logits": phase_logits,
             "phase_probs": phase_probs,
+            "phase_pred": phase_pred,
             "phase_progress_all": progress_all,
-            "phase_progress": phase_progress,
-            "global_progress": global_progress,
+            "phase_progress": phase_progress_soft,
+            "phase_progress_soft": phase_progress_soft,
+            "phase_progress_hard": phase_progress_hard,
+            "global_progress": global_progress_soft,
+            "global_progress_soft": global_progress_soft,
+            "global_progress_hard": global_progress_hard,
         }

@@ -84,13 +84,17 @@ def _predict_all(
     )
 
     phase_preds: list[torch.Tensor] = []
-    progress_preds: list[torch.Tensor] = []
-    global_preds: list[torch.Tensor] = []
+    progress_preds_soft: list[torch.Tensor] = []
+    progress_preds_hard: list[torch.Tensor] = []
+    global_preds_soft: list[torch.Tensor] = []
+    global_preds_hard: list[torch.Tensor] = []
     for (batch,) in loader:
         out = head(batch.to(device))
         phase_preds.append(out["phase_logits"].argmax(dim=-1).cpu())
-        progress_preds.append(out["phase_progress"].cpu())
-        global_preds.append(out["global_progress"].cpu())
+        progress_preds_soft.append(out["phase_progress_soft"].cpu())
+        progress_preds_hard.append(out["phase_progress_hard"].cpu())
+        global_preds_soft.append(out["global_progress_soft"].cpu())
+        global_preds_hard.append(out["global_progress_hard"].cpu())
 
     return pd.DataFrame(
         {
@@ -101,8 +105,12 @@ def _predict_all(
             "phase_progress_true": all_phase_progress.numpy(),
             "global_progress_true": all_global_progress.numpy(),
             "phase_pred": torch.cat(phase_preds).numpy(),
-            "phase_progress_pred": torch.cat(progress_preds).numpy(),
-            "global_progress_pred": torch.cat(global_preds).numpy(),
+            "phase_progress_pred": torch.cat(progress_preds_soft).numpy(),
+            "phase_progress_pred_soft": torch.cat(progress_preds_soft).numpy(),
+            "phase_progress_pred_hard": torch.cat(progress_preds_hard).numpy(),
+            "global_progress_pred": torch.cat(global_preds_soft).numpy(),
+            "global_progress_pred_soft": torch.cat(global_preds_soft).numpy(),
+            "global_progress_pred_hard": torch.cat(global_preds_hard).numpy(),
         }
     )
 
@@ -139,18 +147,39 @@ def _evaluate_correction(
     results["mse_oracle"] = float(mse_oracle)
     results["oracle_improvement_pct"] = float((1 - mse_oracle / mse_raw) * 100)
 
-    df_pred = _apply_correction(
+    df_pred_soft = _apply_correction(
         df,
         phase_col="phase_pred",
-        progress_col="phase_progress_pred",
+        progress_col="phase_progress_pred_soft",
         phase_next_col="phase_pred_next",
-        progress_next_col="phase_progress_pred_next",
+        progress_next_col="phase_progress_pred_soft_next",
     )
-    mse_pred = ((df_pred["value_current_corr"] - df_pred["return_norm"]) ** 2).mean()
-    results["mse_predicted"] = float(mse_pred)
-    results["predicted_improvement_pct"] = float((1 - mse_pred / mse_raw) * 100)
+    mse_pred_soft = (
+        (df_pred_soft["value_current_corr"] - df_pred_soft["return_norm"]) ** 2
+    ).mean()
+    results["mse_predicted"] = float(mse_pred_soft)
+    results["predicted_improvement_pct"] = float((1 - mse_pred_soft / mse_raw) * 100)
+    results["mse_predicted_soft"] = float(mse_pred_soft)
+    results["predicted_improvement_pct_soft"] = float(
+        (1 - mse_pred_soft / mse_raw) * 100
+    )
 
-    return results, df_pred
+    df_pred_hard = _apply_correction(
+        df,
+        phase_col="phase_pred",
+        progress_col="phase_progress_pred_hard",
+        phase_next_col="phase_pred_next",
+        progress_next_col="phase_progress_pred_hard_next",
+    )
+    mse_pred_hard = (
+        (df_pred_hard["value_current_corr"] - df_pred_hard["return_norm"]) ** 2
+    ).mean()
+    results["mse_predicted_hard"] = float(mse_pred_hard)
+    results["predicted_improvement_pct_hard"] = float(
+        (1 - mse_pred_hard / mse_raw) * 100
+    )
+
+    return results, df_pred_soft, df_pred_hard
 
 
 def main() -> None:
@@ -225,7 +254,7 @@ def main() -> None:
         )
         logger.info("Merged %d rows with advantages", len(merged))
 
-        correction_results, corrected_df = _evaluate_correction(
+        correction_results, corrected_df_soft, corrected_df_hard = _evaluate_correction(
             merged,
             return_min=args.return_min,
             return_max=args.return_max,
@@ -240,14 +269,23 @@ def main() -> None:
             correction_results["oracle_improvement_pct"],
         )
         logger.info(
-            "  predicted:  %.6f (%.1f%% improvement)",
+            "  predicted_soft: %.6f (%.1f%% improvement)",
             correction_results["mse_predicted"],
             correction_results["predicted_improvement_pct"],
         )
+        logger.info(
+            "  predicted_hard: %.6f (%.1f%% improvement)",
+            correction_results["mse_predicted_hard"],
+            correction_results["predicted_improvement_pct_hard"],
+        )
 
-        corrected_path = output_dir / "advantages_predicted_corrected.parquet"
-        corrected_df.to_parquet(corrected_path, index=False)
-        logger.info("Saved corrected advantages to %s", corrected_path)
+        corrected_path_soft = output_dir / "advantages_predicted_corrected_soft.parquet"
+        corrected_df_soft.to_parquet(corrected_path_soft, index=False)
+        logger.info("Saved soft corrected advantages to %s", corrected_path_soft)
+
+        corrected_path_hard = output_dir / "advantages_predicted_corrected_hard.parquet"
+        corrected_df_hard.to_parquet(corrected_path_hard, index=False)
+        logger.info("Saved hard corrected advantages to %s", corrected_path_hard)
 
     with open(output_dir / "report.json", "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, default=float)
