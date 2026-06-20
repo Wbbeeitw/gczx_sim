@@ -34,6 +34,9 @@ data:
   num_workers: 8
   # Raw advantage tag by default; override for corrected run
   advantage_tag: "base_train_5k_N10_q30_full"
+  episode_subset_path: null
+  episode_split_path: null
+  episode_split_name: train
 
   balance_dataset_weights: true
 

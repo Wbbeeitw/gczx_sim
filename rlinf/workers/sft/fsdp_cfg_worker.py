@@ -29,6 +29,11 @@ import torch
 from omegaconf import DictConfig
 from torch.utils._pytree import tree_map
 
+from examples.recap.process.episode_subset_utils import (
+    load_episode_subset_file,
+    resolve_episode_split_for_dataset,
+    resolve_episode_subset_for_dataset,
+)
 from rlinf.data.datasets.recap.cfg_model import (
     AdvantagePreservingDataset,
     CFGDataLoaderImpl,
@@ -132,6 +137,78 @@ class FSDPCfgWorker(FSDPSftWorker):
         )
         return lookup
 
+    def _resolve_dataset_episodes(
+        self,
+        data_cfg: DictConfig | dict[str, Any],
+        ds_config: DictConfig | dict[str, Any],
+        data_path: str,
+    ) -> list[int] | None:
+        """Resolve which episode ids this dataset should expose.
+
+        Priority:
+        1. Per-dataset ``episodes`` in ``data.train_data_paths``.
+        2. Global ``data.episode_split_path`` + ``data.episode_split_name``.
+        3. Global ``data.episode_subset_path``.
+        """
+        explicit_episodes = ds_config.get("episodes")
+        if explicit_episodes is not None:
+            episodes = sorted(set(int(ep) for ep in explicit_episodes))
+            if self._rank == 0:
+                self.log_info(
+                    f"Using explicit episodes override for {Path(data_path).name}: "
+                    f"{len(episodes)} episodes"
+                )
+            return episodes
+
+        split_path = data_cfg.get("episode_split_path")
+        if split_path:
+            raw_spec = load_episode_subset_file(split_path)
+            split_spec = resolve_episode_split_for_dataset(raw_spec, data_path)
+            if split_spec is None:
+                raise ValueError(
+                    f"No episode split entry found for dataset "
+                    f"'{Path(data_path).name}' in {split_path}"
+                )
+
+            split_name = str(data_cfg.get("episode_split_name", "train")).lower()
+            if split_name == "train":
+                episodes = split_spec.train_episodes
+            elif split_name == "val":
+                episodes = split_spec.val_episodes
+            elif split_name == "selected":
+                episodes = split_spec.selected_episodes
+            else:
+                raise ValueError(
+                    "data.episode_split_name must be one of "
+                    f"['train', 'val', 'selected'], got {split_name!r}"
+                )
+
+            if self._rank == 0:
+                self.log_info(
+                    f"Using episode split '{split_name}' for {Path(data_path).name}: "
+                    f"{len(episodes)} episodes from {split_path}"
+                )
+            return episodes
+
+        subset_path = data_cfg.get("episode_subset_path")
+        if subset_path:
+            raw_spec = load_episode_subset_file(subset_path)
+            subset_spec = resolve_episode_subset_for_dataset(raw_spec, data_path)
+            if subset_spec is None:
+                raise ValueError(
+                    f"No episode subset entry found for dataset "
+                    f"'{Path(data_path).name}' in {subset_path}"
+                )
+            episodes = subset_spec.episodes
+            if self._rank == 0:
+                self.log_info(
+                    f"Using episode subset for {Path(data_path).name}: "
+                    f"{len(episodes)} episodes from {subset_path}"
+                )
+            return episodes
+
+        return None
+
     def build_dataloader(self):
         """Build CFG dataloader with advantage-weighted sampling across datasets."""
         import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
@@ -168,7 +245,7 @@ class FSDPCfgWorker(FSDPSftWorker):
         for ds_config in datasets_config:
             data_path = ds_config["dataset_path"]
             dataset_root = resolve_lerobot_dataset_root(data_path)
-            episodes = ds_config.get("episodes")
+            episodes = self._resolve_dataset_episodes(data_cfg, ds_config, data_path)
             weight = ds_config.get("weight", 1.0)
 
             dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(

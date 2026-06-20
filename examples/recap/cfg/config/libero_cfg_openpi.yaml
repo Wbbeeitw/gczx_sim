@@ -34,6 +34,10 @@ data:
   # Tag: loads meta/advantages_{tag}.parquet from each dataset
   # If null, loads meta/advantages.parquet (legacy format)
   advantage_tag: null
+  # Optional episode filters to keep CFG training aligned with probe splits.
+  episode_subset_path: null
+  episode_split_path: null
+  episode_split_name: train
 
   # Balance sampling weights by dataset length
   balance_dataset_weights: true
