@@ -129,6 +129,63 @@ METHOD_SPECS: tuple[MethodSpec, ...] = (
 )
 
 
+METHOD_KEYS: tuple[str, ...] = tuple(spec.key for spec in METHOD_SPECS)
+
+
+def _replace_cli_arg(
+    cli_args: tuple[str, ...],
+    flag: str,
+    value: str | int | float,
+) -> tuple[str, ...]:
+    """Replace a flag value inside a flat CLI arg tuple."""
+    args = list(cli_args)
+    try:
+        idx = args.index(flag)
+    except ValueError:
+        args.extend([flag, str(value)])
+        return tuple(args)
+
+    if idx + 1 >= len(args):
+        raise ValueError(f"Flag {flag} missing value in CLI args: {cli_args}")
+    args[idx + 1] = str(value)
+    return tuple(args)
+
+
+def _build_method_specs(
+    selected_methods: tuple[str, ...],
+    shared_mlp_hidden_dim: int,
+    shared_mlp_trunk_depth: int,
+) -> tuple[MethodSpec, ...]:
+    """Build method specs with optional per-method overrides."""
+    specs: list[MethodSpec] = []
+    selected = set(selected_methods)
+    for spec in METHOD_SPECS:
+        if spec.key not in selected:
+            continue
+
+        if spec.key == "shared_mlp_two_heads":
+            train_extra_args = _replace_cli_arg(
+                spec.train_extra_args,
+                "--hidden_dim",
+                shared_mlp_hidden_dim,
+            )
+            train_extra_args = _replace_cli_arg(
+                train_extra_args,
+                "--trunk_depth",
+                shared_mlp_trunk_depth,
+            )
+            spec = MethodSpec(
+                key=spec.key,
+                display_name=spec.display_name,
+                train_script=spec.train_script,
+                analyze_script=spec.analyze_script,
+                train_extra_args=train_extra_args,
+            )
+
+        specs.append(spec)
+    return tuple(specs)
+
+
 def _run_command(
     cmd: list[str],
     cwd: Path,
@@ -229,6 +286,25 @@ def main() -> None:
     parser.add_argument("--max_epochs", type=int, default=50)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
+        "--methods",
+        nargs="+",
+        choices=METHOD_KEYS,
+        default=list(METHOD_KEYS),
+        help="Subset of learned baselines to run.",
+    )
+    parser.add_argument(
+        "--shared_mlp_hidden_dim",
+        type=int,
+        default=640,
+        help="Hidden dim override for shared_mlp_two_heads.",
+    )
+    parser.add_argument(
+        "--shared_mlp_trunk_depth",
+        type=int,
+        default=6,
+        help="Trunk depth override for shared_mlp_two_heads.",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Rerun all steps even if output artifacts already exist.",
@@ -243,6 +319,11 @@ def main() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     script_dir = Path(__file__).resolve().parent
     python_bin = sys.executable
+    method_specs = _build_method_specs(
+        tuple(args.methods),
+        shared_mlp_hidden_dim=args.shared_mlp_hidden_dim,
+        shared_mlp_trunk_depth=args.shared_mlp_trunk_depth,
+    )
 
     output_root = Path(args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -256,12 +337,13 @@ def main() -> None:
         f.write(f"features_dir={args.features_dir}\n")
         f.write(f"advantages_path={args.advantages_path}\n")
         f.write(f"output_root={args.output_root}\n")
+        f.write(f"methods={','.join(args.methods)}\n")
         f.write("=" * 80 + "\n")
 
     learned_rows: list[dict[str, Any]] = []
     raw_mse: float | None = None
 
-    for spec in METHOD_SPECS:
+    for spec in method_specs:
         method_root = output_root / spec.key
         train_dir = method_root / "train"
         analysis_dir = method_root / "analysis"
@@ -405,9 +487,40 @@ def main() -> None:
         "raw_mse": raw_mse,
         "methods": summary_rows,
         "matched_param_note": {
-            "shared_mlp_two_heads": "hidden_dim=640, trunk_depth=6",
-            "temporal_phase_prior": "hidden_dim=256, stage_layers=2, progress_layers=2, num_heads=4, ffn_dim=512, stage_embedding_dim=32",
-            "temporal_z_mlp_p": "hidden_dim=336, num_layers=2, num_heads=6, ffn_dim=672, stage_embedding_dim=64, progress_hidden_dim=336, progress_depth=3",
+            spec.key: note
+            for spec, note in (
+                (
+                    MethodSpec(
+                        key="shared_mlp_two_heads",
+                        display_name="",
+                        train_script="",
+                        analyze_script="",
+                        train_extra_args=(),
+                    ),
+                    f"hidden_dim={args.shared_mlp_hidden_dim}, trunk_depth={args.shared_mlp_trunk_depth}",
+                ),
+                (
+                    MethodSpec(
+                        key="temporal_phase_prior",
+                        display_name="",
+                        train_script="",
+                        analyze_script="",
+                        train_extra_args=(),
+                    ),
+                    "hidden_dim=256, stage_layers=2, progress_layers=2, num_heads=4, ffn_dim=512, stage_embedding_dim=32",
+                ),
+                (
+                    MethodSpec(
+                        key="temporal_z_mlp_p",
+                        display_name="",
+                        train_script="",
+                        analyze_script="",
+                        train_extra_args=(),
+                    ),
+                    "hidden_dim=336, num_layers=2, num_heads=6, ffn_dim=672, stage_embedding_dim=64, progress_hidden_dim=336, progress_depth=3",
+                ),
+            )
+            if spec.key in {method.key for method in method_specs}
         },
     }
 
