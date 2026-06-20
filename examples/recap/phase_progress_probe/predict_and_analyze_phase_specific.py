@@ -28,7 +28,6 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from model_phase_specific import PhaseSpecificProgressHead
 from predict_and_analyze import (
-    _add_next_frame_predictions,
     _apply_correction,
     _compute_prediction_metrics,
 )
@@ -115,6 +114,58 @@ def _predict_all(
     )
 
 
+def _add_next_frame_predictions_phase_specific(df: pd.DataFrame) -> pd.DataFrame:
+    """Add next-frame columns for both soft and hard progress variants."""
+    ep_lengths = df.groupby("episode_index")["frame_index"].max() + 1
+    df = df.copy()
+    df["episode_length"] = df["episode_index"].map(ep_lengths)
+    df["next_frame_index"] = (df["frame_index"] + 1).clip(
+        upper=df["episode_length"] - 1
+    )
+
+    next_cols = [
+        "episode_index",
+        "frame_index",
+        "phase_pred",
+        "phase_progress_pred",
+        "phase_progress_pred_soft",
+        "phase_progress_pred_hard",
+        "phase_true",
+        "phase_progress_true",
+    ]
+    next_df = df[next_cols].rename(
+        columns={
+            "frame_index": "next_frame_index",
+            "phase_pred": "phase_pred_next",
+            "phase_progress_pred": "phase_progress_pred_next",
+            "phase_progress_pred_soft": "phase_progress_pred_soft_next",
+            "phase_progress_pred_hard": "phase_progress_pred_hard_next",
+            "phase_true": "phase_true_next",
+            "phase_progress_true": "phase_progress_true_next",
+        }
+    )
+    df = df.merge(
+        next_df,
+        on=["episode_index", "next_frame_index"],
+        how="left",
+    )
+
+    fill_map = {
+        "phase_pred_next": "phase_pred",
+        "phase_progress_pred_next": "phase_progress_pred",
+        "phase_progress_pred_soft_next": "phase_progress_pred_soft",
+        "phase_progress_pred_hard_next": "phase_progress_pred_hard",
+        "phase_true_next": "phase_true",
+        "phase_progress_true_next": "phase_progress_true",
+    }
+    for col, base_col in fill_map.items():
+        df[col] = df[col].fillna(df[base_col])
+
+    df["phase_pred_next"] = df["phase_pred_next"].astype(int)
+    df["phase_true_next"] = df["phase_true_next"].astype(int)
+    return df
+
+
 def _evaluate_correction(
     df: pd.DataFrame,
     return_min: float,
@@ -128,7 +179,7 @@ def _evaluate_correction(
 
     df = df.copy()
     df["return_norm"] = normalize_return(df["return"])
-    df = _add_next_frame_predictions(df)
+    df = _add_next_frame_predictions_phase_specific(df)
 
     results: dict[str, Any] = {}
     mse_raw = ((df["value_current"] - df["return_norm"]) ** 2).mean()
