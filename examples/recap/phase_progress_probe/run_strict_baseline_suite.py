@@ -38,6 +38,7 @@ import json
 import logging
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -131,16 +132,45 @@ METHOD_SPECS: tuple[MethodSpec, ...] = (
 def _run_command(
     cmd: list[str],
     cwd: Path,
+    method_label: str,
+    stage_label: str,
+    log_path: Path,
     skip_if_exists: Path | None = None,
     force: bool = False,
 ) -> None:
-    """Run a subprocess command unless the target artifact already exists."""
+    """Run a subprocess command and append prefixed output to the suite log."""
+    prefix = f"[{method_label}][{stage_label}]"
     if skip_if_exists is not None and skip_if_exists.exists() and not force:
-        logger.info("Skip existing artifact: %s", skip_if_exists)
+        logger.info("%s Skip existing artifact: %s", prefix, skip_if_exists)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"{prefix} Skip existing artifact: {skip_if_exists}\n")
         return
 
-    logger.info("Running: %s", " ".join(cmd))
-    subprocess.run(cmd, cwd=cwd, check=True)
+    logger.info("%s Running: %s", prefix, " ".join(cmd))
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(f"{prefix} Running: {' '.join(cmd)}\n")
+        f.flush()
+
+        process = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        assert process.stdout is not None
+        for line in process.stdout:
+            line = line.rstrip("\n")
+            logger.info("%s %s", prefix, line)
+            f.write(f"{prefix} {line}\n")
+        ret = process.wait()
+        f.write(f"{prefix} Exit code: {ret}\n")
+        f.flush()
+        if ret != 0:
+            raise subprocess.CalledProcessError(ret, cmd)
 
 
 def _count_checkpoint_params(head_path: Path) -> int:
@@ -218,6 +248,15 @@ def main() -> None:
     output_root.mkdir(parents=True, exist_ok=True)
     with open(output_root / "suite_args.json", "w", encoding="utf-8") as f:
         json.dump(vars(args), f, indent=2, default=float)
+    suite_log_path = output_root / "suite.log"
+    with open(suite_log_path, "a", encoding="utf-8") as f:
+        f.write("\n")
+        f.write("=" * 80 + "\n")
+        f.write(f"Baseline suite start: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"features_dir={args.features_dir}\n")
+        f.write(f"advantages_path={args.advantages_path}\n")
+        f.write(f"output_root={args.output_root}\n")
+        f.write("=" * 80 + "\n")
 
     learned_rows: list[dict[str, Any]] = []
     raw_mse: float | None = None
@@ -253,6 +292,9 @@ def main() -> None:
         _run_command(
             train_cmd,
             cwd=repo_root,
+            method_label=spec.key,
+            stage_label="train",
+            log_path=suite_log_path,
             skip_if_exists=train_dir / "head.pt",
             force=args.force,
         )
@@ -275,6 +317,9 @@ def main() -> None:
         _run_command(
             analyze_cmd,
             cwd=repo_root,
+            method_label=spec.key,
+            stage_label="predict",
+            log_path=suite_log_path,
             skip_if_exists=analysis_dir / "phase_predictions.parquet",
             force=args.force,
         )
@@ -296,6 +341,9 @@ def main() -> None:
         _run_command(
             strict_cmd,
             cwd=repo_root,
+            method_label=spec.key,
+            stage_label="strict_eval",
+            log_path=suite_log_path,
             skip_if_exists=strict_dir / "report.json",
             force=args.force,
         )
@@ -371,6 +419,11 @@ def main() -> None:
         f.write(markdown_table + "\n")
 
     logger.info("=== Strict Baseline Summary ===")
+    with open(suite_log_path, "a", encoding="utf-8") as f:
+        f.write("\n")
+        f.write("=" * 80 + "\n")
+        f.write("FINAL SUMMARY\n")
+        f.write("=" * 80 + "\n")
     for row in summary_rows:
         logger.info(
             "%s | params=%s | val_mse=%.6f | improvement=%.1f%% | phase_acc=%s | progress_mae=%s",
@@ -381,8 +434,21 @@ def main() -> None:
             row["phase_acc"],
             row["progress_mae"],
         )
+        with open(suite_log_path, "a", encoding="utf-8") as f:
+            f.write(
+                f'{row["method"]} | params={row["params"]} | '
+                f'val_mse={row["val_mse"]:.6f} | '
+                f'improvement={row["improvement_pct"]:.1f}% | '
+                f'phase_acc={row["phase_acc"]} | '
+                f'progress_mae={row["progress_mae"]}\n'
+            )
     logger.info("Saved summary JSON to %s", output_root / "baseline_summary.json")
     logger.info("Saved summary Markdown to %s", output_root / "baseline_summary.md")
+    logger.info("Saved suite log to %s", suite_log_path)
+    with open(suite_log_path, "a", encoding="utf-8") as f:
+        f.write(f"summary_json={output_root / 'baseline_summary.json'}\n")
+        f.write(f"summary_md={output_root / 'baseline_summary.md'}\n")
+        f.write(f"suite_log={suite_log_path}\n")
 
 
 if __name__ == "__main__":
