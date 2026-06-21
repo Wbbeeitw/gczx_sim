@@ -183,6 +183,9 @@ class FusionTrainer:
             ) = self._unpack_batch(batch)
 
             raw_logits = raw_logits.to(self.device)
+            phase_probs = phase_probs.to(self.device)
+            phase_progress = phase_progress.to(self.device)
+            global_progress = global_progress.to(self.device)
             return_norm = return_norm.to(self.device)
 
             self._optimizer.zero_grad()
@@ -225,6 +228,9 @@ class FusionTrainer:
             ) = self._unpack_batch(batch)
 
             raw_logits = raw_logits.to(self.device)
+            phase_probs = phase_probs.to(self.device)
+            phase_progress = phase_progress.to(self.device)
+            global_progress = global_progress.to(self.device)
             return_norm = return_norm.to(self.device)
 
             head_out = self._forward_head(
