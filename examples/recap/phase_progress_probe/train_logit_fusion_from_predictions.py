@@ -36,6 +36,25 @@ from logit_fusion_model import LogitFusionMLP
 logger = logging.getLogger(__name__)
 
 
+def _format_missing_advantages_columns_error(
+    missing_adv: set[str],
+    advantages_path: Path,
+) -> str:
+    """Build an actionable error for missing raw critic distribution columns."""
+    missing_list = sorted(missing_adv)
+    message = (
+        f"Advantages parquet missing columns {missing_list}: {advantages_path}"
+    )
+    if "value_logits_current" in missing_adv:
+        message += (
+            ". This fusion trainer requires 201-bin raw critic logits. "
+            "Re-run compute_advantages.py with "
+            "`advantage.save_value_distribution=true` and use the regenerated "
+            "advantages parquet."
+        )
+    return message
+
+
 def _build_plateau_scheduler(
     optimizer: torch.optim.Optimizer,
     lr_patience: int,
@@ -101,7 +120,10 @@ def _load_payload(
     missing_adv = required_adv_cols - set(adv_df.columns)
     if missing_adv:
         raise ValueError(
-            f"Advantages parquet missing columns {sorted(missing_adv)}: {advantages_path}"
+            _format_missing_advantages_columns_error(
+                missing_adv,
+                advantages_path,
+            )
         )
 
     merged = adv_df.merge(

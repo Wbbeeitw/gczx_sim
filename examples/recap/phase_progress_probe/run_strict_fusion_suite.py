@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+import pyarrow.parquet as pq
 import torch
 
 logger = logging.getLogger(__name__)
@@ -221,6 +223,32 @@ def _load_json(path: Path) -> dict[str, Any]:
         return json.load(f)
 
 
+def _preflight_check_advantages(advantages_path: Path) -> None:
+    """Fail fast if the advantages parquet lacks raw value logits for fusion."""
+    if not advantages_path.exists():
+        raise FileNotFoundError(f"Advantages parquet not found: {advantages_path}")
+
+    schema_cols = set(pq.read_schema(advantages_path).names)
+    required = {
+        "episode_index",
+        "frame_index",
+        "return",
+        "value_current",
+        "value_logits_current",
+    }
+    missing = required - schema_cols
+    if missing:
+        missing_list = sorted(missing)
+        message = (
+            f"Advantages parquet missing columns {missing_list}: {advantages_path}. "
+            "Strict fusion suite requires 201-bin raw critic logits. "
+            "Re-run compute_advantages.py with "
+            "`advantage.save_value_distribution=true` and point this suite to the "
+            "regenerated advantages parquet."
+        )
+        raise ValueError(message)
+
+
 def _format_markdown_table(rows: list[dict[str, Any]]) -> str:
     headers = [
         "Method",
@@ -304,6 +332,7 @@ def main() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     script_dir = Path(__file__).resolve().parent
     python_bin = sys.executable
+    advantages_path = Path(args.advantages_path)
     method_specs = _build_method_specs(
         tuple(args.methods),
         shared_mlp_hidden_dim=args.shared_mlp_hidden_dim,
@@ -325,6 +354,8 @@ def main() -> None:
         f.write(f"output_root={args.output_root}\n")
         f.write(f"methods={','.join(args.methods)}\n")
         f.write("=" * 80 + "\n")
+
+    _preflight_check_advantages(advantages_path)
 
     learned_rows: list[dict[str, Any]] = []
     raw_mse: float | None = None
@@ -401,7 +432,7 @@ def main() -> None:
             "--predictions_path",
             str(analysis_dir / "phase_predictions.parquet"),
             "--advantages_path",
-            args.advantages_path,
+            str(advantages_path),
             "--output_dir",
             str(fusion_dir),
             "--return_min",
@@ -439,7 +470,7 @@ def main() -> None:
             "--predictions_path",
             str(analysis_dir / "phase_predictions.parquet"),
             "--advantages_path",
-            args.advantages_path,
+            str(advantages_path),
             "--fusion_checkpoint",
             str(fusion_dir / "logit_fusion.pt"),
             "--output_dir",
