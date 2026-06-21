@@ -13,13 +13,16 @@ num_bins: 201
 return_min: -700.0
 return_max: 0.0
 
-head_hidden_dim: 256
+head_hidden_dim: 640
 head_dropout: 0.1
-head_trunk_depth: 1
+head_trunk_depth: 6
 head_window_size: 5
 head_num_layers: 2
 head_num_heads: 4
 head_ffn_dim: 512
+head_stage_embedding_dim: 32
+head_progress_hidden_dim: 256
+head_progress_depth: 2
 
 fusion_hidden_dim: 256
 fusion_depth: 2
@@ -37,3 +40,7 @@ fusion_early_stop_patience: 20
 weight_decay: 1e-4
 device: cuda
 seed: 42
+
+# Shared MLP specific extras used by the original strict suite.
+label_smoothing: 0.05
+global_progress_loss_weight: 0.25

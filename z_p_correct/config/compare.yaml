@@ -27,10 +27,26 @@ common:
   device: cuda
   seed: 42
 
+# Method-specific overrides matching the original strict fusion suite defaults.
 method_overrides:
+  shared_mlp:
+    head_hidden_dim: 640
+    head_trunk_depth: 6
+    head_dropout: 0.1
+    label_smoothing: 0.05
+    global_progress_loss_weight: 0.25
   temporal_phase_prior:
     head_window_size: 5
     head_num_layers: 2
+    head_num_heads: 4
+    head_ffn_dim: 512
+    head_stage_embedding_dim: 32
   temporal_z_mlp_p:
     head_window_size: 5
+    head_hidden_dim: 336
     head_num_layers: 2
+    head_num_heads: 6
+    head_ffn_dim: 672
+    head_stage_embedding_dim: 64
+    head_progress_hidden_dim: 336
+    head_progress_depth: 3

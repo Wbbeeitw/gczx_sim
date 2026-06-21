@@ -96,6 +96,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--head_num_layers", type=int, default=2)
     parser.add_argument("--head_num_heads", type=int, default=4)
     parser.add_argument("--head_ffn_dim", type=int, default=512)
+    parser.add_argument("--head_stage_embedding_dim", type=int, default=32)
+    parser.add_argument("--head_progress_hidden_dim", type=int, default=256)
+    parser.add_argument("--head_progress_depth", type=int, default=2)
 
     # Fusion architecture.
     parser.add_argument("--fusion_hidden_dim", type=int, default=256)
@@ -160,6 +163,7 @@ def _build_head(head_type: str, feature_dim: int, args: argparse.Namespace) -> t
                 "progress_layers": args.head_num_layers,
                 "num_heads": args.head_num_heads,
                 "ffn_dim": args.head_ffn_dim,
+                "stage_embedding_dim": args.head_stage_embedding_dim,
             }
         )
     elif head_type == "temporal_z_mlp_p":
@@ -169,6 +173,9 @@ def _build_head(head_type: str, feature_dim: int, args: argparse.Namespace) -> t
                 "num_layers": args.head_num_layers,
                 "num_heads": args.head_num_heads,
                 "ffn_dim": args.head_ffn_dim,
+                "stage_embedding_dim": args.head_stage_embedding_dim,
+                "progress_hidden_dim": args.head_progress_hidden_dim,
+                "progress_depth": args.head_progress_depth,
             }
         )
     else:
