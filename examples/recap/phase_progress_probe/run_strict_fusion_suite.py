@@ -1,0 +1,588 @@
+# Copyright 2026 The RLinf Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Run a strict raw-vs-fusion suite with per-method z/p heads and fusion MLPs."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import torch
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class MethodSpec:
+    """Train/predict specification for one z/p method."""
+
+    key: str
+    display_name: str
+    train_script: str
+    analyze_script: str
+    train_extra_args: tuple[str, ...]
+
+
+METHOD_SPECS: tuple[MethodSpec, ...] = (
+    MethodSpec(
+        key="shared_mlp_two_heads",
+        display_name="Shared MLP + Fusion",
+        train_script="train_head.py",
+        analyze_script="predict_and_analyze.py",
+        train_extra_args=(
+            "--hidden_dim",
+            "640",
+            "--trunk_depth",
+            "6",
+            "--dropout",
+            "0.1",
+            "--label_smoothing",
+            "0.05",
+            "--global_progress_loss_weight",
+            "0.25",
+        ),
+    ),
+    MethodSpec(
+        key="temporal_phase_prior",
+        display_name="Temporal Phase Prior + Fusion",
+        train_script="train_head_temporal_phase_prior.py",
+        analyze_script="predict_and_analyze_temporal_phase_prior.py",
+        train_extra_args=(
+            "--window_size",
+            "5",
+            "--hidden_dim",
+            "256",
+            "--stage_layers",
+            "2",
+            "--progress_layers",
+            "2",
+            "--num_heads",
+            "4",
+            "--ffn_dim",
+            "512",
+            "--stage_embedding_dim",
+            "32",
+            "--attention_dropout",
+            "0.1",
+        ),
+    ),
+    MethodSpec(
+        key="temporal_z_mlp_p",
+        display_name="Temporal z->MLP->p + Fusion",
+        train_script="train_head_temporal_z_mlp_p.py",
+        analyze_script="predict_and_analyze_temporal_z_mlp_p.py",
+        train_extra_args=(
+            "--window_size",
+            "5",
+            "--hidden_dim",
+            "336",
+            "--num_layers",
+            "2",
+            "--num_heads",
+            "6",
+            "--ffn_dim",
+            "672",
+            "--stage_embedding_dim",
+            "64",
+            "--progress_hidden_dim",
+            "336",
+            "--progress_depth",
+            "3",
+        ),
+    ),
+)
+
+METHOD_KEYS: tuple[str, ...] = tuple(spec.key for spec in METHOD_SPECS)
+
+
+def _replace_cli_arg(
+    cli_args: tuple[str, ...],
+    flag: str,
+    value: str | int | float,
+) -> tuple[str, ...]:
+    """Replace a flag value inside a flat CLI arg tuple."""
+    args = list(cli_args)
+    try:
+        idx = args.index(flag)
+    except ValueError:
+        args.extend([flag, str(value)])
+        return tuple(args)
+
+    if idx + 1 >= len(args):
+        raise ValueError(f"Flag {flag} missing value in CLI args: {cli_args}")
+    args[idx + 1] = str(value)
+    return tuple(args)
+
+
+def _build_method_specs(
+    selected_methods: tuple[str, ...],
+    shared_mlp_hidden_dim: int,
+    shared_mlp_trunk_depth: int,
+) -> tuple[MethodSpec, ...]:
+    """Build method specs with optional overrides."""
+    specs: list[MethodSpec] = []
+    selected = set(selected_methods)
+    for spec in METHOD_SPECS:
+        if spec.key not in selected:
+            continue
+        if spec.key == "shared_mlp_two_heads":
+            train_extra_args = _replace_cli_arg(
+                spec.train_extra_args,
+                "--hidden_dim",
+                shared_mlp_hidden_dim,
+            )
+            train_extra_args = _replace_cli_arg(
+                train_extra_args,
+                "--trunk_depth",
+                shared_mlp_trunk_depth,
+            )
+            spec = MethodSpec(
+                key=spec.key,
+                display_name=spec.display_name,
+                train_script=spec.train_script,
+                analyze_script=spec.analyze_script,
+                train_extra_args=train_extra_args,
+            )
+        specs.append(spec)
+    return tuple(specs)
+
+
+def _run_command(
+    cmd: list[str],
+    cwd: Path,
+    method_label: str,
+    stage_label: str,
+    log_path: Path,
+    skip_if_exists: Path | None = None,
+    force: bool = False,
+) -> None:
+    """Run a subprocess command and append prefixed output to suite.log."""
+    prefix = f"[{method_label}][{stage_label}]"
+    if skip_if_exists is not None and skip_if_exists.exists() and not force:
+        logger.info("%s Skip existing artifact: %s", prefix, skip_if_exists)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"{prefix} Skip existing artifact: {skip_if_exists}\n")
+        return
+
+    logger.info("%s Running: %s", prefix, " ".join(cmd))
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(f"{prefix} Running: {' '.join(cmd)}\n")
+        f.flush()
+
+        process = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        assert process.stdout is not None
+        for line in process.stdout:
+            line = line.rstrip("\n")
+            logger.info("%s %s", prefix, line)
+            f.write(f"{prefix} {line}\n")
+        ret = process.wait()
+        f.write(f"{prefix} Exit code: {ret}\n")
+        f.flush()
+        if ret != 0:
+            raise subprocess.CalledProcessError(ret, cmd)
+
+
+def _count_checkpoint_params(path: Path) -> int:
+    """Count params from a checkpoint state_dict."""
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    return int(sum(t.numel() for t in ckpt["state_dict"].values()))
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _format_markdown_table(rows: list[dict[str, Any]]) -> str:
+    headers = [
+        "Method",
+        "Head Params",
+        "Fusion Params",
+        "Val MSE",
+        "Rel. Improve",
+        "Phase Acc",
+        "Progress MAE",
+    ]
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(["---"] * len(headers)) + " |",
+    ]
+    for row in rows:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(row["method"]),
+                    str(row["head_params"]),
+                    str(row["fusion_params"]),
+                    f'{row["val_mse"]:.6f}',
+                    f'{row["improvement_pct"]:.1f}%',
+                    row["phase_acc"],
+                    row["progress_mae"],
+                ]
+            )
+            + " |"
+        )
+    return "\n".join(lines)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--features_dir", required=True)
+    parser.add_argument("--advantages_path", required=True)
+    parser.add_argument("--output_root", required=True)
+    parser.add_argument("--return_min", type=float, default=-700.0)
+    parser.add_argument("--return_max", type=float, default=0.0)
+    parser.add_argument("--train_batch_size", type=int, default=256)
+    parser.add_argument("--analyze_batch_size", type=int, default=1024)
+    parser.add_argument("--max_epochs", type=int, default=50)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--fusion_hidden_dim", type=int, default=256)
+    parser.add_argument("--fusion_depth", type=int, default=2)
+    parser.add_argument("--fusion_dropout", type=float, default=0.1)
+    parser.add_argument("--fusion_batch_size", type=int, default=256)
+    parser.add_argument("--fusion_alpha", type=float, default=1.0)
+    parser.add_argument(
+        "--methods",
+        nargs="+",
+        choices=METHOD_KEYS,
+        default=list(METHOD_KEYS),
+        help="Subset of z/p baselines to run.",
+    )
+    parser.add_argument(
+        "--shared_mlp_hidden_dim",
+        type=int,
+        default=640,
+        help="Hidden dim override for shared_mlp_two_heads.",
+    )
+    parser.add_argument(
+        "--shared_mlp_trunk_depth",
+        type=int,
+        default=6,
+        help="Trunk depth override for shared_mlp_two_heads.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Rerun all steps even if output artifacts already exist.",
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+
+    repo_root = Path(__file__).resolve().parents[3]
+    script_dir = Path(__file__).resolve().parent
+    python_bin = sys.executable
+    method_specs = _build_method_specs(
+        tuple(args.methods),
+        shared_mlp_hidden_dim=args.shared_mlp_hidden_dim,
+        shared_mlp_trunk_depth=args.shared_mlp_trunk_depth,
+    )
+
+    output_root = Path(args.output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+    with open(output_root / "suite_args.json", "w", encoding="utf-8") as f:
+        json.dump(vars(args), f, indent=2, default=float)
+
+    suite_log_path = output_root / "suite.log"
+    with open(suite_log_path, "a", encoding="utf-8") as f:
+        f.write("\n")
+        f.write("=" * 80 + "\n")
+        f.write(f"Strict fusion suite start: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"features_dir={args.features_dir}\n")
+        f.write(f"advantages_path={args.advantages_path}\n")
+        f.write(f"output_root={args.output_root}\n")
+        f.write(f"methods={','.join(args.methods)}\n")
+        f.write("=" * 80 + "\n")
+
+    learned_rows: list[dict[str, Any]] = []
+    raw_mse: float | None = None
+
+    for spec in method_specs:
+        method_root = output_root / spec.key
+        train_dir = method_root / "train"
+        analysis_dir = method_root / "analysis"
+        fusion_dir = method_root / "fusion"
+        strict_dir = method_root / "strict_eval"
+        train_dir.mkdir(parents=True, exist_ok=True)
+        analysis_dir.mkdir(parents=True, exist_ok=True)
+        fusion_dir.mkdir(parents=True, exist_ok=True)
+        strict_dir.mkdir(parents=True, exist_ok=True)
+
+        train_script_path = script_dir / spec.train_script
+        analyze_script_path = script_dir / spec.analyze_script
+        fusion_train_script = script_dir / "train_logit_fusion_from_predictions.py"
+        fusion_eval_script = script_dir / "evaluate_raw_vs_fusion_strict.py"
+
+        train_cmd = [
+            python_bin,
+            str(train_script_path),
+            "--features_dir",
+            args.features_dir,
+            "--output_dir",
+            str(train_dir),
+            "--batch_size",
+            str(args.train_batch_size),
+            "--max_epochs",
+            str(args.max_epochs),
+            "--seed",
+            str(args.seed),
+            *spec.train_extra_args,
+        ]
+        _run_command(
+            train_cmd,
+            cwd=repo_root,
+            method_label=spec.key,
+            stage_label="train_zp",
+            log_path=suite_log_path,
+            skip_if_exists=train_dir / "head.pt",
+            force=args.force,
+        )
+
+        analyze_cmd = [
+            python_bin,
+            str(analyze_script_path),
+            "--features_dir",
+            args.features_dir,
+            "--head_checkpoint",
+            str(train_dir / "head.pt"),
+            "--output_dir",
+            str(analysis_dir),
+            "--batch_size",
+            str(args.analyze_batch_size),
+            "--splits",
+            "train",
+            "val",
+        ]
+        _run_command(
+            analyze_cmd,
+            cwd=repo_root,
+            method_label=spec.key,
+            stage_label="predict_zp",
+            log_path=suite_log_path,
+            skip_if_exists=analysis_dir / "phase_predictions.parquet",
+            force=args.force,
+        )
+
+        fusion_cmd = [
+            python_bin,
+            str(fusion_train_script),
+            "--predictions_path",
+            str(analysis_dir / "phase_predictions.parquet"),
+            "--advantages_path",
+            args.advantages_path,
+            "--output_dir",
+            str(fusion_dir),
+            "--return_min",
+            str(args.return_min),
+            "--return_max",
+            str(args.return_max),
+            "--hidden_dim",
+            str(args.fusion_hidden_dim),
+            "--depth",
+            str(args.fusion_depth),
+            "--dropout",
+            str(args.fusion_dropout),
+            "--batch_size",
+            str(args.fusion_batch_size),
+            "--max_epochs",
+            str(args.max_epochs),
+            "--seed",
+            str(args.seed),
+            "--alpha",
+            str(args.fusion_alpha),
+        ]
+        _run_command(
+            fusion_cmd,
+            cwd=repo_root,
+            method_label=spec.key,
+            stage_label="train_fusion",
+            log_path=suite_log_path,
+            skip_if_exists=fusion_dir / "logit_fusion.pt",
+            force=args.force,
+        )
+
+        strict_cmd = [
+            python_bin,
+            str(fusion_eval_script),
+            "--predictions_path",
+            str(analysis_dir / "phase_predictions.parquet"),
+            "--advantages_path",
+            args.advantages_path,
+            "--fusion_checkpoint",
+            str(fusion_dir / "logit_fusion.pt"),
+            "--output_dir",
+            str(strict_dir),
+            "--return_min",
+            str(args.return_min),
+            "--return_max",
+            str(args.return_max),
+            "--alpha",
+            str(args.fusion_alpha),
+            "--batch_size",
+            str(args.analyze_batch_size),
+        ]
+        _run_command(
+            strict_cmd,
+            cwd=repo_root,
+            method_label=spec.key,
+            stage_label="strict_eval",
+            log_path=suite_log_path,
+            skip_if_exists=strict_dir / "report.json",
+            force=args.force,
+        )
+
+        head_params = _count_checkpoint_params(train_dir / "head.pt")
+        fusion_params = _count_checkpoint_params(fusion_dir / "logit_fusion.pt")
+        analysis_report = _load_json(analysis_dir / "report.json")
+        strict_report = _load_json(strict_dir / "report.json")
+
+        pred_metrics = analysis_report["prediction_metrics"]
+        strict_metrics = strict_report["metrics"]
+        if raw_mse is None:
+            raw_mse = float(strict_metrics["mse_raw"])
+        else:
+            current_raw = float(strict_metrics["mse_raw"])
+            if abs(current_raw - raw_mse) > 1e-9:
+                raise ValueError(
+                    f"Raw MSE mismatch across methods: {current_raw} vs {raw_mse}"
+                )
+
+        learned_rows.append(
+            {
+                "key": spec.key,
+                "method": spec.display_name,
+                "head_params": head_params,
+                "fusion_params": fusion_params,
+                "val_mse": float(strict_metrics["mse_fused"]),
+                "improvement_pct": float(strict_metrics["fusion_improvement_pct"]),
+                "phase_acc": f'{pred_metrics["phase_acc"]:.4f}',
+                "progress_mae": f'{pred_metrics["phase_progress_mae"]:.4f}',
+                "artifacts": {
+                    "train_dir": str(train_dir),
+                    "analysis_dir": str(analysis_dir),
+                    "fusion_dir": str(fusion_dir),
+                    "strict_dir": str(strict_dir),
+                },
+            }
+        )
+
+    if raw_mse is None:
+        raise RuntimeError("No learned method completed, raw MSE unavailable.")
+
+    summary_rows = [
+        {
+            "key": "raw_critic",
+            "method": "Raw Critic",
+            "head_params": 0,
+            "fusion_params": 0,
+            "val_mse": raw_mse,
+            "improvement_pct": 0.0,
+            "phase_acc": "-",
+            "progress_mae": "-",
+            "artifacts": {},
+        },
+        *learned_rows,
+    ]
+
+    summary = {
+        "raw_mse": raw_mse,
+        "methods": summary_rows,
+        "matched_param_note": {
+            "shared_mlp_two_heads": (
+                f"head_hidden_dim={args.shared_mlp_hidden_dim}, "
+                f"head_trunk_depth={args.shared_mlp_trunk_depth}"
+            ),
+            "temporal_phase_prior": (
+                "head_hidden_dim=256, stage_layers=2, progress_layers=2, "
+                "num_heads=4, ffn_dim=512, stage_embedding_dim=32"
+            ),
+            "temporal_z_mlp_p": (
+                "head_hidden_dim=336, num_layers=2, num_heads=6, "
+                "ffn_dim=672, stage_embedding_dim=64, progress_hidden_dim=336, "
+                "progress_depth=3"
+            ),
+            "fusion": (
+                f"fusion_hidden_dim={args.fusion_hidden_dim}, "
+                f"fusion_depth={args.fusion_depth}, fusion_dropout={args.fusion_dropout}, "
+                f"alpha={args.fusion_alpha}"
+            ),
+        },
+    }
+
+    with open(output_root / "fusion_summary.json", "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, default=float)
+
+    markdown_table = _format_markdown_table(summary_rows)
+    with open(output_root / "fusion_summary.md", "w", encoding="utf-8") as f:
+        f.write(markdown_table + "\n")
+
+    logger.info("=== Strict Fusion Summary ===")
+    with open(suite_log_path, "a", encoding="utf-8") as f:
+        f.write("\n")
+        f.write("=" * 80 + "\n")
+        f.write("FINAL SUMMARY\n")
+        f.write("=" * 80 + "\n")
+    for row in summary_rows:
+        logger.info(
+            "%s | head_params=%s | fusion_params=%s | val_mse=%.6f | improvement=%.1f%% | phase_acc=%s | progress_mae=%s",
+            row["method"],
+            row["head_params"],
+            row["fusion_params"],
+            row["val_mse"],
+            row["improvement_pct"],
+            row["phase_acc"],
+            row["progress_mae"],
+        )
+        with open(suite_log_path, "a", encoding="utf-8") as f:
+            f.write(
+                f'{row["method"]} | head_params={row["head_params"]} | '
+                f'fusion_params={row["fusion_params"]} | '
+                f'val_mse={row["val_mse"]:.6f} | '
+                f'improvement={row["improvement_pct"]:.1f}% | '
+                f'phase_acc={row["phase_acc"]} | '
+                f'progress_mae={row["progress_mae"]}\n'
+            )
+
+    logger.info("Saved summary JSON to %s", output_root / "fusion_summary.json")
+    logger.info("Saved summary Markdown to %s", output_root / "fusion_summary.md")
+    logger.info("Saved suite log to %s", suite_log_path)
+    with open(suite_log_path, "a", encoding="utf-8") as f:
+        f.write(f"summary_json={output_root / 'fusion_summary.json'}\n")
+        f.write(f"summary_md={output_root / 'fusion_summary.md'}\n")
+        f.write(f"suite_log={suite_log_path}\n")
+
+
+if __name__ == "__main__":
+    main()

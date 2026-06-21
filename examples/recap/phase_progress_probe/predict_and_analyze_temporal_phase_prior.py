@@ -108,17 +108,21 @@ def _predict_all(
     )
 
     phase_preds: list[torch.Tensor] = []
+    phase_probs: list[torch.Tensor] = []
     progress_preds_soft: list[torch.Tensor] = []
     progress_preds_hard: list[torch.Tensor] = []
     global_preds_soft: list[torch.Tensor] = []
     global_preds_hard: list[torch.Tensor] = []
     for batch in loader:
         out = head(batch["feature_window"].to(device))
+        phase_probs.append(out["phase_probs"].cpu())
         phase_preds.append(out["phase_pred"].cpu())
         progress_preds_soft.append(out["phase_progress_soft"].cpu())
         progress_preds_hard.append(out["phase_progress_hard"].cpu())
         global_preds_soft.append(out["global_progress_soft"].cpu())
         global_preds_hard.append(out["global_progress_hard"].cpu())
+
+    phase_probs_np = torch.cat(phase_probs).numpy()
 
     return pd.DataFrame(
         {
@@ -129,6 +133,7 @@ def _predict_all(
             "phase_progress_true": all_phase_progress.numpy(),
             "global_progress_true": all_global_progress.numpy(),
             "phase_pred": torch.cat(phase_preds).numpy(),
+            "phase_probs_pred": [row.tolist() for row in phase_probs_np],
             "phase_progress_pred": torch.cat(progress_preds_soft).numpy(),
             "phase_progress_pred_soft": torch.cat(progress_preds_soft).numpy(),
             "phase_progress_pred_hard": torch.cat(progress_preds_hard).numpy(),

@@ -79,14 +79,19 @@ def _predict_all(
     )
 
     phase_preds: list[torch.Tensor] = []
+    phase_probs: list[torch.Tensor] = []
     progress_preds: list[torch.Tensor] = []
     global_preds: list[torch.Tensor] = []
     for (batch,) in loader:
         batch = batch.to(device)
         out = head(batch)
-        phase_preds.append(out["phase_logits"].argmax(dim=-1).cpu())
+        probs = torch.softmax(out["phase_logits"], dim=-1).cpu()
+        phase_probs.append(probs)
+        phase_preds.append(probs.argmax(dim=-1))
         progress_preds.append(out["phase_progress"].cpu())
         global_preds.append(out["global_progress"].cpu())
+
+    phase_probs_np = torch.cat(phase_probs).numpy()
 
     df = pd.DataFrame(
         {
@@ -97,6 +102,7 @@ def _predict_all(
             "phase_progress_true": all_phase_progress.numpy(),
             "global_progress_true": all_global_progress.numpy(),
             "phase_pred": torch.cat(phase_preds).numpy(),
+            "phase_probs_pred": [row.tolist() for row in phase_probs_np],
             "phase_progress_pred": torch.cat(progress_preds).numpy(),
             "global_progress_pred": torch.cat(global_preds).numpy(),
         }
