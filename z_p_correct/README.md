@@ -23,7 +23,7 @@ Training is strictly two-stage:
 z_p_correct/
 ├── config/                  # Example YAML configs
 ├── z_p_correct/
-│   ├── models/heads/        # 4 registered head architectures
+│   ├── models/heads/        # Registered head architectures
 │   ├── models/fusion/       # LogitFusionMLP
 │   ├── data/                # Dataset, feature cache, fusion dataset
 │   ├── training/            # HeadTrainer + FusionTrainer
@@ -38,14 +38,23 @@ z_p_correct/
 └── tests/
 ```
 
-## Supported heads
+## Supported methods
 
 | Name | File | Description |
 |---|---|---|
-| `base_shared_mlp` | `models/heads/base_shared_mlp.py` | Shared trunk + phase/progress heads |
-| `our_phase_progress` | `models/heads/phase_progress_head.py` | Our shared-trunk head |
-| `temporal_phase_prior` | `models/heads/temporal_phase_prior.py` | Temporal encoder + phase-prior progress |
-| `temporal_z_mlp_p` | `models/heads/temporal_z_mlp_p.py` | Temporal encoder → z → z-conditioned MLP → p |
+| `base` | N/A (raw critic) | Raw ValueCriticModel baseline |
+| `shared_mlp` | `models/heads/phase_progress_head.py` | Shared trunk + phase/progress heads + fusion |
+| `temporal_phase_prior` | `models/heads/temporal_phase_prior.py` | Temporal encoder + phase-prior progress + fusion |
+| `temporal_z_mlp_p` | `models/heads/temporal_z_mlp_p.py` | Temporal encoder → z → z-conditioned MLP → p + fusion |
+
+**Note:** `OnlineFusionCritic` currently supports single-frame heads only
+(`base`, `shared_mlp`). Temporal online integration is planned for later.
+
+## Important: return range
+
+This project uses a return normalization range of **`-700.0` to `0.0`** for the
+LIBERO value critic. Make sure `--return_min` and `--return_max` match your
+advantages parquet and value checkpoint.
 
 ## Usage
 
@@ -55,8 +64,10 @@ z_p_correct/
 python z_p_correct/scripts/extract_features.py \
   --dataset_path /workspace/datasets/recap_libero10_task0/libero10_task0_train \
   --value_checkpoint /workspace/models/value_libero_sft_30ep_5k/global_step_5000 \
-  --siglip_path /path/to/siglip2 \
-  --gemma3_path /path/to/gemma3-270m \
+  --siglip_path /workspace/models/siglip2-so400m-patch14-224 \
+  --gemma3_path /workspace/models/gemma-3-270m \
+  --tokenizer_path /workspace/models/gemma-3-270m \
+  --critic_expert_variant gemma_1m \
   --output_dir /workspace/results/z_p_correct/features_random200 \
   --max_episodes 200
 ```
@@ -67,44 +78,41 @@ Outputs `train.pt` and `val.pt` with features, labels, raw_logits, and atoms.
 
 ```bash
 python z_p_correct/scripts/train_z_p_correct.py \
-  --head_type our_phase_progress \
-  --features_dir /workspace/results/z_p_correct/features_random200 \
-  --advantages_path /workspace/datasets/.../meta/advantages_base30ep_random200_logits_phase_dist.parquet \
-  --output_dir /workspace/results/z_p_correct/runs
+  --head_type shared_mlp \
+  --features_dir /workspace/results/phase_progress_probe/features_random200_base30ep_balanced \
+  --advantages_path /workspace/datasets/recap_libero10_task0/libero10_task0_train/meta/advantages_base30ep_random200_logits_phase_dist.parquet \
+  --output_dir /workspace/results/z_p_correct/runs \
+  --return_min -700.0 \
+  --return_max 0.0
 ```
 
-This runs both training stages and saves `head.pt`, `fusion.pt`, predictions,
-and an `eval_report.json`.
+This runs both training stages and saves `head.pt`, `fusion.pt`,
+`predictions.parquet` (with `value_fused` column), and `eval_report.json`.
 
-### 3. Compare multiple methods
+### 3. Compare all four methods
 
 ```bash
 python z_p_correct/scripts/run_comparison.py \
-  --config z_p_correct/config/compare.yaml
-```
-
-Or directly:
-
-```bash
-python z_p_correct/scripts/run_comparison.py \
-  --features_dir /workspace/results/z_p_correct/features_random200 \
-  --advantages_path /workspace/datasets/.../meta/advantages_....parquet \
-  --output_dir /workspace/results/z_p_correct/comparison
+  --config z_p_correct/config/compare.yaml \
+  --features_dir /workspace/results/phase_progress_probe/features_random200_base30ep_balanced \
+  --advantages_path /workspace/datasets/recap_libero10_task0/libero10_task0_train/meta/advantages_base30ep_random200_logits_phase_dist.parquet \
+  --output_dir /workspace/results/z_p_correct/comparison_random200
 ```
 
 ### 4. Export fused advantages
 
-```python
+```bash
+python -c "
 from z_p_correct.integration import export_fused_advantages
-
 export_fused_advantages(
-    dataset_path="/workspace/datasets/...",
-    predictions_path="/workspace/results/z_p_correct/runs/our_phase_progress/predictions.parquet",
-    source_tag="base30ep_random200_logits_phase_dist",
-    output_tag="our_phase_progress_fused",
+    dataset_path='/workspace/datasets/recap_libero10_task0/libero10_task0_train',
+    predictions_path='/workspace/results/z_p_correct/runs/shared_mlp/predictions.parquet',
+    source_tag='base30ep_random200_logits_phase_dist',
+    output_tag='shared_mlp_fused',
     lookahead_step=16,
     gamma=1.0,
 )
+"
 ```
 
 ## Design constraints

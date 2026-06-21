@@ -13,7 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Launch multiple z/p head methods and compare their fusion improvements."""
+"""Launch multiple z/p correction methods and compare their fusion improvements.
+
+Supported methods:
+    base                  Raw critic baseline (no head, no fusion).
+    shared_mlp            Shared MLP head + fusion.
+    temporal_phase_prior  Temporal phase-prior head + fusion.
+    temporal_z_mlp_p      Temporal z->MLP->p head + fusion.
+"""
 
 from __future__ import annotations
 
@@ -25,6 +32,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+import pandas as pd
 import yaml
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -36,12 +45,19 @@ from z_p_correct.registry import list_heads
 
 logger = logging.getLogger(__name__)
 
+BASELINE_METHOD = "base"
 DEFAULT_METHODS = [
-    "base_shared_mlp",
+    BASELINE_METHOD,
+    "shared_mlp",
     "temporal_phase_prior",
     "temporal_z_mlp_p",
-    "our_phase_progress",
 ]
+
+
+def _available_methods() -> list[str]:
+    """Return all runnable methods including the raw-critic baseline."""
+    methods = [BASELINE_METHOD] + list_heads()
+    return methods
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,7 +71,7 @@ def parse_args() -> argparse.Namespace:
         "--methods",
         nargs="+",
         default=None,
-        choices=list_heads(),
+        choices=_available_methods(),
         help="Methods to run. Overrides config.",
     )
     parser.add_argument("--features_dir", default=None)
@@ -101,6 +117,65 @@ def _build_command(
         else:
             cmd.extend([flag, str(value)])
     return cmd
+
+
+def _compute_return_norm(values: np.ndarray, return_min: float, return_max: float) -> np.ndarray:
+    rng = return_max - return_min
+    if rng <= 0:
+        return np.full(len(values), -0.5, dtype=np.float32)
+    return (values - return_min) / rng - 1.0
+
+
+def _run_base_baseline(
+    advantages_path: str,
+    features_dir: str,
+    output_dir: Path,
+    return_min: float,
+    return_max: float,
+) -> dict[str, Any]:
+    """Compute raw-critic baseline metrics on the val split.
+
+    Uses the episode/frame keys from ``features_dir/val.pt`` to match the val
+    set used by the other methods.
+    """
+    import torch
+
+    adv_df = pd.read_parquet(advantages_path)
+
+    val_cache_path = Path(features_dir) / "val.pt"
+    if val_cache_path.exists():
+        val_data = torch.load(val_cache_path, map_location="cpu", weights_only=False)
+        val_keys = set(
+            zip(
+                val_data["episode_index"].tolist(),
+                val_data["frame_index"].tolist(),
+            )
+        )
+        mask = [
+            (int(ep), int(fr)) in val_keys
+            for ep, fr in zip(adv_df["episode_index"], adv_df["frame_index"])
+        ]
+        val_df = adv_df.loc[mask].reset_index(drop=True)
+    else:
+        logger.warning("No val.pt found at %s; evaluating base on full advantages.", val_cache_path)
+        val_df = adv_df
+
+    returns = val_df["return"].to_numpy(dtype=np.float64)
+    value_current = val_df["value_current"].to_numpy(dtype=np.float64)
+    return_norm = _compute_return_norm(returns, return_min, return_max)
+    raw_value_mse = float(np.mean((value_current - return_norm) ** 2))
+
+    method_dir = output_dir / BASELINE_METHOD
+    method_dir.mkdir(parents=True, exist_ok=True)
+    report = {
+        "method": BASELINE_METHOD,
+        "raw_value_mse": raw_value_mse,
+        "value_mse": raw_value_mse,
+        "improvement_pct": 0.0,
+    }
+    with open(method_dir / "eval_report.json", "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
+    return report
 
 
 def _collect_report(method: str, output_dir: Path) -> dict[str, Any] | None:
@@ -149,6 +224,31 @@ def main() -> None:
     for method in methods:
         logger.info("=" * 60)
         logger.info("Running method: %s", method)
+
+        if args.dry_run:
+            if method == BASELINE_METHOD:
+                logger.info("Would compute raw-critic baseline.")
+            else:
+                cmd = _build_command(
+                    train_script=args.train_script,
+                    method=method,
+                    common=common,
+                    method_overrides=method_overrides.get(method),
+                )
+                logger.info("Command: %s", " ".join(cmd))
+            continue
+
+        if method == BASELINE_METHOD:
+            report = _run_base_baseline(
+                advantages_path=common["advantages_path"],
+                features_dir=common["features_dir"],
+                output_dir=Path(common["output_dir"]),
+                return_min=common.get("return_min", -700.0),
+                return_max=common.get("return_max", 0.0),
+            )
+            results[method] = report
+            continue
+
         cmd = _build_command(
             train_script=args.train_script,
             method=method,
@@ -156,9 +256,6 @@ def main() -> None:
             method_overrides=method_overrides.get(method),
         )
         logger.info("Command: %s", " ".join(cmd))
-
-        if args.dry_run:
-            continue
 
         try:
             subprocess.run(cmd, check=True)

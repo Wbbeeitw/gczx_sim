@@ -23,7 +23,7 @@ import torch.nn.functional as F
 from ...registry.head_registry import register_head
 
 
-@register_head("our_phase_progress")
+@register_head("shared_mlp")
 class PhaseProgressHead(nn.Module):
     """Shared trunk + phase classifier + progress regressor.
 

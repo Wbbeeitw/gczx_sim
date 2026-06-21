@@ -100,6 +100,12 @@ class HeadTrainer:
             )
         return loss
 
+    def _get_head_input(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Return either ``features`` or ``feature_window`` depending on cache config."""
+        if "feature_window" in batch:
+            return batch["feature_window"].to(self.device)
+        return batch["features"].to(self.device)
+
     def _build_criteria(self, train_loader: DataLoader) -> tuple[nn.Module, nn.Module, nn.Module]:
         if self.cfg.use_class_weights:
             phase_counts = torch.zeros(self.head.num_phases, dtype=torch.float32)
@@ -127,13 +133,13 @@ class HeadTrainer:
 
         pbar = tqdm(train_loader, desc=f"Head train epoch")
         for batch in pbar:
-            features = batch["features"].to(self.device)
+            head_input = self._get_head_input(batch)
             phase = batch["phase"].to(self.device)
             phase_progress = batch["phase_progress"].to(self.device)
             global_progress = batch["global_progress"].to(self.device)
 
             self._optimizer.zero_grad()
-            out = self.head(features)
+            out = self.head(head_input)
             loss = self._compute_loss(
                 out, phase, phase_progress, global_progress,
                 phase_criterion, progress_criterion, global_criterion
@@ -144,7 +150,7 @@ class HeadTrainer:
                 nn.utils.clip_grad_norm_(self.head.parameters(), self.cfg.max_grad_norm)
             self._optimizer.step()
 
-            batch_size = features.shape[0]
+            batch_size = head_input.shape[0]
             epoch_loss += loss.item() * batch_size
             epoch_samples += batch_size
             pbar.set_postfix({"loss": epoch_loss / epoch_samples})
@@ -164,18 +170,18 @@ class HeadTrainer:
         all_global: list[torch.Tensor] = []
 
         for batch in val_loader:
-            features = batch["features"].to(self.device)
+            head_input = self._get_head_input(batch)
             phase = batch["phase"].to(self.device)
             phase_progress = batch["phase_progress"].to(self.device)
             global_progress = batch["global_progress"].to(self.device)
 
-            out = self.head(features)
+            out = self.head(head_input)
             loss = self._compute_loss(
                 out, phase, phase_progress, global_progress,
                 phase_criterion, progress_criterion, global_criterion
             )
 
-            batch_size = features.shape[0]
+            batch_size = head_input.shape[0]
             total_loss += loss.item() * batch_size
             total_samples += batch_size
 

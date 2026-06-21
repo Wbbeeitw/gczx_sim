@@ -3,14 +3,14 @@
 #   python scripts/train_z_p_correct.py $(cat config/train.yaml | xargs)
 # or pass arguments directly on the command line.
 
-head_type: our_phase_progress
-features_dir: /workspace/results/z_p_correct/features_random200
+head_type: shared_mlp
+features_dir: /workspace/results/phase_progress_probe/features_random200_base30ep_balanced
 advantages_path: /workspace/datasets/recap_libero10_task0/libero10_task0_train/meta/advantages_base30ep_random200_logits_phase_dist.parquet
 output_dir: /workspace/results/z_p_correct/runs
 
 num_phases: 5
 num_bins: 201
-return_min: -1.0
+return_min: -700.0
 return_max: 0.0
 
 head_hidden_dim: 256
@@ -20,7 +20,6 @@ head_window_size: 5
 head_num_layers: 2
 head_num_heads: 4
 head_ffn_dim: 512
-window_size: 1
 
 fusion_hidden_dim: 256
 fusion_depth: 2

@@ -85,7 +85,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--num_phases", type=int, default=5)
     parser.add_argument("--num_bins", type=int, default=201)
-    parser.add_argument("--return_min", type=float, default=-1.0)
+    parser.add_argument("--return_min", type=float, default=-700.0)
     parser.add_argument("--return_max", type=float, default=0.0)
 
     # Head architecture.
@@ -150,9 +150,19 @@ def _build_head(head_type: str, feature_dim: int, args: argparse.Namespace) -> t
         "hidden_dim": args.head_hidden_dim,
         "dropout": args.head_dropout,
     }
-    if head_type in ("base_shared_mlp", "our_phase_progress"):
+    if head_type == "shared_mlp":
         kwargs["trunk_depth"] = args.head_trunk_depth
-    else:
+    elif head_type == "temporal_phase_prior":
+        kwargs.update(
+            {
+                "window_size": args.head_window_size,
+                "stage_layers": args.head_num_layers,
+                "progress_layers": args.head_num_layers,
+                "num_heads": args.head_num_heads,
+                "ffn_dim": args.head_ffn_dim,
+            }
+        )
+    elif head_type == "temporal_z_mlp_p":
         kwargs.update(
             {
                 "window_size": args.head_window_size,
@@ -161,7 +171,78 @@ def _build_head(head_type: str, feature_dim: int, args: argparse.Namespace) -> t
                 "ffn_dim": args.head_ffn_dim,
             }
         )
+    else:
+        raise ValueError(f"Unsupported head_type: {head_type}")
     return cls(**kwargs)
+
+
+def _add_fused_value_to_predictions(
+    predictions_df: pd.DataFrame,
+    advantages_df: pd.DataFrame,
+    head: torch.nn.Module,
+    fusion: LogitFusionMLP,
+    atoms: torch.Tensor,
+    alpha: float,
+    device: str,
+    batch_size: int = 512,
+) -> pd.DataFrame:
+    """Add a ``value_fused`` column to predictions using the trained fusion MLP."""
+    import numpy as np
+
+    required = {"episode_index", "frame_index", "phase_probs_pred", "phase_progress_pred", "global_progress_pred"}
+    missing = required - set(predictions_df.columns)
+    if missing:
+        raise ValueError(f"Predictions missing columns: {sorted(missing)}")
+
+    adv_required = {"episode_index", "frame_index", "value_logits_current"}
+    missing_adv = adv_required - set(advantages_df.columns)
+    if missing_adv:
+        raise ValueError(f"Advantages missing columns: {sorted(missing_adv)}")
+
+    merged = predictions_df.merge(
+        advantages_df[["episode_index", "frame_index", "value_logits_current"]],
+        on=["episode_index", "frame_index"],
+        how="inner",
+    )
+    if merged.empty:
+        raise ValueError("No overlap between predictions and advantages.")
+
+    merged = merged.sort_values(["episode_index", "frame_index"]).reset_index(drop=True)
+
+    raw_logits = np.stack(merged["value_logits_current"].to_numpy()).astype(np.float32)
+    phase_probs = np.stack(merged["phase_probs_pred"].to_numpy()).astype(np.float32)
+    phase_progress = merged["phase_progress_pred"].to_numpy(dtype=np.float32)
+    global_progress = merged["global_progress_pred"].to_numpy(dtype=np.float32)
+
+    device_obj = torch.device(device)
+    head.to(device_obj).eval()
+    fusion.to(device_obj).eval()
+    atoms_t = atoms.to(device_obj)
+
+    fused_values = []
+    with torch.no_grad():
+        for start in range(0, len(merged), batch_size):
+            end = start + batch_size
+            logits_t = torch.tensor(raw_logits[start:end], device=device_obj)
+            probs_t = torch.tensor(phase_probs[start:end], device=device_obj)
+            prog_t = torch.tensor(phase_progress[start:end], device=device_obj)
+            glob_t = torch.tensor(global_progress[start:end], device=device_obj)
+
+            delta = fusion(logits_t, probs_t, prog_t, glob_t)
+            fused_logits = logits_t + alpha * delta
+            probs = torch.softmax(fused_logits, dim=-1)
+            values = (probs * atoms_t.unsqueeze(0)).sum(dim=-1)
+            fused_values.append(values.cpu().numpy())
+
+    merged["value_fused"] = np.concatenate(fused_values).astype(np.float64)
+
+    # Merge value_fused back into original predictions (preserving row order).
+    out_df = predictions_df.merge(
+        merged[["episode_index", "frame_index", "value_fused"]],
+        on=["episode_index", "frame_index"],
+        how="left",
+    )
+    return out_df
 
 
 def main() -> None:
@@ -181,7 +262,11 @@ def main() -> None:
     head_path = output_dir / "head.pt"
     head_metrics_path = output_dir / "head_metrics.json"
 
-    window_size = args.window_size
+    # Infer window size from head type.
+    if args.head_type == "shared_mlp":
+        window_size = 1
+    else:
+        window_size = args.head_window_size
     if window_size > 1 and window_size % 2 == 0:
         raise ValueError(f"window_size must be odd, got {window_size}")
 
@@ -312,6 +397,25 @@ def main() -> None:
         final_metrics["raw_value_mse"],
         final_metrics["value_mse"],
         final_metrics["improvement_pct"],
+    )
+
+    # ------------------------------------------------------------------
+    # Export fused value predictions for downstream ReCap tag export.
+    # ------------------------------------------------------------------
+    logger.info("Exporting fused value predictions.")
+    predictions_with_value_df = _add_fused_value_to_predictions(
+        predictions_df=predictions_df,
+        advantages_df=advantages_df,
+        head=head,
+        fusion=fusion_trainer.fusion,
+        atoms=atoms,
+        alpha=args.alpha,
+        device=args.device,
+        batch_size=args.batch_size,
+    )
+    predictions_with_value_df.to_parquet(predictions_path, index=False)
+    logger.info(
+        "Updated predictions saved to %s (with value_fused column)", predictions_path
     )
 
 

@@ -3,18 +3,18 @@
 #   python scripts/run_comparison.py --config config/compare.yaml
 
 methods:
-  - base_shared_mlp
+  - base
+  - shared_mlp
   - temporal_phase_prior
   - temporal_z_mlp_p
-  - our_phase_progress
 
 common:
-  features_dir: /workspace/results/z_p_correct/features_random200
+  features_dir: /workspace/results/phase_progress_probe/features_random200_base30ep_balanced
   advantages_path: /workspace/datasets/recap_libero10_task0/libero10_task0_train/meta/advantages_base30ep_random200_logits_phase_dist.parquet
-  output_dir: /workspace/results/z_p_correct/comparison
+  output_dir: /workspace/results/z_p_correct/comparison_random200
   num_phases: 5
   num_bins: 201
-  return_min: -1.0
+  return_min: -700.0
   return_max: 0.0
   batch_size: 256
   head_lr: 1e-3
