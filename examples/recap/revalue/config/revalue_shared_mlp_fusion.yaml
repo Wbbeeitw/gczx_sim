@@ -1,0 +1,6 @@
+defaults:
+  - revalue
+  - _self_
+
+method: shared_mlp_fusion
+stage: all

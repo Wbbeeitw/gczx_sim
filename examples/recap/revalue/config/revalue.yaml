@@ -1,0 +1,85 @@
+defaults:
+  - _self_
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  job:
+    chdir: false
+
+method: shared_mlp_fusion
+stage: all
+
+data:
+  dataset_path: /home/enine/rlinf_workspace/datasets/recap_libero10_task0/libero10_task0_train
+  robot_type: libero
+  env_type: libero
+  model_type: pi05
+  action_dim: 32
+  default_prompt: null
+  label_name: phase_progress_semantic
+  val_episode_ratio: 0.2
+  seed: 42
+  max_episodes: null
+  episode_subset_path: null
+  episode_split_path: null
+
+value:
+  checkpoint: /home/enine/rlinf_workspace/results/value_sft/checkpoints/global_step_5000
+  siglip_path: /home/enine/rlinf_workspace/models/siglip2-so400m-patch14-224
+  gemma3_path: /home/enine/rlinf_workspace/models/gemma-3-270m
+  tokenizer_path: /home/enine/rlinf_workspace/models/gemma-3-270m
+  critic_expert_variant: gemma_1m
+  num_bins: 201
+  v_min: -1.0
+  v_max: 0.0
+
+returns:
+  # Raw return range used only to map raw returns into the critic value scale.
+  global_min: -700.0
+  global_max: 0.0
+
+output:
+  root: /home/enine/rlinf_workspace/results/revalue/libero_task0_shared_mlp
+  features_dir: null
+  zp_dir: null
+  fusion_dir: null
+  predictions_path: null
+
+zp:
+  hidden_dim: 256
+  dropout: 0.1
+  trunk_depth: 1
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  max_epochs: 100
+  early_stop_patience: 10
+
+fusion:
+  hidden_dim: 256
+  depth: 2
+  dropout: 0.1
+  alpha: 1.0
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  max_epochs: 100
+  early_stop_patience: 10
+
+train:
+  batch_size: 256
+  extract_batch_size: 16
+  num_workers: 0
+  device: cuda
+  seed: 42
+
+recap:
+  source_tag: base
+  source_advantages_path: null
+  output_tag: zp_fused
+  lookahead_step: 10
+  gamma: 1.0
+  positive_quantile: 0.3
+  discount_next_value: true
+  export_split: train
