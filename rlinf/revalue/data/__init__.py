@@ -27,15 +27,31 @@ from rlinf.revalue.data.advantage_table import (
     validate_fusion_advantages,
 )
 from rlinf.revalue.data.phase_dataset import RevaluePhaseDataset, build_phase_datasets
+from rlinf.revalue.data.episode_manifest import (
+    EpisodeManifestConfig,
+    EpisodeSplitSpec,
+    EpisodeSubsetSpec,
+    build_episode_manifest,
+    load_episode_manifest,
+    resolve_episode_split_for_dataset,
+    resolve_episode_subset_for_dataset,
+)
 
 __all__ = [
+    "EpisodeManifestConfig",
+    "EpisodeSplitSpec",
+    "EpisodeSubsetSpec",
     "FeatureAdvantageDataset",
     "FeatureCache",
+    "build_episode_manifest",
     "build_feature_loaders",
     "build_fusion_loaders",
     "collate_feature_batch",
+    "load_episode_manifest",
     "read_advantages",
     "RevaluePhaseDataset",
+    "resolve_episode_split_for_dataset",
+    "resolve_episode_subset_for_dataset",
     "resolve_advantage_path",
     "build_phase_datasets",
     "validate_fusion_advantages",

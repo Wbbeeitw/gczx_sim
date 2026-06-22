@@ -38,6 +38,19 @@ class RevalueDataConfig:
 
 
 @dataclass
+class RevalueManifestConfig:
+    """Episode sampling and split manifest settings."""
+
+    output_path: str | None = None
+    num_episodes: int | None = None
+    success_ratio: float = 0.5
+    val_episode_ratio: float = 0.2
+    test_episode_ratio: float = 0.0
+    success_phase: int = 4
+    overwrite: bool = False
+
+
+@dataclass
 class RevalueValueConfig:
     """Value critic checkpoint settings."""
 
@@ -57,6 +70,26 @@ class RevalueReturnsConfig:
 
     global_min: float = -700.0
     global_max: float = 0.0
+    tag: str | None = None
+    dataset_type: str = "rollout"
+    failure_reward: float = -300.0
+    num_workers: int = 64
+    compute: bool = True
+
+
+@dataclass
+class RevalueBaseConfig:
+    """Raw critic base advantage generation settings."""
+
+    tag: str = "base"
+    returns_tag: str | None = None
+    compute_returns: bool = True
+    compute_advantages: bool = True
+    batch_size: int = 256
+    num_workers_per_gpu: int = 12
+    prefetch_factor: int = 2
+    flush_interval: int = 256
+    max_samples: int | None = None
 
 
 @dataclass
@@ -68,6 +101,7 @@ class RevalueOutputConfig:
     zp_dir: str | None = None
     fusion_dir: str | None = None
     predictions_path: str | None = None
+    comparison_path: str | None = None
 
 
 @dataclass
@@ -112,7 +146,7 @@ class RevalueTrainConfig:
 class RevalueRecapConfig:
     """ReCap source/output tag settings."""
 
-    source_tag: str | None = "base"
+    source_tag: str | None = None
     source_advantages_path: str | None = None
     output_tag: str = "zp_fused"
     lookahead_step: int = 10
@@ -129,8 +163,10 @@ class RevalueConfig:
     method: str = "shared_mlp_fusion"
     stage: str = "all"
     data: RevalueDataConfig = field(default_factory=RevalueDataConfig)
+    manifest: RevalueManifestConfig = field(default_factory=RevalueManifestConfig)
     value: RevalueValueConfig = field(default_factory=RevalueValueConfig)
     returns: RevalueReturnsConfig = field(default_factory=RevalueReturnsConfig)
+    base: RevalueBaseConfig = field(default_factory=RevalueBaseConfig)
     output: RevalueOutputConfig = field(default_factory=RevalueOutputConfig)
     zp: RevalueZPConfig = field(default_factory=RevalueZPConfig)
     fusion: RevalueFusionConfig = field(default_factory=RevalueFusionConfig)

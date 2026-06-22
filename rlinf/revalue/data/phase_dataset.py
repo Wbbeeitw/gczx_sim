@@ -125,12 +125,12 @@ class RevaluePhaseDataset(Dataset):
             LeRobotDatasetMetadata,
         )
 
-        from examples.recap.process.episode_subset_utils import (
-            load_episode_subset_file,
+        from rlinf.data.datasets.recap.utils import decode_image_struct_batch
+        from rlinf.revalue.data.episode_manifest import (
+            load_episode_manifest,
             resolve_episode_split_for_dataset,
             resolve_episode_subset_for_dataset,
         )
-        from rlinf.data.datasets.recap.utils import decode_image_struct_batch
 
         self.dataset_path = Path(dataset_path).absolute()
         self.split = split
@@ -141,7 +141,7 @@ class RevaluePhaseDataset(Dataset):
         total_episodes = int(self.dataset_meta.total_episodes)
 
         if episode_split_path:
-            raw_spec = load_episode_subset_file(episode_split_path)
+            raw_spec = load_episode_manifest(episode_split_path)
             split_spec = resolve_episode_split_for_dataset(raw_spec, self.dataset_path)
             if split_spec is None:
                 raise ValueError(
@@ -154,7 +154,7 @@ class RevaluePhaseDataset(Dataset):
                 else split_spec.val_episodes
             )
         elif episode_subset_path:
-            raw_spec = load_episode_subset_file(episode_subset_path)
+            raw_spec = load_episode_manifest(episode_subset_path)
             subset_spec = resolve_episode_subset_for_dataset(raw_spec, self.dataset_path)
             if subset_spec is None:
                 raise ValueError(

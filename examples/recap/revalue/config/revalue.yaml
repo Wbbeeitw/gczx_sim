@@ -26,6 +26,15 @@ data:
   episode_subset_path: null
   episode_split_path: null
 
+manifest:
+  output_path: null
+  num_episodes: null
+  success_ratio: 0.5
+  val_episode_ratio: 0.2
+  test_episode_ratio: 0.0
+  success_phase: 4
+  overwrite: false
+
 value:
   checkpoint: /home/enine/rlinf_workspace/results/value_sft/checkpoints/global_step_5000
   siglip_path: /home/enine/rlinf_workspace/models/siglip2-so400m-patch14-224
@@ -40,6 +49,22 @@ returns:
   # Raw return range used only to map raw returns into the critic value scale.
   global_min: -700.0
   global_max: 0.0
+  tag: null
+  dataset_type: rollout
+  failure_reward: -300.0
+  num_workers: 64
+  compute: true
+
+base:
+  tag: base
+  returns_tag: null
+  compute_returns: true
+  compute_advantages: true
+  batch_size: 256
+  num_workers_per_gpu: 12
+  prefetch_factor: 2
+  flush_interval: 256
+  max_samples: null
 
 output:
   root: /home/enine/rlinf_workspace/results/revalue/libero_task0_shared_mlp
@@ -47,6 +72,7 @@ output:
   zp_dir: null
   fusion_dir: null
   predictions_path: null
+  comparison_path: null
 
 zp:
   hidden_dim: 256
@@ -75,7 +101,7 @@ train:
   seed: 42
 
 recap:
-  source_tag: base
+  source_tag: null
   source_advantages_path: null
   output_tag: zp_fused
   lookahead_step: 10

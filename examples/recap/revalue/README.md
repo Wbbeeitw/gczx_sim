@@ -1,79 +1,119 @@
 # Revalue
 
-Revalue 是 ReCap 的 phase/progress-aware value 重估计路径，目前处于维护状态。
-它刻意将论文实验面保持得很小：
+Revalue is the maintained phase/progress-aware value re-estimation workflow for
+ReCap. It replaces the old scattered experiment scripts with one entry point:
 
-1. `base`: 使用 raw `ValueCriticModel`/pi0.5 critic advantage tag。
-2. `shared_mlp_fusion`: 训练一个 shared MLP z/p head，冻结它，然后训练一个
-   logit-space fusion MLP。
+```bash
+python examples/recap/revalue/revalue.py
+```
 
-Fused 路径严格分为两阶段：
+The maintained comparison has only two methods:
+
+1. `base`: raw pi0.5/value critic return logits and ReCap advantages.
+2. `shared_mlp_fusion`: train a shared MLP z/p head, freeze it, then train a
+   logit-space fusion MLP to correct the raw value distribution.
+
+## Workflow
+
+The full fused workflow is:
 
 ```text
-train_zp:
-  frozen ValueCriticModel features -> SharedMLPPhaseProgressHead
+prepare_data
+  -> sample balanced episode subset
+  -> write one train/val/test manifest
 
-train_fusion:
-  frozen z/p head + raw value logits -> LogitFusionMLP -> fused value
+build_base
+  -> compute returns sidecar
+  -> compute raw critic base advantages with value_logits_current
+
+extract_features
+  -> cache frozen VLM features for train/val
+
+train_zp
+  -> train SharedMLPPhaseProgressHead
+
+train_fusion
+  -> freeze z/p head
+  -> train LogitFusionMLP
+
+predict
+  -> write frame-level fused values
+
+export
+  -> write meta/advantages_<output_tag>.parquet for ReCap
+
+compare_returns
+  -> write return prediction comparison JSON
 ```
 
-输出是标准的 ReCap advantage parquet：
-
-```text
-<dataset>/meta/advantages_<output_tag>.parquet
-```
-
-下游 CFG/ReCap 训练通过以下方式选择结果：
-
-```yaml
-data:
-  advantage_tag: <output_tag>
-```
-
-## 用法
-
-运行完整的 fused pipeline：
+Run the whole fused path:
 
 ```bash
 python examples/recap/revalue/revalue.py \
   --config-name revalue_shared_mlp_fusion \
-  data.dataset_path=/home/enine/rlinf_workspace/datasets/... \
-  value.checkpoint=/home/enine/rlinf_workspace/results/.../global_step_5000 \
-  recap.source_tag=base \
-  recap.output_tag=zp_fused
+  data.dataset_path=/workspace/datasets/recap_libero10_task0/libero10_task0_train \
+  value.checkpoint=/workspace/results/value_sft/checkpoints/global_step_5000 \
+  value.siglip_path=/workspace/models/siglip2-so400m-patch14-224 \
+  value.gemma3_path=/workspace/models/gemma-3-270m \
+  value.tokenizer_path=/workspace/models/gemma-3-270m \
+  output.root=/workspace/results/revalue/libero_task0_shared_mlp \
+  base.tag=base30ep_random200_logits_phase_dist \
+  recap.output_tag=base30ep_random200_shared_mlp_fusion \
+  manifest.num_episodes=200
 ```
 
-分 stage 运行：
+Run one stage at a time:
 
 ```bash
+python examples/recap/revalue/revalue.py stage=prepare_data
+python examples/recap/revalue/revalue.py stage=build_base
 python examples/recap/revalue/revalue.py stage=extract_features
 python examples/recap/revalue/revalue.py stage=train_zp
 python examples/recap/revalue/revalue.py stage=train_fusion
 python examples/recap/revalue/revalue.py stage=predict
 python examples/recap/revalue/revalue.py stage=export
+python examples/recap/revalue/revalue.py stage=compare_returns
 ```
 
-检查 base tag 是否存在：
+Run only the base data path:
 
 ```bash
 python examples/recap/revalue/revalue.py \
   --config-name revalue_base \
-  recap.source_tag=base
+  data.dataset_path=/workspace/datasets/recap_libero10_task0/libero10_task0_train \
+  value.checkpoint=/workspace/results/value_sft/checkpoints/global_step_5000 \
+  base.tag=base30ep_random200_logits_phase_dist \
+  manifest.num_episodes=200
 ```
 
-## 所需的 Source Tag
+## Outputs
 
-Fused 方法要求源 advantage parquet 包含 `value_logits_current`。使用以下方式生成 base tag：
-
-```yaml
-advantage:
-  tag: base
-  save_value_distribution: true
-```
-
-非 source 输出（如 features、checkpoints、predictions）应放在 source tree 之外，
-例如：
+For `output.root=/workspace/results/revalue/run`, Revalue writes:
 
 ```text
-/home/enine/rlinf_workspace/results/revalue/
+/workspace/results/revalue/run/episode_manifest.json
+/workspace/results/revalue/run/features/{train,val}.pt
+/workspace/results/revalue/run/zp_head/zp_head.pt
+/workspace/results/revalue/run/fusion/fusion.pt
+/workspace/results/revalue/run/predictions.parquet
+/workspace/results/revalue/run/return_compare.json
 ```
+
+The dataset receives standard ReCap sidecars:
+
+```text
+<dataset>/meta/returns_<base.tag>.parquet
+<dataset>/meta/advantages_<base.tag>.parquet
+<dataset>/meta/advantages_<recap.output_tag>.parquet
+```
+
+Downstream CFG/ReCap training keeps using the original infra. Select the raw
+base tag or fused tag with:
+
+```yaml
+data:
+  advantage_tag: <base.tag or recap.output_tag>
+```
+
+Detailed commands for the current LIBERO task0 experiment are in
+`EXPERIMENT_WORKFLOW.md`.

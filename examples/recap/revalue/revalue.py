@@ -30,8 +30,10 @@ if str(REPO_ROOT) not in sys.path:
 
 from rlinf.revalue.config import (
     RevalueConfig,
+    RevalueBaseConfig,
     RevalueDataConfig,
     RevalueFusionConfig,
+    RevalueManifestConfig,
     RevalueOutputConfig,
     RevalueRecapConfig,
     RevalueReturnsConfig,
@@ -52,8 +54,10 @@ def _to_dataclass(cfg: DictConfig) -> RevalueConfig:
         method=obj.get("method", "shared_mlp_fusion"),
         stage=obj.get("stage", "all"),
         data=RevalueDataConfig(**(obj.get("data") or {})),
+        manifest=RevalueManifestConfig(**(obj.get("manifest") or {})),
         value=RevalueValueConfig(**(obj.get("value") or {})),
         returns=RevalueReturnsConfig(**(obj.get("returns") or {})),
+        base=RevalueBaseConfig(**(obj.get("base") or {})),
         output=RevalueOutputConfig(**(obj.get("output") or {})),
         zp=RevalueZPConfig(**(obj.get("zp") or {})),
         fusion=RevalueFusionConfig(**(obj.get("fusion") or {})),

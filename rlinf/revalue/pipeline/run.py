@@ -24,8 +24,11 @@ from rlinf.revalue.constants import (
     METHOD_BASE,
     METHOD_SHARED_MLP_FUSION,
     STAGE_ALL,
+    STAGE_BUILD_BASE,
+    STAGE_COMPARE_RETURNS,
     STAGE_EXPORT,
     STAGE_EXTRACT_FEATURES,
+    STAGE_PREPARE_DATA,
     STAGE_PREDICT,
     STAGE_TRAIN_FUSION,
     STAGE_TRAIN_ZP,
@@ -34,6 +37,20 @@ from rlinf.revalue.constants import (
 )
 from rlinf.revalue.data import resolve_advantage_path, validate_fusion_advantages
 from rlinf.revalue.data.advantage_table import read_advantages
+from rlinf.revalue.data.episode_manifest import (
+    EpisodeManifestConfig,
+    build_episode_manifest,
+)
+from rlinf.revalue.evaluation import (
+    ReturnComparisonConfig,
+    compare_return_predictions,
+)
+from rlinf.revalue.pipeline.base_generation import (
+    BaseAdvantageGenerationConfig,
+    ReturnGenerationConfig,
+    compute_revalue_base_advantages,
+    compute_revalue_returns,
+)
 from rlinf.revalue.pipeline.extract_features import (
     FeatureExtractionConfig,
     extract_features,
@@ -70,13 +87,48 @@ def _output_paths(cfg: RevalueConfig) -> dict[str, Path]:
             if cfg.output.predictions_path
             else root / "predictions.parquet"
         ),
+        "comparison": (
+            Path(cfg.output.comparison_path)
+            if cfg.output.comparison_path
+            else root / "return_compare.json"
+        ),
+        "manifest": (
+            Path(cfg.manifest.output_path)
+            if cfg.manifest.output_path
+            else root / "episode_manifest.json"
+        ),
     }
 
 
 def _source_advantage_path(cfg: RevalueConfig) -> Path:
     if cfg.recap.source_advantages_path:
         return Path(cfg.recap.source_advantages_path)
-    return resolve_advantage_path(cfg.data.dataset_path, cfg.recap.source_tag)
+    source_tag = cfg.recap.source_tag or cfg.base.tag
+    return resolve_advantage_path(cfg.data.dataset_path, source_tag)
+
+
+def _manifest_path(cfg: RevalueConfig, paths: dict[str, Path]) -> Path | None:
+    if cfg.data.episode_split_path:
+        return Path(cfg.data.episode_split_path)
+    if cfg.data.episode_subset_path:
+        return Path(cfg.data.episode_subset_path)
+    return paths["manifest"]
+
+
+def _feature_subset_path(cfg: RevalueConfig) -> Path | None:
+    if cfg.data.episode_split_path:
+        return None
+    if cfg.data.episode_subset_path:
+        return Path(cfg.data.episode_subset_path)
+    return None
+
+
+def _feature_split_path(cfg: RevalueConfig, paths: dict[str, Path]) -> Path | None:
+    if cfg.data.episode_split_path:
+        return Path(cfg.data.episode_split_path)
+    if cfg.data.episode_subset_path:
+        return None
+    return paths["manifest"]
 
 
 def _validate_base(cfg: RevalueConfig) -> Path:
@@ -88,14 +140,110 @@ def _validate_base(cfg: RevalueConfig) -> Path:
 
 def _stages_for_request(stage: str) -> list[str]:
     if stage == STAGE_ALL:
-        return [
+        if_requested = [
+            STAGE_PREPARE_DATA,
+            STAGE_BUILD_BASE,
+        ]
+        return if_requested + [
             STAGE_EXTRACT_FEATURES,
             STAGE_TRAIN_ZP,
             STAGE_TRAIN_FUSION,
             STAGE_PREDICT,
             STAGE_EXPORT,
+            STAGE_COMPARE_RETURNS,
         ]
     return [stage]
+
+
+def _stages_for_method(cfg: RevalueConfig) -> list[str]:
+    if cfg.stage != STAGE_ALL:
+        return _stages_for_request(cfg.stage)
+    if cfg.method == METHOD_BASE:
+        return [
+            STAGE_PREPARE_DATA,
+            STAGE_BUILD_BASE,
+        ]
+    return _stages_for_request(cfg.stage)
+
+
+def _run_prepare_data(cfg: RevalueConfig, paths: dict[str, Path]) -> Path:
+    existing_manifest = _manifest_path(cfg, paths)
+    if cfg.data.episode_split_path or cfg.data.episode_subset_path:
+        if existing_manifest is None:
+            raise ValueError("Expected an existing episode manifest path.")
+        logger.info("using existing episode manifest: %s", existing_manifest)
+        return existing_manifest
+
+    manifest_path = build_episode_manifest(
+        EpisodeManifestConfig(
+            dataset_path=cfg.data.dataset_path,
+            output_path=str(paths["manifest"]),
+            label_name=cfg.data.label_name,
+            num_episodes=cfg.manifest.num_episodes or cfg.data.max_episodes,
+            success_ratio=cfg.manifest.success_ratio,
+            val_episode_ratio=cfg.manifest.val_episode_ratio,
+            test_episode_ratio=cfg.manifest.test_episode_ratio,
+            seed=cfg.data.seed,
+            success_phase=cfg.manifest.success_phase,
+            overwrite=cfg.manifest.overwrite,
+        )
+    )
+    logger.info("prepared Revalue episode manifest: %s", manifest_path)
+    return manifest_path
+
+
+def _run_build_base(cfg: RevalueConfig, paths: dict[str, Path]) -> Path:
+    tag = cfg.base.tag
+    returns_tag = cfg.base.returns_tag or cfg.returns.tag or tag
+    manifest_path = _manifest_path(cfg, paths)
+    if cfg.base.compute_returns and cfg.returns.compute:
+        returns_path = compute_revalue_returns(
+            ReturnGenerationConfig(
+                dataset_path=cfg.data.dataset_path,
+                tag=returns_tag,
+                dataset_type=cfg.returns.dataset_type,
+                gamma=cfg.recap.gamma,
+                failure_reward=cfg.returns.failure_reward,
+                num_workers=cfg.returns.num_workers,
+            )
+        )
+        logger.info("computed Revalue returns: %s", returns_path)
+
+    if cfg.base.compute_advantages:
+        advantages_path = compute_revalue_base_advantages(
+            BaseAdvantageGenerationConfig(
+                dataset_path=cfg.data.dataset_path,
+                tag=tag,
+                value_checkpoint=cfg.value.checkpoint,
+                returns_tag=returns_tag,
+                episode_subset_path=str(manifest_path) if manifest_path else None,
+                dataset_type=cfg.returns.dataset_type,
+                robot_type=cfg.data.robot_type,
+                model_type=cfg.data.model_type,
+                critic_expert_variant=cfg.value.critic_expert_variant,
+                tokenizer_path=cfg.value.tokenizer_path,
+                siglip_path=cfg.value.siglip_path,
+                gemma3_path=cfg.value.gemma3_path,
+                num_bins=cfg.value.num_bins,
+                value_min=cfg.value.v_min,
+                value_max=cfg.value.v_max,
+                return_min=cfg.returns.global_min,
+                return_max=cfg.returns.global_max,
+                lookahead_step=cfg.recap.lookahead_step,
+                gamma=cfg.recap.gamma,
+                positive_quantile=cfg.recap.positive_quantile,
+                discount_next_value=cfg.recap.discount_next_value,
+                batch_size=cfg.base.batch_size,
+                num_workers_per_gpu=cfg.base.num_workers_per_gpu,
+                prefetch_factor=cfg.base.prefetch_factor,
+                flush_interval=cfg.base.flush_interval,
+                max_samples=cfg.base.max_samples,
+            )
+        )
+        logger.info("computed Revalue base advantages: %s", advantages_path)
+        return advantages_path
+
+    return resolve_advantage_path(cfg.data.dataset_path, tag)
 
 
 def run_revalue(cfg: RevalueConfig) -> None:
@@ -112,31 +260,21 @@ def run_revalue(cfg: RevalueConfig) -> None:
     paths = _output_paths(cfg)
     paths["root"].mkdir(parents=True, exist_ok=True)
 
-    if cfg.method == METHOD_BASE:
-        _validate_base(cfg)
-        logger.info(
-            "method=base does not train z/p or fusion. Use data.advantage_tag=%s "
-            "in CFG/ReCap training.",
-            cfg.recap.source_tag,
-        )
-        return
+    requested_stages = _stages_for_method(cfg)
 
-    if cfg.method != METHOD_SHARED_MLP_FUSION:
+    if cfg.method not in {METHOD_BASE, METHOD_SHARED_MLP_FUSION}:
         raise ValueError(f"Unsupported method={cfg.method!r}")
 
-    requested_stages = _stages_for_request(cfg.stage)
     source_advantages = _source_advantage_path(cfg)
-    if any(
-        stage in {STAGE_TRAIN_FUSION, STAGE_PREDICT}
-        for stage in requested_stages
-    ):
-        source_df = read_advantages(source_advantages)
-        validate_fusion_advantages(source_df, source=source_advantages)
-    elif STAGE_EXPORT in requested_stages:
-        read_advantages(source_advantages)
 
     for stage in requested_stages:
-        if stage == STAGE_EXTRACT_FEATURES:
+        if stage == STAGE_PREPARE_DATA:
+            _run_prepare_data(cfg, paths)
+        elif stage == STAGE_BUILD_BASE:
+            source_advantages = _run_build_base(cfg, paths)
+        elif stage == STAGE_EXTRACT_FEATURES:
+            feature_subset_path = _feature_subset_path(cfg)
+            feature_split_path = _feature_split_path(cfg, paths)
             extract_features(
                 FeatureExtractionConfig(
                     dataset_path=cfg.data.dataset_path,
@@ -158,8 +296,12 @@ def run_revalue(cfg: RevalueConfig) -> None:
                     label_name=cfg.data.label_name,
                     seed=cfg.data.seed,
                     max_episodes=cfg.data.max_episodes,
-                    episode_subset_path=cfg.data.episode_subset_path,
-                    episode_split_path=cfg.data.episode_split_path,
+                    episode_subset_path=(
+                        str(feature_subset_path) if feature_subset_path else None
+                    ),
+                    episode_split_path=(
+                        str(feature_split_path) if feature_split_path else None
+                    ),
                     batch_size=cfg.train.extract_batch_size,
                     num_workers=cfg.train.num_workers,
                     device=cfg.train.device,
@@ -185,6 +327,8 @@ def run_revalue(cfg: RevalueConfig) -> None:
                 )
             )
         elif stage == STAGE_TRAIN_FUSION:
+            source_df = read_advantages(source_advantages)
+            validate_fusion_advantages(source_df, source=source_advantages)
             train_fusion(
                 FusionTrainingConfig(
                     features_dir=str(paths["features"]),
@@ -212,6 +356,8 @@ def run_revalue(cfg: RevalueConfig) -> None:
                 )
             )
         elif stage == STAGE_PREDICT:
+            source_df = read_advantages(source_advantages)
+            validate_fusion_advantages(source_df, source=source_advantages)
             predict_fused_values(
                 PredictionConfig(
                     features_dir=str(paths["features"]),
@@ -224,6 +370,7 @@ def run_revalue(cfg: RevalueConfig) -> None:
                 )
             )
         elif stage == STAGE_EXPORT:
+            read_advantages(source_advantages)
             export_fused_advantages(
                 ExportConfig(
                     dataset_path=cfg.data.dataset_path,
@@ -236,6 +383,22 @@ def run_revalue(cfg: RevalueConfig) -> None:
                     discount_next_value=cfg.recap.discount_next_value,
                     split=cfg.recap.export_split,
                 )
+            )
+        elif stage == STAGE_COMPARE_RETURNS:
+            read_advantages(source_advantages)
+            report = compare_return_predictions(
+                ReturnComparisonConfig(
+                    advantages_path=str(source_advantages),
+                    predictions_path=str(paths["predictions"]),
+                    output_path=str(paths["comparison"]),
+                    return_min=cfg.returns.global_min,
+                    return_max=cfg.returns.global_max,
+                )
+            )
+            logger.info(
+                "saved Revalue return comparison to %s splits=%s",
+                paths["comparison"],
+                sorted(report.get("frame_level", {})),
             )
         else:
             raise ValueError(f"Unhandled stage={stage!r}")
