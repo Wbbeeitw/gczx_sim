@@ -17,9 +17,11 @@
 from rlinf.revalue.evaluation.return_compare import (
     ReturnComparisonConfig,
     compare_return_predictions,
+    summarize_return_report,
 )
 
 __all__ = [
     "ReturnComparisonConfig",
     "compare_return_predictions",
+    "summarize_return_report",
 ]

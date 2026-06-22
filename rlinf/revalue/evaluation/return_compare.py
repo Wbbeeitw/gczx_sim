@@ -52,15 +52,29 @@ def _prediction_metrics(part: pd.DataFrame, pred_col: str) -> dict[str, float]:
 def _split_frame_report(part: pd.DataFrame) -> dict[str, Any]:
     base = _prediction_metrics(part, "base_pred_return")
     fused = _prediction_metrics(part, "fused_pred_return")
-    improvement = 0.0
+    mse_improvement = 0.0
     if base["mse"] > 0.0:
-        improvement = 100.0 * (1.0 - fused["mse"] / base["mse"])
+        mse_improvement = 100.0 * (1.0 - fused["mse"] / base["mse"])
+    mae_improvement = 0.0
+    if base["mae"] > 0.0:
+        mae_improvement = 100.0 * (1.0 - fused["mae"] / base["mae"])
+    rmse_improvement = 0.0
+    if base["rmse"] > 0.0:
+        rmse_improvement = 100.0 * (1.0 - fused["rmse"] / base["rmse"])
+    bias_abs_improvement = 0.0
+    base_bias_abs = abs(base["bias"])
+    fused_bias_abs = abs(fused["bias"])
+    if base_bias_abs > 0.0:
+        bias_abs_improvement = 100.0 * (1.0 - fused_bias_abs / base_bias_abs)
     return {
         "rows": int(len(part)),
         "episodes": int(part["episode_index"].nunique()),
         "base": base,
         "shared_mlp_fusion": fused,
-        "mse_improvement_pct": float(improvement),
+        "mse_improvement_pct": float(mse_improvement),
+        "rmse_improvement_pct": float(rmse_improvement),
+        "mae_improvement_pct": float(mae_improvement),
+        "bias_abs_improvement_pct": float(bias_abs_improvement),
     }
 
 
@@ -170,3 +184,93 @@ def compare_return_predictions(cfg: ReturnComparisonConfig) -> dict[str, Any]:
 
     save_json(report, cfg.output_path)
     return report
+
+
+def summarize_return_report(report: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """Flatten a return comparison report into frame and episode summary rows."""
+    frame_rows: list[dict[str, Any]] = []
+    for split, part in report.get("frame_level", {}).items():
+        base = part.get("base", {})
+        fused = part.get("shared_mlp_fusion", {})
+        base_mse = base.get("mse")
+        fused_mse = fused.get("mse")
+        base_rmse = base.get("rmse")
+        fused_rmse = fused.get("rmse")
+        base_mae = base.get("mae")
+        fused_mae = fused.get("mae")
+        base_bias = base.get("bias")
+        fused_bias = fused.get("bias")
+
+        mse_improvement = part.get("mse_improvement_pct")
+        if mse_improvement is None and base_mse not in (None, 0) and fused_mse is not None:
+            mse_improvement = 100.0 * (1.0 - float(fused_mse) / float(base_mse))
+
+        rmse_improvement = part.get("rmse_improvement_pct")
+        if (
+            rmse_improvement is None
+            and base_rmse not in (None, 0)
+            and fused_rmse is not None
+        ):
+            rmse_improvement = 100.0 * (
+                1.0 - float(fused_rmse) / float(base_rmse)
+            )
+
+        mae_improvement = part.get("mae_improvement_pct")
+        if mae_improvement is None and base_mae not in (None, 0) and fused_mae is not None:
+            mae_improvement = 100.0 * (1.0 - float(fused_mae) / float(base_mae))
+
+        bias_abs_improvement = part.get("bias_abs_improvement_pct")
+        if (
+            bias_abs_improvement is None
+            and base_bias is not None
+            and fused_bias is not None
+            and abs(float(base_bias)) > 0.0
+        ):
+            bias_abs_improvement = 100.0 * (
+                1.0 - abs(float(fused_bias)) / abs(float(base_bias))
+            )
+        frame_rows.append(
+            {
+                "split": split,
+                "rows": part.get("rows"),
+                "episodes": part.get("episodes"),
+                "base_mse": base_mse,
+                "fused_mse": fused_mse,
+                "mse_improvement_pct": mse_improvement,
+                "base_rmse": base_rmse,
+                "fused_rmse": fused_rmse,
+                "rmse_improvement_pct": rmse_improvement,
+                "base_mae": base_mae,
+                "fused_mae": fused_mae,
+                "mae_improvement_pct": mae_improvement,
+                "base_bias": base_bias,
+                "fused_bias": fused_bias,
+                "bias_abs_improvement_pct": bias_abs_improvement,
+            }
+        )
+
+    episode_rows: list[dict[str, Any]] = []
+    for split, part in report.get("episode_level", {}).items():
+        episodes = int(part.get("episodes", 0) or 0)
+        improved = int(part.get("episodes_improved_mse", 0) or 0)
+        improved_pct = 100.0 * improved / episodes if episodes > 0 else 0.0
+        episode_rows.append(
+            {
+                "split": split,
+                "episodes": episodes,
+                "episodes_improved_mse": improved,
+                "episodes_improved_mse_pct": improved_pct,
+                "mean_base_mse": part.get("mean_base_mse"),
+                "mean_fused_mse": part.get("mean_fused_mse"),
+                "mean_mse_gain": part.get("mean_mse_gain"),
+                "median_mse_gain": part.get("median_mse_gain"),
+                "mean_base_mae": part.get("mean_base_mae"),
+                "mean_fused_mae": part.get("mean_fused_mae"),
+                "mean_mae_gain": part.get("mean_mae_gain"),
+            }
+        )
+
+    return {
+        "frame_rows": frame_rows,
+        "episode_rows": episode_rows,
+    }
