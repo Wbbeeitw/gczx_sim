@@ -69,6 +69,7 @@ base:
 output:
   root: /home/enine/rlinf_workspace/results/revalue/libero_task0_shared_mlp
   features_dir: null
+  source_features_dir: null
   zp_dir: null
   fusion_dir: null
   predictions_path: null

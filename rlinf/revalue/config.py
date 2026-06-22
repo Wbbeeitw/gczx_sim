@@ -98,6 +98,7 @@ class RevalueOutputConfig:
 
     root: str = "/home/enine/rlinf_workspace/results/revalue/run"
     features_dir: str | None = None
+    source_features_dir: str | None = None
     zp_dir: str | None = None
     fusion_dir: str | None = None
     predictions_path: str | None = None

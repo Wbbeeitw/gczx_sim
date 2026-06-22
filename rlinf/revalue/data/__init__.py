@@ -19,6 +19,10 @@ from rlinf.revalue.data.feature_cache import (
     build_feature_loaders,
     collate_feature_batch,
 )
+from rlinf.revalue.data.feature_resplit import (
+    FeatureResplitConfig,
+    resplit_feature_cache,
+)
 from rlinf.revalue.data.advantage_table import (
     FeatureAdvantageDataset,
     build_fusion_loaders,
@@ -43,6 +47,7 @@ __all__ = [
     "EpisodeSubsetSpec",
     "FeatureAdvantageDataset",
     "FeatureCache",
+    "FeatureResplitConfig",
     "build_episode_manifest",
     "build_feature_loaders",
     "build_fusion_loaders",
@@ -54,5 +59,6 @@ __all__ = [
     "resolve_episode_subset_for_dataset",
     "resolve_advantage_path",
     "build_phase_datasets",
+    "resplit_feature_cache",
     "validate_fusion_advantages",
 ]

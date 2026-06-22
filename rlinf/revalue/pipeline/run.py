@@ -30,6 +30,7 @@ from rlinf.revalue.constants import (
     STAGE_EXTRACT_FEATURES,
     STAGE_PREPARE_DATA,
     STAGE_PREDICT,
+    STAGE_RESPLIT_FEATURES,
     STAGE_TRAIN_FUSION,
     STAGE_TRAIN_ZP,
     SUPPORTED_METHODS,
@@ -40,6 +41,10 @@ from rlinf.revalue.data.advantage_table import read_advantages
 from rlinf.revalue.data.episode_manifest import (
     EpisodeManifestConfig,
     build_episode_manifest,
+)
+from rlinf.revalue.data.feature_resplit import (
+    FeatureResplitConfig,
+    resplit_feature_cache,
 )
 from rlinf.revalue.evaluation import (
     ReturnComparisonConfig,
@@ -246,6 +251,28 @@ def _run_build_base(cfg: RevalueConfig, paths: dict[str, Path]) -> Path:
     return resolve_advantage_path(cfg.data.dataset_path, tag)
 
 
+def _run_resplit_features(cfg: RevalueConfig, paths: dict[str, Path]) -> None:
+    if not cfg.output.source_features_dir:
+        raise ValueError("output.source_features_dir is required for resplit_features")
+    manifest = resplit_feature_cache(
+        FeatureResplitConfig(
+            source_dir=cfg.output.source_features_dir,
+            output_dir=str(paths["features"]),
+            val_episode_ratio=cfg.manifest.val_episode_ratio,
+            test_episode_ratio=cfg.manifest.test_episode_ratio,
+            seed=cfg.data.seed,
+            manifest_path=str(paths["manifest"]),
+            overwrite=cfg.manifest.overwrite,
+        )
+    )
+    logger.info(
+        "resplit Revalue features: source=%s output=%s rows=%s",
+        cfg.output.source_features_dir,
+        paths["features"],
+        manifest.get("split_rows"),
+    )
+
+
 def run_revalue(cfg: RevalueConfig) -> None:
     """Run the requested Revalue method/stage."""
     if cfg.method not in SUPPORTED_METHODS:
@@ -272,6 +299,8 @@ def run_revalue(cfg: RevalueConfig) -> None:
             _run_prepare_data(cfg, paths)
         elif stage == STAGE_BUILD_BASE:
             source_advantages = _run_build_base(cfg, paths)
+        elif stage == STAGE_RESPLIT_FEATURES:
+            _run_resplit_features(cfg, paths)
         elif stage == STAGE_EXTRACT_FEATURES:
             feature_subset_path = _feature_subset_path(cfg)
             feature_split_path = _feature_split_path(cfg, paths)

@@ -35,7 +35,7 @@ class ReturnComparisonConfig:
     output_path: str
     return_min: float = -700.0
     return_max: float = 0.0
-    splits: tuple[str, ...] = ("all", "train", "val")
+    splits: tuple[str, ...] = ("all", "train", "val", "test")
 
 
 def _prediction_metrics(part: pd.DataFrame, pred_col: str) -> dict[str, float]:

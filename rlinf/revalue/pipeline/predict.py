@@ -142,7 +142,22 @@ def predict_fused_values(cfg: PredictionConfig) -> Path:
         batch_size=cfg.batch_size,
         device=cfg.device,
     )
+    frames = [train_df, val_df]
+    test_cache = Path(cfg.features_dir) / "test.pt"
+    if test_cache.exists():
+        test_df = _predict_split(
+            cache_path=test_cache,
+            advantages_df=advantages_df,
+            zp_head=zp_head,
+            fusion=fusion,
+            atoms=atoms,
+            alpha=alpha,
+            split="test",
+            batch_size=cfg.batch_size,
+            device=cfg.device,
+        )
+        frames.append(test_df)
     out_path = Path(cfg.output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    pd.concat([train_df, val_df], ignore_index=True).to_parquet(out_path, index=False)
+    pd.concat(frames, ignore_index=True).to_parquet(out_path, index=False)
     return out_path
