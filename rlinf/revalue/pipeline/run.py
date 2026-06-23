@@ -25,12 +25,15 @@ from rlinf.revalue.constants import (
     METHOD_SHARED_MLP_FUSION,
     STAGE_ALL,
     STAGE_BUILD_BASE,
+    STAGE_COLLECT_ROLLOUTS,
     STAGE_COMPARE_RETURNS,
+    STAGE_EVAL_POLICY,
     STAGE_EXPORT,
     STAGE_EXTRACT_FEATURES,
     STAGE_PREPARE_DATA,
     STAGE_PREDICT,
     STAGE_RESPLIT_FEATURES,
+    STAGE_TRAIN_CFG,
     STAGE_TRAIN_FUSION,
     STAGE_TRAIN_ZP,
     SUPPORTED_METHODS,
@@ -55,6 +58,15 @@ from rlinf.revalue.pipeline.base_generation import (
     ReturnGenerationConfig,
     compute_revalue_base_advantages,
     compute_revalue_returns,
+)
+from rlinf.revalue.pipeline.embodied import (
+    DownstreamCFGTrainingConfig,
+    LiberoRolloutCollectionConfig,
+    PolicyEvaluationConfig,
+    collect_libero_rollouts,
+    evaluate_policy_checkpoint,
+    resolve_latest_trained_checkpoint,
+    train_cfg_from_advantages,
 )
 from rlinf.revalue.pipeline.extract_features import (
     FeatureExtractionConfig,
@@ -102,6 +114,9 @@ def _output_paths(cfg: RevalueConfig) -> dict[str, Path]:
             if cfg.manifest.output_path
             else root / "episode_manifest.json"
         ),
+        "train_cfg": root / "downstream_train",
+        "policy_eval": root / "policy_eval",
+        "rollout_collect": root / "collected_rollouts",
     }
 
 
@@ -164,11 +179,19 @@ def _stages_for_method(cfg: RevalueConfig) -> list[str]:
     if cfg.stage != STAGE_ALL:
         return _stages_for_request(cfg.stage)
     if cfg.method == METHOD_BASE:
-        return [
+        stages = [
             STAGE_PREPARE_DATA,
             STAGE_BUILD_BASE,
         ]
-    return _stages_for_request(cfg.stage)
+    else:
+        stages = _stages_for_request(cfg.stage)
+    if cfg.cfg_train.enabled:
+        stages.append(STAGE_TRAIN_CFG)
+    if cfg.policy_eval.enabled:
+        stages.append(STAGE_EVAL_POLICY)
+    if cfg.rollout_collect.enabled:
+        stages.append(STAGE_COLLECT_ROLLOUTS)
+    return stages
 
 
 def _run_prepare_data(cfg: RevalueConfig, paths: dict[str, Path]) -> Path:
@@ -271,6 +294,70 @@ def _run_resplit_features(cfg: RevalueConfig, paths: dict[str, Path]) -> None:
         paths["features"],
         manifest.get("split_rows"),
     )
+
+
+def _advantage_tag_for_cfg_train(cfg: RevalueConfig) -> str:
+    if cfg.cfg_train.advantage_tag:
+        return cfg.cfg_train.advantage_tag
+    if cfg.method == METHOD_BASE:
+        return cfg.base.tag
+    return cfg.recap.output_tag
+
+
+def _cfg_train_dataset_path(cfg: RevalueConfig) -> str:
+    return cfg.cfg_train.dataset_path or cfg.data.dataset_path
+
+
+def _cfg_train_base_model_path(cfg: RevalueConfig) -> str:
+    if cfg.cfg_train.base_model_path:
+        return cfg.cfg_train.base_model_path
+    raise ValueError("cfg_train.base_model_path is required for train_cfg stage")
+
+
+def _cfg_train_episode_split_path(cfg: RevalueConfig, paths: dict[str, Path]) -> str | None:
+    if cfg.cfg_train.episode_split_path:
+        return cfg.cfg_train.episode_split_path
+    manifest_path = _manifest_path(cfg, paths)
+    return str(manifest_path) if manifest_path else None
+
+
+def _policy_eval_model_path(cfg: RevalueConfig) -> str:
+    if cfg.policy_eval.model_path:
+        return cfg.policy_eval.model_path
+    base_model = cfg.cfg_train.base_model_path
+    if base_model:
+        return base_model
+    raise ValueError("policy_eval.model_path is required for eval_policy stage")
+
+
+def _resolve_policy_eval_checkpoint(cfg: RevalueConfig, paths: dict[str, Path]) -> str | None:
+    if cfg.policy_eval.checkpoint_path:
+        return cfg.policy_eval.checkpoint_path
+    summary_path = paths["train_cfg"] / "train_cfg_summary.json"
+    if summary_path.exists():
+        return resolve_latest_trained_checkpoint(summary_path)
+    return None
+
+
+def _resolve_rollout_collect_model_path(cfg: RevalueConfig) -> str:
+    if cfg.rollout_collect.model_path:
+        return cfg.rollout_collect.model_path
+    if cfg.policy_eval.model_path:
+        return cfg.policy_eval.model_path
+    if cfg.cfg_train.base_model_path:
+        return cfg.cfg_train.base_model_path
+    raise ValueError(
+        "rollout_collect.model_path is required for collect_rollouts stage"
+    )
+
+
+def _resolve_rollout_collect_checkpoint(cfg: RevalueConfig, paths: dict[str, Path]) -> str | None:
+    if cfg.rollout_collect.checkpoint_path:
+        return cfg.rollout_collect.checkpoint_path
+    summary_path = paths["train_cfg"] / "train_cfg_summary.json"
+    if summary_path.exists():
+        return resolve_latest_trained_checkpoint(summary_path)
+    return None
 
 
 def run_revalue(cfg: RevalueConfig) -> None:
@@ -428,6 +515,99 @@ def run_revalue(cfg: RevalueConfig) -> None:
                 "saved Revalue return comparison to %s splits=%s",
                 paths["comparison"],
                 sorted(report.get("frame_level", {})),
+            )
+        elif stage == STAGE_TRAIN_CFG:
+            summary = train_cfg_from_advantages(
+                DownstreamCFGTrainingConfig(
+                    repo_root=str(Path(__file__).resolve().parents[3]),
+                    dataset_path=_cfg_train_dataset_path(cfg),
+                    base_model_path=_cfg_train_base_model_path(cfg),
+                    advantage_tag=_advantage_tag_for_cfg_train(cfg),
+                    experiment_name=cfg.cfg_train.experiment_name,
+                    log_dir=cfg.cfg_train.log_dir or str(paths["train_cfg"]),
+                    config_name=cfg.cfg_train.config_name,
+                    episode_split_path=_cfg_train_episode_split_path(cfg, paths),
+                    episode_split_name=cfg.cfg_train.episode_split_name,
+                    model_type=cfg.cfg_train.model_type,
+                    openpi_config_name=cfg.cfg_train.openpi_config_name,
+                    guidance_type=cfg.cfg_train.guidance_type,
+                    positive_only_conditional=cfg.cfg_train.positive_only_conditional,
+                    max_epochs=cfg.cfg_train.max_epochs,
+                    max_steps=cfg.cfg_train.max_steps,
+                    save_interval=cfg.cfg_train.save_interval,
+                    val_check_interval=cfg.cfg_train.val_check_interval,
+                    total_training_steps=cfg.cfg_train.total_training_steps,
+                    lr_warmup_steps=cfg.cfg_train.lr_warmup_steps,
+                    global_batch_size=cfg.cfg_train.global_batch_size,
+                    micro_batch_size=cfg.cfg_train.micro_batch_size,
+                    data_type=cfg.cfg_train.data_type,
+                    dataset_weight=cfg.cfg_train.dataset_weight,
+                    python_bin=cfg.cfg_train.python_bin,
+                    extra_overrides=cfg.cfg_train.extra_overrides,
+                )
+            )
+            logger.info(
+                "saved Revalue downstream CFG training summary to %s checkpoint=%s",
+                Path(cfg.cfg_train.log_dir or str(paths["train_cfg"])) / "train_cfg_summary.json",
+                summary.get("checkpoint_path"),
+            )
+        elif stage == STAGE_EVAL_POLICY:
+            summary = evaluate_policy_checkpoint(
+                PolicyEvaluationConfig(
+                    repo_root=str(Path(__file__).resolve().parents[3]),
+                    model_path=_policy_eval_model_path(cfg),
+                    checkpoint_path=_resolve_policy_eval_checkpoint(cfg, paths),
+                    experiment_name=cfg.policy_eval.experiment_name,
+                    log_dir=cfg.policy_eval.log_dir or str(paths["policy_eval"]),
+                    config_name=cfg.policy_eval.config_name,
+                    model_type=cfg.policy_eval.model_type,
+                    openpi_config_name=cfg.policy_eval.openpi_config_name,
+                    guidance_type=cfg.policy_eval.guidance_type,
+                    positive_only_conditional=cfg.policy_eval.positive_only_conditional,
+                    eval_rollout_epoch=cfg.policy_eval.eval_rollout_epoch,
+                    total_num_envs=cfg.policy_eval.total_num_envs,
+                    save_video=cfg.policy_eval.save_video,
+                    task_suite_name=cfg.policy_eval.task_suite_name,
+                    task_id_filter=cfg.policy_eval.task_id_filter,
+                    python_bin=cfg.policy_eval.python_bin,
+                    extra_overrides=cfg.policy_eval.extra_overrides,
+                )
+            )
+            logger.info(
+                "saved Revalue policy eval summary to %s metrics=%s",
+                Path(cfg.policy_eval.log_dir or str(paths["policy_eval"])) / "eval_policy_summary.json",
+                summary.get("metrics"),
+            )
+        elif stage == STAGE_COLLECT_ROLLOUTS:
+            output_dir = (
+                cfg.rollout_collect.output_dir or str(paths["rollout_collect"])
+            )
+            summary = collect_libero_rollouts(
+                LiberoRolloutCollectionConfig(
+                    output_dir=output_dir,
+                    model_path=_resolve_rollout_collect_model_path(cfg),
+                    checkpoint_path=_resolve_rollout_collect_checkpoint(cfg, paths),
+                    model_type=cfg.rollout_collect.model_type,
+                    openpi_config_name=cfg.rollout_collect.openpi_config_name,
+                    task_suite_name=cfg.rollout_collect.task_suite_name,
+                    task_id=cfg.rollout_collect.task_id,
+                    num_episodes=cfg.rollout_collect.num_episodes,
+                    noise_scale=cfg.rollout_collect.noise_scale,
+                    noise_clip=cfg.rollout_collect.noise_clip,
+                    action_chunk=cfg.rollout_collect.action_chunk,
+                    num_steps=cfg.rollout_collect.num_steps,
+                    num_steps_wait=cfg.rollout_collect.num_steps_wait,
+                    seed=cfg.rollout_collect.seed,
+                    gpu_id=cfg.rollout_collect.gpu_id,
+                    fps=cfg.rollout_collect.fps,
+                    overwrite=cfg.rollout_collect.overwrite,
+                    failure_reward=cfg.rollout_collect.failure_reward,
+                )
+            )
+            logger.info(
+                "saved Revalue rollout collection summary to %s success_rate=%.4f",
+                Path(output_dir) / "collection_summary.json",
+                float(summary.get("success_rate", 0.0)),
             )
         else:
             raise ValueError(f"Unhandled stage={stage!r}")

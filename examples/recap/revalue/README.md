@@ -44,6 +44,15 @@ export
 
 compare_returns
   -> write return prediction comparison JSON
+
+train_cfg
+  -> train downstream CFG on the exported advantage tag
+
+eval_policy
+  -> run LIBERO embodied evaluation for a specified checkpoint
+
+collect_rollouts
+  -> collect LIBERO rollouts from a specified policy/checkpoint
 ```
 
 Run the whole fused path:
@@ -73,6 +82,9 @@ python examples/recap/revalue/revalue.py stage=train_fusion
 python examples/recap/revalue/revalue.py stage=predict
 python examples/recap/revalue/revalue.py stage=export
 python examples/recap/revalue/revalue.py stage=compare_returns
+python examples/recap/revalue/revalue.py stage=train_cfg
+python examples/recap/revalue/revalue.py stage=eval_policy
+python examples/recap/revalue/revalue.py stage=collect_rollouts
 ```
 
 Run only the base data path:
@@ -117,3 +129,51 @@ data:
 
 Detailed commands for the current LIBERO task0 experiment are in
 `EXPERIMENT_WORKFLOW.md`.
+
+## Downstream Integration
+
+Revalue can now continue past export and drive the downstream smoke workflow in
+one place.
+
+Train CFG from the exported fused advantage tag:
+
+```bash
+python examples/recap/revalue/revalue.py \
+  stage=train_cfg \
+  cfg_train.enabled=true \
+  cfg_train.base_model_path=/workspace/models/RLinf-Pi05-LIBERO-SFT \
+  cfg_train.advantage_tag=base30ep_random200_resplit100_100_shared_mlp_fusion_valonly \
+  cfg_train.episode_split_name=val
+```
+
+Evaluate a checkpoint with conservative LIBERO eval defaults:
+
+```bash
+python examples/recap/revalue/revalue.py \
+  stage=eval_policy \
+  policy_eval.enabled=true \
+  policy_eval.model_path=/workspace/models/RLinf-Pi05-LIBERO-SFT \
+  policy_eval.checkpoint_path=/workspace/RLinf/logs/.../full_weights.pt \
+  policy_eval.model_type=cfg_model
+```
+
+Collect LIBERO rollouts from either the original SFT model or a trained CFG
+checkpoint:
+
+```bash
+python examples/recap/revalue/revalue.py \
+  stage=collect_rollouts \
+  rollout_collect.enabled=true \
+  rollout_collect.model_path=/workspace/models/RLinf-Pi05-LIBERO-SFT \
+  rollout_collect.checkpoint_path=/workspace/RLinf/logs/.../full_weights.pt \
+  rollout_collect.model_type=cfg_model \
+  rollout_collect.output_dir=/workspace/datasets/libero_task0_cfg_rollouts
+```
+
+The new stage summaries are written under `output.root` by default:
+
+```text
+<output.root>/downstream_train/train_cfg_summary.json
+<output.root>/policy_eval/eval_policy_summary.json
+<output.root>/collected_rollouts/collection_summary.json
+```

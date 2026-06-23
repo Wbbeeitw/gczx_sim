@@ -110,3 +110,70 @@ recap:
   positive_quantile: 0.3
   discount_next_value: true
   export_split: train
+
+cfg_train:
+  enabled: false
+  config_name: libero_cfg_openpi
+  advantage_tag: null
+  dataset_path: null
+  base_model_path: null
+  episode_split_path: null
+  episode_split_name: train
+  experiment_name: revalue_cfg_train
+  log_dir: null
+  model_type: cfg_model
+  openpi_config_name: pi05_libero
+  guidance_type: positive
+  positive_only_conditional: true
+  max_epochs: -1
+  max_steps: 5000
+  save_interval: 5000
+  val_check_interval: -1
+  total_training_steps: null
+  lr_warmup_steps: null
+  global_batch_size: 256
+  micro_batch_size: 16
+  data_type: rollout
+  dataset_weight: 1.0
+  python_bin: null
+  extra_overrides: []
+
+policy_eval:
+  enabled: false
+  config_name: libero_10_pi05_sft_eval
+  model_path: null
+  model_type: openpi
+  checkpoint_path: null
+  experiment_name: revalue_policy_eval
+  log_dir: null
+  eval_rollout_epoch: 10
+  total_num_envs: 5
+  save_video: false
+  task_suite_name: null
+  task_id_filter: []
+  openpi_config_name: pi05_libero
+  guidance_type: positive
+  positive_only_conditional: true
+  python_bin: null
+  extra_overrides: []
+
+rollout_collect:
+  enabled: false
+  output_dir: null
+  model_path: null
+  checkpoint_path: null
+  model_type: openpi
+  openpi_config_name: pi05_libero
+  task_suite_name: libero_10
+  task_id: 0
+  num_episodes: 64
+  noise_scale: 0.0
+  noise_clip: 0.3
+  action_chunk: 5
+  num_steps: 5
+  num_steps_wait: 10
+  seed: 42
+  gpu_id: 0
+  fps: 10
+  overwrite: false
+  failure_reward: null

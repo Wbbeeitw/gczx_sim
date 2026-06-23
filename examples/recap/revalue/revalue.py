@@ -29,14 +29,17 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from rlinf.revalue.config import (
+    RevalueCFGTrainConfig,
     RevalueConfig,
     RevalueBaseConfig,
     RevalueDataConfig,
     RevalueFusionConfig,
     RevalueManifestConfig,
     RevalueOutputConfig,
+    RevaluePolicyEvalConfig,
     RevalueRecapConfig,
     RevalueReturnsConfig,
+    RevalueRolloutCollectConfig,
     RevalueTrainConfig,
     RevalueValueConfig,
     RevalueZPConfig,
@@ -63,6 +66,11 @@ def _to_dataclass(cfg: DictConfig) -> RevalueConfig:
         fusion=RevalueFusionConfig(**(obj.get("fusion") or {})),
         train=RevalueTrainConfig(**(obj.get("train") or {})),
         recap=RevalueRecapConfig(**(obj.get("recap") or {})),
+        cfg_train=RevalueCFGTrainConfig(**(obj.get("cfg_train") or {})),
+        policy_eval=RevaluePolicyEvalConfig(**(obj.get("policy_eval") or {})),
+        rollout_collect=RevalueRolloutCollectConfig(
+            **(obj.get("rollout_collect") or {})
+        ),
     )
 
 

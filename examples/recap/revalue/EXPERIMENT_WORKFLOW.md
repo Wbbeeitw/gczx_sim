@@ -349,3 +349,19 @@ bash examples/recap/cfg/run_cfg_sft.sh libero_cfg_openpi \
   data.episode_split_name=train \
   actor.model.model_path=/workspace/models/pi05_base_pytorch
 ```
+
+python examples/recap/revalue/revalue.py stage=train_cfg \
+  cfg_train.enabled=true \
+  cfg_train.base_model_path=/workspace/models/RLinf-Pi05-LIBERO-SFT \
+  cfg_train.advantage_tag=your_exported_tag
+python examples/recap/revalue/revalue.py stage=eval_policy \
+  policy_eval.enabled=true \
+  policy_eval.model_path=/workspace/models/RLinf-Pi05-LIBERO-SFT \
+  policy_eval.model_type=cfg_model \
+  policy_eval.checkpoint_path=/workspace/RLinf/logs/.../full_weights.pt
+python examples/recap/revalue/revalue.py stage=collect_rollouts \
+  rollout_collect.enabled=true \
+  rollout_collect.model_path=/workspace/models/RLinf-Pi05-LIBERO-SFT \
+  rollout_collect.model_type=cfg_model \
+  rollout_collect.checkpoint_path=/workspace/RLinf/logs/.../full_weights.pt \
+  rollout_collect.output_dir=/workspace/datasets/libero_task0_cfg_rollouts

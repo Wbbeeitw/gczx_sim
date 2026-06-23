@@ -158,6 +158,86 @@ class RevalueRecapConfig:
 
 
 @dataclass
+class RevalueCFGTrainConfig:
+    """Downstream CFG training settings driven by exported advantages."""
+
+    enabled: bool = False
+    config_name: str = "libero_cfg_openpi"
+    advantage_tag: str | None = None
+    dataset_path: str | None = None
+    base_model_path: str | None = None
+    episode_split_path: str | None = None
+    episode_split_name: str = "train"
+    experiment_name: str = "revalue_cfg_train"
+    log_dir: str | None = None
+    model_type: str = "cfg_model"
+    openpi_config_name: str = "pi05_libero"
+    guidance_type: str = "positive"
+    positive_only_conditional: bool = True
+    max_epochs: int = -1
+    max_steps: int = 5000
+    save_interval: int = 5000
+    val_check_interval: int = -1
+    total_training_steps: int | None = None
+    lr_warmup_steps: int | None = None
+    global_batch_size: int = 256
+    micro_batch_size: int = 16
+    data_type: str = "rollout"
+    dataset_weight: float = 1.0
+    python_bin: str | None = None
+    extra_overrides: list[str] = field(default_factory=list)
+
+
+@dataclass
+class RevaluePolicyEvalConfig:
+    """Embodied evaluation settings for a policy checkpoint."""
+
+    enabled: bool = False
+    config_name: str = "libero_10_pi05_sft_eval"
+    model_path: str | None = None
+    model_type: str = "openpi"
+    checkpoint_path: str | None = None
+    experiment_name: str = "revalue_policy_eval"
+    log_dir: str | None = None
+    eval_rollout_epoch: int = 10
+    total_num_envs: int = 5
+    save_video: bool = False
+    task_suite_name: str | None = None
+    task_id_filter: list[int] = field(default_factory=list)
+    openpi_config_name: str = "pi05_libero"
+    guidance_type: str = "positive"
+    positive_only_conditional: bool = True
+    python_bin: str | None = None
+    extra_overrides: list[str] = field(default_factory=list)
+
+
+@dataclass
+class RevalueRolloutCollectConfig:
+    """LIBERO rollout collection settings for a specified policy."""
+
+    enabled: bool = False
+    output_dir: str | None = None
+    model_path: str | None = None
+    checkpoint_path: str | None = None
+    model_type: str = "openpi"
+    openpi_config_name: str = "pi05_libero"
+    task_suite_name: str = "libero_10"
+    task_id: int = 0
+    num_episodes: int = 64
+    noise_scale: float = 0.0
+    noise_clip: float = 0.3
+    action_chunk: int = 5
+    num_steps: int = 5
+    num_steps_wait: int = 10
+    seed: int = 42
+    gpu_id: int = 0
+    fps: int = 10
+    overwrite: bool = False
+    failure_reward: float | None = None
+    python_bin: str | None = None
+
+
+@dataclass
 class RevalueConfig:
     """Top-level Revalue CLI config."""
 
@@ -173,3 +253,8 @@ class RevalueConfig:
     fusion: RevalueFusionConfig = field(default_factory=RevalueFusionConfig)
     train: RevalueTrainConfig = field(default_factory=RevalueTrainConfig)
     recap: RevalueRecapConfig = field(default_factory=RevalueRecapConfig)
+    cfg_train: RevalueCFGTrainConfig = field(default_factory=RevalueCFGTrainConfig)
+    policy_eval: RevaluePolicyEvalConfig = field(default_factory=RevaluePolicyEvalConfig)
+    rollout_collect: RevalueRolloutCollectConfig = field(
+        default_factory=RevalueRolloutCollectConfig
+    )
