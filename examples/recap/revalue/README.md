@@ -26,6 +26,10 @@ build_base
   -> compute returns sidecar
   -> compute raw critic base advantages with value_logits_current
 
+build_base_from_cache
+  -> reuse train.pt / val.pt raw logits and raw values
+  -> rebuild meta/advantages_<base.tag>.parquet without a second image pass
+
 extract_features
   -> cache frozen VLM features for train/val
 
@@ -77,6 +81,7 @@ Run one stage at a time:
 python examples/recap/revalue/revalue.py stage=prepare_data
 python examples/recap/revalue/revalue.py stage=build_base
 python examples/recap/revalue/revalue.py stage=extract_features
+python examples/recap/revalue/revalue.py stage=build_base_from_cache
 python examples/recap/revalue/revalue.py stage=train_zp
 python examples/recap/revalue/revalue.py stage=train_fusion
 python examples/recap/revalue/revalue.py stage=predict
@@ -97,6 +102,16 @@ python examples/recap/revalue/revalue.py \
   base.tag=base30ep_random200_logits_phase_dist \
   manifest.num_episodes=200
 ```
+
+Optional cache-first base path:
+
+```bash
+python examples/recap/revalue/revalue.py stage=extract_features
+python examples/recap/revalue/revalue.py stage=build_base_from_cache
+```
+
+This keeps the legacy `build_base` stage available, but avoids re-running value
+inference over raw images when the feature cache already exists.
 
 ## Outputs
 

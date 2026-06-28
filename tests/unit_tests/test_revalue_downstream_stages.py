@@ -4,6 +4,7 @@ install_omegaconf_stub()
 
 from rlinf.revalue.config import RevalueConfig  # noqa: E402
 from rlinf.revalue.constants import (  # noqa: E402
+    STAGE_BUILD_BASE_FROM_CACHE,
     STAGE_COLLECT_ROLLOUTS,
     STAGE_EVAL_POLICY,
     STAGE_TRAIN_CFG,
@@ -22,5 +23,6 @@ def test_stage_all_appends_enabled_downstream_stages() -> None:
     assert STAGE_TRAIN_CFG in stages
     assert STAGE_EVAL_POLICY in stages
     assert STAGE_COLLECT_ROLLOUTS in stages
+    assert STAGE_BUILD_BASE_FROM_CACHE not in stages
     assert stages.index(STAGE_TRAIN_CFG) < stages.index(STAGE_EVAL_POLICY)
     assert stages.index(STAGE_EVAL_POLICY) < stages.index(STAGE_COLLECT_ROLLOUTS)

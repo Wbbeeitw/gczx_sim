@@ -25,6 +25,7 @@ from rlinf.revalue.constants import (
     METHOD_SHARED_MLP_FUSION,
     STAGE_ALL,
     STAGE_BUILD_BASE,
+    STAGE_BUILD_BASE_FROM_CACHE,
     STAGE_COLLECT_ROLLOUTS,
     STAGE_COMPARE_RETURNS,
     STAGE_EVAL_POLICY,
@@ -58,6 +59,10 @@ from rlinf.revalue.pipeline.base_generation import (
     ReturnGenerationConfig,
     compute_revalue_base_advantages,
     compute_revalue_returns,
+)
+from rlinf.revalue.pipeline.base_from_cache import (
+    BaseFromCacheConfig,
+    build_revalue_base_from_cache,
 )
 from rlinf.revalue.pipeline.embodied import (
     DownstreamCFGTrainingConfig,
@@ -175,6 +180,15 @@ def _stages_for_request(stage: str) -> list[str]:
     return [stage]
 
 
+def _base_from_cache_features_dir(cfg: RevalueConfig, paths: dict[str, Path]) -> Path:
+    active_features = paths["features"]
+    if (active_features / "train.pt").exists() and (active_features / "val.pt").exists():
+        return active_features
+    if cfg.output.source_features_dir:
+        return Path(cfg.output.source_features_dir)
+    return active_features
+
+
 def _stages_for_method(cfg: RevalueConfig) -> list[str]:
     if cfg.stage != STAGE_ALL:
         return _stages_for_request(cfg.stage)
@@ -269,6 +283,47 @@ def _run_build_base(cfg: RevalueConfig, paths: dict[str, Path]) -> Path:
             )
         )
         logger.info("computed Revalue base advantages: %s", advantages_path)
+        return advantages_path
+
+    return resolve_advantage_path(cfg.data.dataset_path, tag)
+
+
+def _run_build_base_from_cache(cfg: RevalueConfig, paths: dict[str, Path]) -> Path:
+    tag = cfg.base.tag
+    returns_tag = cfg.base.returns_tag or cfg.returns.tag or tag
+    if cfg.base.compute_returns and cfg.returns.compute:
+        returns_path = compute_revalue_returns(
+            ReturnGenerationConfig(
+                dataset_path=cfg.data.dataset_path,
+                tag=returns_tag,
+                dataset_type=cfg.returns.dataset_type,
+                gamma=cfg.recap.gamma,
+                failure_reward=cfg.returns.failure_reward,
+                num_workers=cfg.returns.num_workers,
+            )
+        )
+        logger.info("computed Revalue returns: %s", returns_path)
+
+    if cfg.base.compute_advantages:
+        features_dir = _base_from_cache_features_dir(cfg, paths)
+        report_path = paths["root"] / "build_base_from_cache_report.json"
+        advantages_path = build_revalue_base_from_cache(
+            BaseFromCacheConfig(
+                dataset_path=cfg.data.dataset_path,
+                features_dir=str(features_dir),
+                tag=tag,
+                returns_tag=returns_tag,
+                lookahead_step=cfg.recap.lookahead_step,
+                gamma=cfg.recap.gamma,
+                positive_quantile=cfg.recap.positive_quantile,
+                discount_next_value=cfg.recap.discount_next_value,
+                return_min=cfg.returns.global_min,
+                return_max=cfg.returns.global_max,
+                dataset_type=cfg.returns.dataset_type,
+                report_path=str(report_path),
+            )
+        )
+        logger.info("computed Revalue base advantages from cache: %s", advantages_path)
         return advantages_path
 
     return resolve_advantage_path(cfg.data.dataset_path, tag)
@@ -386,6 +441,8 @@ def run_revalue(cfg: RevalueConfig) -> None:
             _run_prepare_data(cfg, paths)
         elif stage == STAGE_BUILD_BASE:
             source_advantages = _run_build_base(cfg, paths)
+        elif stage == STAGE_BUILD_BASE_FROM_CACHE:
+            source_advantages = _run_build_base_from_cache(cfg, paths)
         elif stage == STAGE_RESPLIT_FEATURES:
             _run_resplit_features(cfg, paths)
         elif stage == STAGE_EXTRACT_FEATURES:
