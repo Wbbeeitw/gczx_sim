@@ -40,6 +40,8 @@ def test_compare_return_predictions_reports_frame_and_episode_metrics(tmp_path) 
             output_path=str(out_path),
             return_min=-100.0,
             return_max=0.0,
+            value_min=-1.0,
+            value_max=0.0,
         )
     )
 
@@ -54,3 +56,44 @@ def test_compare_return_predictions_reports_frame_and_episode_metrics(tmp_path) 
         93.3333333
     )
     assert report["episode_level"]["all"]["episodes_improved_mse"] == 2
+
+
+def test_compare_return_predictions_supports_raw_value_scale(tmp_path) -> None:
+    adv_path = tmp_path / "advantages_raw.parquet"
+    pred_path = tmp_path / "predictions_raw.parquet"
+    out_path = tmp_path / "report_raw.json"
+
+    pd.DataFrame(
+        {
+            "episode_index": [0, 0, 1, 1],
+            "frame_index": [0, 1, 0, 1],
+            "return": [-100.0, -50.0, -80.0, -40.0],
+            "value_current": [-70.0, -30.0, -70.0, -30.0],
+        }
+    ).to_parquet(adv_path)
+    pd.DataFrame(
+        {
+            "split": ["train", "train", "val", "val"],
+            "episode_index": [0, 0, 1, 1],
+            "frame_index": [0, 1, 0, 1],
+            "value_fused": [-90.0, -50.0, -80.0, -40.0],
+        }
+    ).to_parquet(pred_path)
+
+    report = compare_return_predictions(
+        ReturnComparisonConfig(
+            advantages_path=str(adv_path),
+            predictions_path=str(pred_path),
+            output_path=str(out_path),
+            return_min=-100.0,
+            return_max=0.0,
+            value_min=-100.0,
+            value_max=0.0,
+        )
+    )
+
+    assert out_path.exists()
+    assert report["frame_level"]["all"]["base"]["mse"] == pytest.approx(375.0)
+    assert report["frame_level"]["all"]["shared_mlp_fusion"]["mse"] == pytest.approx(
+        25.0
+    )

@@ -31,6 +31,7 @@ from rlinf.revalue.training import (
     ZPHeadTrainer,
     ZPHeadTrainerConfig,
 )
+from rlinf.revalue.value_scale import validate_atoms_match_value_scale
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +156,12 @@ def train_fusion(cfg: FusionTrainingConfig) -> Path:
     atoms = train_loader.dataset.atoms
     if atoms is None:
         atoms = torch.linspace(cfg.value_min, cfg.value_max, cfg.num_bins)
+    validate_atoms_match_value_scale(
+        atoms,
+        value_min=cfg.value_min,
+        value_max=cfg.value_max,
+        source=f"Feature cache {cfg.features_dir}",
+    )
     if len(atoms) != cfg.num_bins:
         raise ValueError(
             f"atoms length {len(atoms)} does not match num_bins={cfg.num_bins}"
@@ -182,6 +189,8 @@ def train_fusion(cfg: FusionTrainingConfig) -> Path:
         val_loader,
         return_min=cfg.return_min,
         return_max=cfg.return_max,
+        value_min=cfg.value_min,
+        value_max=cfg.value_max,
     )
     checkpoint = {
         "state_dict": fusion.state_dict(),

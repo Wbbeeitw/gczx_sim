@@ -319,6 +319,8 @@ def _run_build_base_from_cache(cfg: RevalueConfig, paths: dict[str, Path]) -> Pa
                 discount_next_value=cfg.recap.discount_next_value,
                 return_min=cfg.returns.global_min,
                 return_max=cfg.returns.global_max,
+                value_min=cfg.value.v_min,
+                value_max=cfg.value.v_max,
                 dataset_type=cfg.returns.dataset_type,
                 report_path=str(report_path),
             )
@@ -566,6 +568,8 @@ def run_revalue(cfg: RevalueConfig) -> None:
                     output_path=str(paths["comparison"]),
                     return_min=cfg.returns.global_min,
                     return_max=cfg.returns.global_max,
+                    value_min=cfg.value.v_min,
+                    value_max=cfg.value.v_max,
                 )
             )
             logger.info(

@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 
 from rlinf.revalue.io import save_json
+from rlinf.revalue.value_scale import map_values_to_return_scale
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,8 @@ class ReturnComparisonConfig:
     output_path: str
     return_min: float = -700.0
     return_max: float = 0.0
+    value_min: float = -1.0
+    value_max: float = 0.0
     splits: tuple[str, ...] = ("all", "train", "val", "test")
 
 
@@ -140,14 +143,19 @@ def _load_comparison_frame(cfg: ReturnComparisonConfig) -> pd.DataFrame:
     if "split" not in merged.columns:
         merged["split"] = "all"
 
-    ret_range = float(cfg.return_max) - float(cfg.return_min)
-    if ret_range <= 0.0:
-        raise ValueError("return_max must be greater than return_min")
-    merged["base_pred_return"] = (
-        (merged["value_current"] + 1.0) * ret_range + float(cfg.return_min)
+    merged["base_pred_return"] = map_values_to_return_scale(
+        merged["value_current"].to_numpy(dtype=np.float64),
+        return_min=cfg.return_min,
+        return_max=cfg.return_max,
+        value_min=cfg.value_min,
+        value_max=cfg.value_max,
     )
-    merged["fused_pred_return"] = (
-        (merged["value_fused"] + 1.0) * ret_range + float(cfg.return_min)
+    merged["fused_pred_return"] = map_values_to_return_scale(
+        merged["value_fused"].to_numpy(dtype=np.float64),
+        return_min=cfg.return_min,
+        return_max=cfg.return_max,
+        value_min=cfg.value_min,
+        value_max=cfg.value_max,
     )
     merged["target_return"] = merged["return"]
     merged["base_sqerr"] = (merged["base_pred_return"] - merged["target_return"]) ** 2
@@ -171,6 +179,8 @@ def compare_return_predictions(cfg: ReturnComparisonConfig) -> dict[str, Any]:
         "predictions_path": str(Path(cfg.predictions_path)),
         "return_min": float(cfg.return_min),
         "return_max": float(cfg.return_max),
+        "value_min": float(cfg.value_min),
+        "value_max": float(cfg.value_max),
         "frame_level": {},
         "episode_level": {},
     }

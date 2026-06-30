@@ -29,6 +29,7 @@ from tqdm import tqdm
 
 from rlinf.revalue.models.fusion import fuse_logits, value_from_logits
 from rlinf.revalue.metrics import value_regression_metrics
+from rlinf.revalue.value_scale import map_returns_to_value_scale
 
 logger = logging.getLogger(__name__)
 
@@ -92,14 +93,16 @@ class FusionTrainer:
         *,
         return_min: float,
         return_max: float,
+        value_min: float,
+        value_max: float,
     ) -> torch.Tensor:
-        ret_range = float(return_max) - float(return_min)
-        if ret_range <= 0.0:
-            raise ValueError(
-                f"Invalid return range [{return_min}, {return_max}]. "
-                "return_max must be greater than return_min."
-            )
-        return (returns - float(return_min)) / ret_range - 1.0
+        return map_returns_to_value_scale(
+            returns,
+            return_min=return_min,
+            return_max=return_max,
+            value_min=value_min,
+            value_max=value_max,
+        )
 
     def _forward(
         self,
@@ -107,6 +110,8 @@ class FusionTrainer:
         *,
         return_min: float,
         return_max: float,
+        value_min: float,
+        value_max: float,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if "raw_logits" not in batch:
             raise ValueError(
@@ -126,6 +131,8 @@ class FusionTrainer:
             returns,
             return_min=return_min,
             return_max=return_max,
+            value_min=value_min,
+            value_max=value_max,
         )
 
         with torch.no_grad():
@@ -151,6 +158,8 @@ class FusionTrainer:
         *,
         return_min: float,
         return_max: float,
+        value_min: float,
+        value_max: float,
     ) -> float:
         """Run one fusion training epoch."""
         self.zp_head.eval()
@@ -163,6 +172,8 @@ class FusionTrainer:
                 batch,
                 return_min=return_min,
                 return_max=return_max,
+                value_min=value_min,
+                value_max=value_max,
             )
             loss.backward()
             if self.cfg.max_grad_norm is not None:
@@ -182,6 +193,8 @@ class FusionTrainer:
         *,
         return_min: float,
         return_max: float,
+        value_min: float,
+        value_max: float,
     ) -> dict[str, float]:
         """Evaluate fusion value prediction."""
         self.zp_head.eval()
@@ -197,6 +210,8 @@ class FusionTrainer:
                 batch,
                 return_min=return_min,
                 return_max=return_max,
+                value_min=value_min,
+                value_max=value_max,
             )
             batch_size = int(batch["features"].shape[0])
             total_loss += float(loss.item()) * batch_size
@@ -220,6 +235,8 @@ class FusionTrainer:
         *,
         return_min: float,
         return_max: float,
+        value_min: float,
+        value_max: float,
     ) -> dict[str, Any]:
         """Train fusion with the z/p head frozen."""
         frozen_params = [param for param in self.zp_head.parameters()]
@@ -241,11 +258,15 @@ class FusionTrainer:
                 optimizer,
                 return_min=return_min,
                 return_max=return_max,
+                value_min=value_min,
+                value_max=value_max,
             )
             val_metrics = self.evaluate(
                 val_loader,
                 return_min=return_min,
                 return_max=return_max,
+                value_min=value_min,
+                value_max=value_max,
             )
             scheduler.step(val_metrics["loss"])
             history.append(

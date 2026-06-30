@@ -26,6 +26,10 @@ import torch
 
 from rlinf.revalue.data.advantage_table import resolve_advantage_path
 from rlinf.revalue.io import save_json
+from rlinf.revalue.value_scale import (
+    map_returns_to_value_scale,
+    validate_atoms_match_value_scale,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +50,8 @@ class BaseFromCacheConfig:
     discount_next_value: bool = True
     return_min: float = -700.0
     return_max: float = 0.0
+    value_min: float = -1.0
+    value_max: float = 0.0
     dataset_type: str = "rollout"
     report_path: str | None = None
 
@@ -65,7 +71,14 @@ def _stable_softmax(logits: np.ndarray) -> np.ndarray:
     return exp / denom
 
 
-def _load_single_cache(cache_path: Path, *, split: str, row_offset: int) -> tuple[pd.DataFrame, np.ndarray]:
+def _load_single_cache(
+    cache_path: Path,
+    *,
+    split: str,
+    row_offset: int,
+    value_min: float,
+    value_max: float,
+) -> tuple[pd.DataFrame, np.ndarray]:
     if not cache_path.exists():
         raise FileNotFoundError(f"Feature cache not found: {cache_path}")
 
@@ -80,6 +93,12 @@ def _load_single_cache(cache_path: Path, *, split: str, row_offset: int) -> tupl
             f"Feature cache {cache_path} is missing raw_value. "
             "Re-run extract_features with a value model that exports raw_value."
         )
+    validate_atoms_match_value_scale(
+        data.get("atoms"),
+        value_min=value_min,
+        value_max=value_max,
+        source=f"Feature cache {cache_path}",
+    )
 
     episode_index = np.asarray(data["episode_index"], dtype=np.int64).reshape(-1)
     frame_index = np.asarray(data["frame_index"], dtype=np.int64).reshape(-1)
@@ -114,7 +133,12 @@ def _load_single_cache(cache_path: Path, *, split: str, row_offset: int) -> tupl
     return rows, raw_logits
 
 
-def _load_feature_rows(features_dir: str | Path) -> tuple[pd.DataFrame, np.ndarray, dict[str, dict[str, int]]]:
+def _load_feature_rows(
+    features_dir: str | Path,
+    *,
+    value_min: float,
+    value_max: float,
+) -> tuple[pd.DataFrame, np.ndarray, dict[str, dict[str, int]]]:
     features_dir = Path(features_dir)
     cache_specs = [
         ("train", features_dir / "train.pt"),
@@ -127,7 +151,13 @@ def _load_feature_rows(features_dir: str | Path) -> tuple[pd.DataFrame, np.ndarr
     split_stats: dict[str, dict[str, int]] = {}
 
     for split, cache_path in cache_specs:
-        rows, logits = _load_single_cache(cache_path, split=split, row_offset=row_offset)
+        rows, logits = _load_single_cache(
+            cache_path,
+            split=split,
+            row_offset=row_offset,
+            value_min=value_min,
+            value_max=value_max,
+        )
         frames.append(rows)
         logits_parts.append(logits)
         split_stats[split] = {
@@ -201,16 +231,11 @@ def _compute_base_arrays(
     discount_next_value: bool,
     return_min: float,
     return_max: float,
+    value_min: float,
+    value_max: float,
 ) -> dict[str, np.ndarray]:
     if lookahead_step <= 0:
         raise ValueError(f"lookahead_step must be positive, got {lookahead_step}")
-    ret_range = float(return_max) - float(return_min)
-    if ret_range <= 0.0:
-        raise ValueError(
-            f"Invalid return range [{return_min}, {return_max}]. "
-            "return_max must be greater than return_min."
-        )
-
     row_count = len(merged)
     value_next = np.zeros(row_count, dtype=np.float64)
     reward_sum_raw = np.zeros(row_count, dtype=np.float64)
@@ -252,7 +277,13 @@ def _compute_base_arrays(
                 )
 
             reward_sum[global_pos] = (
-                (reward_sum_raw[global_pos] - float(return_min)) / ret_range - 1.0
+                map_returns_to_value_scale(
+                    reward_sum_raw[global_pos],
+                    return_min=return_min,
+                    return_max=return_max,
+                    value_min=value_min,
+                    value_max=value_max,
+                )
             )
 
     gamma_k = (
@@ -365,7 +396,11 @@ def build_revalue_base_from_cache(cfg: BaseFromCacheConfig) -> Path:
             f"positive_quantile must be in (0, 1], got {cfg.positive_quantile}"
         )
 
-    feature_df, raw_logits, split_stats = _load_feature_rows(cfg.features_dir)
+    feature_df, raw_logits, split_stats = _load_feature_rows(
+        cfg.features_dir,
+        value_min=float(cfg.value_min),
+        value_max=float(cfg.value_max),
+    )
     returns_path, returns_df = _load_returns(cfg.dataset_path, cfg.returns_tag)
     merged = _merge_feature_and_returns(feature_df, returns_df)
     computed = _compute_base_arrays(
@@ -375,6 +410,8 @@ def build_revalue_base_from_cache(cfg: BaseFromCacheConfig) -> Path:
         discount_next_value=cfg.discount_next_value,
         return_min=float(cfg.return_min),
         return_max=float(cfg.return_max),
+        value_min=float(cfg.value_min),
+        value_max=float(cfg.value_max),
     )
 
     threshold = float(
@@ -422,6 +459,8 @@ def build_revalue_base_from_cache(cfg: BaseFromCacheConfig) -> Path:
             "positive_rate": float(save_df["advantage"].mean()),
             "return_min": float(cfg.return_min),
             "return_max": float(cfg.return_max),
+            "value_min": float(cfg.value_min),
+            "value_max": float(cfg.value_max),
             "logit_bins": int(raw_logits.shape[1]),
             "feature_splits": split_stats,
         }
