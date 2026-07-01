@@ -201,6 +201,7 @@ def _run_python_entry(
     ]
     env = _base_env(repo_root)
     logger.info("running command: %s", " ".join(cmd))
+    logger.info("streaming child output to terminal and log: %s", log_file)
     tail_lines: deque[str] = deque(maxlen=400)
     with subprocess.Popen(
         cmd,
@@ -215,6 +216,9 @@ def _run_python_entry(
         assert proc.stdout is not None
         for line in proc.stdout:
             handle.write(line)
+            handle.flush()
+            sys.stdout.write(line)
+            sys.stdout.flush()
             tail_lines.append(line.rstrip("\n"))
         returncode = proc.wait()
     stdout_tail = "\n".join(tail_lines)
