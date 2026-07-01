@@ -22,6 +22,7 @@ import json
 import logging
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -145,10 +146,33 @@ def _quote_override(value: Any) -> str:
     if isinstance(value, (int, float)):
         return str(value)
     if isinstance(value, (list, dict)):
-        return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+        return _hydra_container_literal(value)
     text = str(value)
     escaped = text.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
+
+
+_HYDRA_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _hydra_key_literal(key: Any) -> str:
+    text = str(key)
+    if _HYDRA_KEY_RE.fullmatch(text):
+        return text
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _hydra_container_literal(value: Any) -> str:
+    if isinstance(value, dict):
+        parts = [
+            f"{_hydra_key_literal(key)}:{_quote_override(item)}"
+            for key, item in value.items()
+        ]
+        return "{" + ",".join(parts) + "}"
+    if isinstance(value, list):
+        return "[" + ",".join(_quote_override(item) for item in value) + "]"
+    raise TypeError(f"Unsupported container type: {type(value).__name__}")
 
 
 def _run_python_entry(
