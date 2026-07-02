@@ -381,7 +381,7 @@ def evaluate_policy_checkpoint(cfg: PolicyEvaluationConfig) -> dict[str, Any]:
     if cfg.task_suite_name:
         overrides.append(f"env.eval.task_suite_name={_quote_override(cfg.task_suite_name)}")
     if cfg.task_id_filter:
-        overrides.append(f"env.eval.task_id_filter={_quote_override(cfg.task_id_filter)}")
+        overrides.append(f"+env.eval.task_id_filter={_quote_override(cfg.task_id_filter)}")
     if cfg.model_type == "cfg_model":
         overrides.extend(
             [
