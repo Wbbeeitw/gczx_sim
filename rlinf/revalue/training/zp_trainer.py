@@ -345,9 +345,10 @@ def _is_better_temporal_checkpoint(
         return True
 
     comparisons = [
+        ("global_progress_mae", False),
+        ("progress_mae", False),
         ("late_phase_acc", True),
         ("macro_phase_acc", True),
-        ("progress_mae", False),
         ("loss", False),
     ]
     for key, higher_is_better in comparisons:
@@ -364,6 +365,15 @@ def _is_better_temporal_checkpoint(
             if current > best + min_delta:
                 return False
     return False
+
+
+def _should_track_temporal_checkpoint(
+    *,
+    epoch: int,
+    cfg: TemporalZPHeadTrainerConfig,
+) -> bool:
+    """Avoid selecting a best checkpoint before progress supervision starts."""
+    return epoch > cfg.stage_only_epochs
 
 
 class TemporalZPHeadTrainer:
@@ -573,6 +583,9 @@ class TemporalZPHeadTrainer:
                 val_metrics["progress_mae"],
                 val_metrics["global_progress_mae"],
             )
+
+            if not _should_track_temporal_checkpoint(epoch=epoch, cfg=self.cfg):
+                continue
 
             if _is_better_temporal_checkpoint(
                 val_metrics,

@@ -12,6 +12,11 @@ from rlinf.revalue.data.feature_cache import (
 )
 from rlinf.revalue.models import TemporalZMLPProgressHead
 from rlinf.revalue.pipeline.train import load_zp_head
+from rlinf.revalue.training.zp_trainer import (
+    TemporalZPHeadTrainerConfig,
+    _is_better_temporal_checkpoint,
+    _should_track_temporal_checkpoint,
+)
 
 
 def _write_feature_cache(path: Path) -> None:
@@ -89,3 +94,33 @@ def test_load_zp_head_temporal_checkpoint(tmp_path: Path) -> None:
     out = loaded(torch.randn(2, 3, 8), stage_prior=None)
 
     assert out["phase_logits"].shape == (2, 5)
+
+
+def test_temporal_checkpoint_selection_prioritizes_progress_quality() -> None:
+    best_metrics = {
+        "global_progress_mae": 0.1073,
+        "progress_mae": 0.1956,
+        "late_phase_acc": 0.80,
+        "macro_phase_acc": 0.79,
+        "loss": 1.13,
+    }
+    current_metrics = {
+        "global_progress_mae": 0.0927,
+        "progress_mae": 0.1762,
+        "late_phase_acc": 0.78,
+        "macro_phase_acc": 0.77,
+        "loss": 1.29,
+    }
+
+    assert _is_better_temporal_checkpoint(
+        current_metrics,
+        best_metrics,
+        min_delta=1.0e-5,
+    )
+
+
+def test_temporal_checkpoint_tracking_starts_after_stage_only_phase() -> None:
+    cfg = TemporalZPHeadTrainerConfig(stage_only_epochs=4, device="cpu")
+
+    assert not _should_track_temporal_checkpoint(epoch=4, cfg=cfg)
+    assert _should_track_temporal_checkpoint(epoch=5, cfg=cfg)
