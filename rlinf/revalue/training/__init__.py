@@ -15,11 +15,18 @@
 """Training helpers for the Revalue two-stage pipeline."""
 
 from rlinf.revalue.training.fusion_trainer import FusionTrainer, FusionTrainerConfig
-from rlinf.revalue.training.zp_trainer import ZPHeadTrainer, ZPHeadTrainerConfig
+from rlinf.revalue.training.zp_trainer import (
+    TemporalZPHeadTrainer,
+    TemporalZPHeadTrainerConfig,
+    ZPHeadTrainer,
+    ZPHeadTrainerConfig,
+)
 
 __all__ = [
     "FusionTrainer",
     "FusionTrainerConfig",
+    "TemporalZPHeadTrainer",
+    "TemporalZPHeadTrainerConfig",
     "ZPHeadTrainer",
     "ZPHeadTrainerConfig",
 ]

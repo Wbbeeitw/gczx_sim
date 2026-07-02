@@ -17,10 +17,12 @@
 from rlinf.revalue.models.fusion import LogitFusionMLP, fuse_logits, value_from_logits
 from rlinf.revalue.models.feature_extractor import VLMFeatureExtractor
 from rlinf.revalue.models.heads import SharedMLPPhaseProgressHead
+from rlinf.revalue.models.temporal_heads import TemporalZMLPProgressHead
 
 __all__ = [
     "LogitFusionMLP",
     "SharedMLPPhaseProgressHead",
+    "TemporalZMLPProgressHead",
     "VLMFeatureExtractor",
     "fuse_logits",
     "value_from_logits",

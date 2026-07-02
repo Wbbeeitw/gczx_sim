@@ -25,8 +25,17 @@ import torch
 from torch.utils.data import DataLoader
 
 from rlinf.revalue.data import collate_feature_batch, read_advantages
+from rlinf.revalue.data.advantage_table import FeatureAdvantageDataset
+from rlinf.revalue.data.feature_cache import (
+    HEAD_TYPE_SHARED_MLP,
+    TemporalWindowDataset,
+)
 from rlinf.revalue.models.fusion import fuse_logits, value_from_logits
-from rlinf.revalue.pipeline.train import load_fusion, load_zp_head
+from rlinf.revalue.pipeline.train import (
+    inspect_zp_head_checkpoint,
+    load_fusion,
+    load_zp_head,
+)
 
 
 @dataclass
@@ -53,10 +62,12 @@ def _predict_split(
     split: str,
     batch_size: int,
     device: str,
+    head_type: str,
+    window_size: int,
 ) -> pd.DataFrame:
-    from rlinf.revalue.data.advantage_table import FeatureAdvantageDataset
-
     dataset = FeatureAdvantageDataset(cache_path, advantages_df)
+    if head_type != HEAD_TYPE_SHARED_MLP:
+        dataset = TemporalWindowDataset(dataset, window_size=window_size)
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -72,9 +83,11 @@ def _predict_split(
     records = []
     with torch.no_grad():
         for batch in loader:
-            features = batch["features"].to(device_obj)
             raw_logits = batch["raw_logits"].to(device_obj)
-            head_out = zp_head(features)
+            if "feature_window" in batch:
+                head_out = zp_head(batch["feature_window"].to(device_obj), stage_prior=None)
+            else:
+                head_out = zp_head(batch["features"].to(device_obj))
             delta_logits = fusion(
                 raw_logits,
                 head_out["phase_probs"],
@@ -86,7 +99,8 @@ def _predict_split(
             raw_values = value_from_logits(raw_logits, atoms)
 
             phase_probs = head_out["phase_probs"].detach().cpu().numpy()
-            for row_index in range(features.shape[0]):
+            batch_rows = int(raw_logits.shape[0])
+            for row_index in range(batch_rows):
                 records.append(
                     {
                         "split": split,
@@ -117,6 +131,7 @@ def _predict_split(
 def predict_fused_values(cfg: PredictionConfig) -> Path:
     """Generate ``predictions.parquet`` with ``value_fused``."""
     advantages_df = read_advantages(cfg.advantages_path)
+    zp_spec = inspect_zp_head_checkpoint(cfg.zp_head_path)
     zp_head = load_zp_head(cfg.zp_head_path, device=cfg.device)
     fusion, atoms, alpha = load_fusion(cfg.fusion_path, device=cfg.device)
 
@@ -130,6 +145,8 @@ def predict_fused_values(cfg: PredictionConfig) -> Path:
         split="train",
         batch_size=cfg.batch_size,
         device=cfg.device,
+        head_type=str(zp_spec["head_type"]),
+        window_size=int(zp_spec["window_size"] or 1),
     )
     val_df = _predict_split(
         cache_path=Path(cfg.features_dir) / "val.pt",
@@ -141,6 +158,8 @@ def predict_fused_values(cfg: PredictionConfig) -> Path:
         split="val",
         batch_size=cfg.batch_size,
         device=cfg.device,
+        head_type=str(zp_spec["head_type"]),
+        window_size=int(zp_spec["window_size"] or 1),
     )
     frames = [train_df, val_df]
     test_cache = Path(cfg.features_dir) / "test.pt"
@@ -155,6 +174,8 @@ def predict_fused_values(cfg: PredictionConfig) -> Path:
             split="test",
             batch_size=cfg.batch_size,
             device=cfg.device,
+            head_type=str(zp_spec["head_type"]),
+            window_size=int(zp_spec["window_size"] or 1),
         )
         frames.append(test_df)
     out_path = Path(cfg.output_path)

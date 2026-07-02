@@ -15,7 +15,10 @@
 """Data helpers for Revalue."""
 
 from rlinf.revalue.data.feature_cache import (
+    HEAD_TYPE_SHARED_MLP,
+    HEAD_TYPE_TEMPORAL_Z_MLP_P,
     FeatureCache,
+    TemporalWindowDataset,
     build_feature_loaders,
     collate_feature_batch,
 )
@@ -48,6 +51,9 @@ __all__ = [
     "FeatureAdvantageDataset",
     "FeatureCache",
     "FeatureResplitConfig",
+    "HEAD_TYPE_SHARED_MLP",
+    "HEAD_TYPE_TEMPORAL_Z_MLP_P",
+    "TemporalWindowDataset",
     "build_episode_manifest",
     "build_feature_loaders",
     "build_fusion_loaders",

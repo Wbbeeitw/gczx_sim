@@ -30,6 +30,8 @@ _REQUIRED_KEYS = {
     "phase_progress",
     "global_progress",
 }
+HEAD_TYPE_SHARED_MLP = "shared_mlp"
+HEAD_TYPE_TEMPORAL_Z_MLP_P = "temporal_z_mlp_p"
 
 
 class FeatureCache(Dataset):
@@ -102,6 +104,119 @@ class FeatureCache(Dataset):
         return self.raw_logits is not None
 
 
+class TemporalWindowDataset(Dataset):
+    """Episode-aware temporal window wrapper over frame-level cache rows."""
+
+    def __init__(self, base_dataset: Dataset, window_size: int) -> None:
+        if window_size < 1 or window_size % 2 == 0:
+            raise ValueError(
+                f"window_size must be a positive odd integer, got {window_size}"
+            )
+
+        self.base_dataset = base_dataset
+        self.window_size = int(window_size)
+        self.radius = self.window_size // 2
+        self.cache = (
+            base_dataset.feature_cache
+            if hasattr(base_dataset, "feature_cache")
+            else base_dataset
+        )
+        required = (
+            "features",
+            "episode_index",
+            "frame_index",
+            "phase",
+            "phase_progress",
+            "global_progress",
+        )
+        missing = [name for name in required if not hasattr(self.cache, name)]
+        if missing:
+            raise ValueError(
+                "TemporalWindowDataset requires cache-style tensors for "
+                f"{sorted(missing)}"
+            )
+
+        self.features = self.cache.features.float()
+        self.episode_index = self.cache.episode_index.long()
+        self.frame_index = self.cache.frame_index.long()
+        self.phase = self.cache.phase.long()
+        self.phase_progress = self.cache.phase_progress.float()
+        self.global_progress = self.cache.global_progress.float()
+        self._episode_to_rows: dict[int, torch.Tensor] = {}
+        for episode in torch.unique(self.episode_index).tolist():
+            row_idx = torch.nonzero(
+                self.episode_index == int(episode),
+                as_tuple=False,
+            ).squeeze(1)
+            order = torch.argsort(self.frame_index.index_select(0, row_idx))
+            self._episode_to_rows[int(episode)] = row_idx.index_select(0, order)
+
+    def __len__(self) -> int:
+        return len(self.base_dataset)
+
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        center_item = self.base_dataset[index]
+        episode = int(self.episode_index[index].item())
+        rows = self._episode_to_rows[episode]
+        pos = int(torch.nonzero(rows == index, as_tuple=False).item())
+
+        window_tokens: list[torch.Tensor] = []
+        phase_tokens: list[torch.Tensor] = []
+        phase_progress_tokens: list[torch.Tensor] = []
+        global_progress_tokens: list[torch.Tensor] = []
+        valid_mask: list[torch.Tensor] = []
+        center_row = rows[pos]
+
+        for offset in range(-self.radius, self.radius + 1):
+            tok_pos = pos + offset
+            if tok_pos < 0:
+                row = rows[0]
+                valid = 0.0
+            elif tok_pos >= len(rows):
+                row = rows[-1]
+                valid = 0.0
+            else:
+                row = rows[tok_pos]
+                valid = 1.0
+
+            window_tokens.append(self.features[row].unsqueeze(0))
+            phase_tokens.append(self.phase[row].unsqueeze(0))
+            phase_progress_tokens.append(self.phase_progress[row].unsqueeze(0))
+            global_progress_tokens.append(self.global_progress[row].unsqueeze(0))
+            valid_mask.append(torch.tensor([valid], dtype=torch.float32))
+
+        return {
+            **center_item,
+            "feature_window": torch.cat(window_tokens, dim=0),
+            "phase_window": torch.cat(phase_tokens, dim=0),
+            "phase_progress_window": torch.cat(phase_progress_tokens, dim=0),
+            "global_progress_window": torch.cat(global_progress_tokens, dim=0),
+            "valid_mask": torch.cat(valid_mask, dim=0),
+            "phase_center": self.phase[center_row],
+            "phase_progress_center": self.phase_progress[center_row],
+            "global_progress_center": self.global_progress[center_row],
+        }
+
+    @property
+    def feature_dim(self) -> int:
+        return int(self.features.shape[-1])
+
+    @property
+    def atoms(self) -> torch.Tensor | None:
+        return getattr(self.cache, "atoms", None)
+
+
+def _maybe_wrap_temporal(
+    dataset: Dataset,
+    *,
+    head_type: str,
+    window_size: int,
+) -> Dataset:
+    if head_type == HEAD_TYPE_TEMPORAL_Z_MLP_P:
+        return TemporalWindowDataset(dataset, window_size=window_size)
+    return dataset
+
+
 def collate_feature_batch(batch: list[dict[str, Any]]) -> dict[str, Any]:
     """Collate feature-cache rows into tensors."""
     output: dict[str, Any] = {}
@@ -120,11 +235,21 @@ def build_feature_loaders(
     batch_size: int = 256,
     num_workers: int = 0,
     train_shuffle: bool = True,
+    head_type: str = HEAD_TYPE_SHARED_MLP,
+    window_size: int = 5,
 ) -> tuple[DataLoader, DataLoader]:
     """Build train/val loaders from ``train.pt`` and ``val.pt``."""
     features_dir = Path(features_dir)
-    train_cache = FeatureCache(features_dir / "train.pt")
-    val_cache = FeatureCache(features_dir / "val.pt")
+    train_cache = _maybe_wrap_temporal(
+        FeatureCache(features_dir / "train.pt"),
+        head_type=head_type,
+        window_size=window_size,
+    )
+    val_cache = _maybe_wrap_temporal(
+        FeatureCache(features_dir / "val.pt"),
+        head_type=head_type,
+        window_size=window_size,
+    )
 
     train_loader = DataLoader(
         train_cache,

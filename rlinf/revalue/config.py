@@ -109,13 +109,32 @@ class RevalueOutputConfig:
 class RevalueZPConfig:
     """Stage-1 z/p head settings."""
 
+    head_type: str = "temporal_z_mlp_p"
     hidden_dim: int = 256
     dropout: float = 0.1
     trunk_depth: int = 1
+    window_size: int = 5
+    num_layers: int = 2
+    num_heads: int = 4
+    ffn_dim: int = 512
+    stage_embedding_dim: int = 32
+    progress_hidden_dim: int = 256
+    progress_depth: int = 2
     lr: float = 1.0e-3
     weight_decay: float = 1.0e-4
     max_epochs: int = 100
     early_stop_patience: int = 10
+    phase_loss_weight: float = 1.0
+    progress_loss_weight: float = 1.0
+    global_progress_loss_weight: float = 0.25
+    label_smoothing: float = 0.05
+    use_class_weights: bool = True
+    progress_beta: float = 0.05
+    max_grad_norm: float | None = None
+    stage_only_epochs: int = 4
+    gt_stage_prior_epochs: int = 6
+    stage_prior_ramp_epochs: int = 10
+    max_pred_stage_prior_weight: float = 0.7
 
 
 @dataclass

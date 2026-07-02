@@ -122,7 +122,6 @@ class FusionTrainer:
         if "return" not in batch:
             raise ValueError("Fusion training batch missing raw return targets.")
 
-        features = batch["features"].to(self.device)
         raw_logits = batch["raw_logits"].to(self.device)
         returns = batch["return"].to(self.device)
         raw_value = batch.get("raw_value")
@@ -136,7 +135,13 @@ class FusionTrainer:
         )
 
         with torch.no_grad():
-            head_out = self.zp_head(features)
+            if "feature_window" in batch:
+                head_out = self.zp_head(
+                    batch["feature_window"].to(self.device),
+                    stage_prior=None,
+                )
+            else:
+                head_out = self.zp_head(batch["features"].to(self.device))
 
         delta_logits = self.fusion(
             raw_logits,
@@ -181,7 +186,7 @@ class FusionTrainer:
                     self.fusion.parameters(), self.cfg.max_grad_norm
                 )
             optimizer.step()
-            batch_size = int(batch["features"].shape[0])
+            batch_size = int(batch["raw_logits"].shape[0])
             total_loss += float(loss.item()) * batch_size
             total_count += batch_size
         return total_loss / max(total_count, 1)

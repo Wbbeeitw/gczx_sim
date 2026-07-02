@@ -24,7 +24,12 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from rlinf.revalue.data.feature_cache import FeatureCache, collate_feature_batch
+from rlinf.revalue.data.feature_cache import (
+    HEAD_TYPE_SHARED_MLP,
+    FeatureCache,
+    TemporalWindowDataset,
+    collate_feature_batch,
+)
 
 _ADVANTAGE_REQUIRED_FOR_FUSION = {
     "episode_index",
@@ -139,19 +144,24 @@ def build_fusion_loaders(
     batch_size: int = 256,
     num_workers: int = 0,
     train_shuffle: bool = True,
+    head_type: str = HEAD_TYPE_SHARED_MLP,
+    window_size: int = 5,
 ) -> tuple[DataLoader, DataLoader]:
     """Build train/val fusion loaders from feature caches and source advantages."""
     advantages_df = read_advantages(advantages_path)
     validate_fusion_advantages(advantages_df, source=advantages_path)
 
-    train_dataset = FeatureAdvantageDataset(
+    train_dataset: Dataset = FeatureAdvantageDataset(
         Path(features_dir) / "train.pt",
         advantages_df,
     )
-    val_dataset = FeatureAdvantageDataset(
+    val_dataset: Dataset = FeatureAdvantageDataset(
         Path(features_dir) / "val.pt",
         advantages_df,
     )
+    if head_type != HEAD_TYPE_SHARED_MLP:
+        train_dataset = TemporalWindowDataset(train_dataset, window_size=window_size)
+        val_dataset = TemporalWindowDataset(val_dataset, window_size=window_size)
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,

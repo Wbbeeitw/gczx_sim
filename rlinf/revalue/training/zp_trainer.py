@@ -21,6 +21,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -47,6 +48,31 @@ class ZPHeadTrainerConfig:
     global_progress_loss_weight: float = 0.0
     label_smoothing: float = 0.0
     max_grad_norm: float | None = None
+    device: str = "cuda"
+
+
+@dataclass
+class TemporalZPHeadTrainerConfig:
+    """Configuration for stage-1 temporal z->p head training."""
+
+    lr: float = 1.0e-3
+    weight_decay: float = 1.0e-4
+    max_epochs: int = 100
+    early_stop_patience: int = 10
+    early_stop_delta: float = 1.0e-5
+    lr_patience: int = 5
+    phase_loss_weight: float = 1.0
+    progress_loss_weight: float = 1.0
+    global_progress_loss_weight: float = 0.25
+    label_smoothing: float = 0.05
+    use_class_weights: bool = True
+    progress_beta: float = 0.05
+    max_grad_norm: float | None = None
+    stage_only_epochs: int = 4
+    gt_stage_prior_epochs: int = 6
+    stage_prior_ramp_epochs: int = 10
+    max_pred_stage_prior_weight: float = 0.7
+    num_phases: int = 5
     device: str = "cuda"
 
 
@@ -214,5 +240,372 @@ class ZPHeadTrainer:
         return {
             "best_epoch": self.best_epoch,
             "best_val_loss": self.best_val_loss,
+            "history": history,
+        }
+
+
+def _build_stage_prior(
+    phase_center: torch.Tensor,
+    phase_logits: torch.Tensor | None,
+    *,
+    epoch: int,
+    cfg: TemporalZPHeadTrainerConfig,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    gt_onehot = F.one_hot(
+        phase_center.long(),
+        num_classes=cfg.num_phases,
+    ).to(dtype)
+    if (
+        epoch <= cfg.stage_only_epochs + cfg.gt_stage_prior_epochs
+        or phase_logits is None
+    ):
+        return gt_onehot
+
+    pred_probs = F.softmax(phase_logits.detach(), dim=-1).to(dtype)
+    mix_progress = min(
+        1.0,
+        max(
+            0.0,
+            (
+                epoch - cfg.stage_only_epochs - cfg.gt_stage_prior_epochs
+            )
+            / max(1, cfg.stage_prior_ramp_epochs),
+        ),
+    )
+    pred_weight = cfg.max_pred_stage_prior_weight * mix_progress
+    gt_weight = 1.0 - pred_weight
+    return gt_weight * gt_onehot + pred_weight * pred_probs
+
+
+def _compute_temporal_metrics(
+    *,
+    phase_logits: torch.Tensor,
+    phase_progress_pred: torch.Tensor,
+    global_progress_pred: torch.Tensor,
+    phase_true: torch.Tensor,
+    phase_progress_true: torch.Tensor,
+    global_progress_true: torch.Tensor,
+    num_phases: int,
+) -> dict[str, float]:
+    phase_pred = phase_logits.argmax(dim=-1)
+    phase_acc = (phase_pred == phase_true).float().mean().item()
+
+    per_phase_acc: dict[str, float] = {}
+    per_phase_progress_mae: dict[str, float] = {}
+    for phase_id in range(num_phases):
+        mask = phase_true == phase_id
+        if mask.any():
+            per_phase_acc[f"phase_{phase_id}_acc"] = (
+                (phase_pred[mask] == phase_true[mask]).float().mean().item()
+            )
+            per_phase_progress_mae[f"phase_{phase_id}_progress_mae"] = (
+                phase_progress_pred[mask] - phase_progress_true[mask]
+            ).abs().mean().item()
+        else:
+            per_phase_acc[f"phase_{phase_id}_acc"] = float("nan")
+            per_phase_progress_mae[f"phase_{phase_id}_progress_mae"] = float("nan")
+
+    macro_phase_acc = float(
+        np.nanmean([per_phase_acc[f"phase_{phase_id}_acc"] for phase_id in range(num_phases)])
+    )
+    late_phase_acc = float(
+        np.nanmean(
+            [
+                per_phase_acc.get("phase_3_acc", float("nan")),
+                per_phase_acc.get("phase_4_acc", float("nan")),
+            ]
+        )
+    )
+    progress_mae = (phase_progress_pred - phase_progress_true).abs().mean().item()
+    progress_mse = ((phase_progress_pred - phase_progress_true) ** 2).mean().item()
+    global_mae = (global_progress_pred - global_progress_true).abs().mean().item()
+    global_mse = ((global_progress_pred - global_progress_true) ** 2).mean().item()
+
+    return {
+        "phase_acc": phase_acc,
+        "macro_phase_acc": macro_phase_acc,
+        "late_phase_acc": late_phase_acc,
+        "progress_mae": progress_mae,
+        "progress_mse": progress_mse,
+        "global_progress_mae": global_mae,
+        "global_progress_mse": global_mse,
+        **per_phase_acc,
+        **per_phase_progress_mae,
+    }
+
+
+def _is_better_temporal_checkpoint(
+    metrics: dict[str, float],
+    best_metrics: dict[str, float] | None,
+    *,
+    min_delta: float,
+) -> bool:
+    if best_metrics is None:
+        return True
+
+    comparisons = [
+        ("late_phase_acc", True),
+        ("macro_phase_acc", True),
+        ("progress_mae", False),
+        ("loss", False),
+    ]
+    for key, higher_is_better in comparisons:
+        current = float(metrics[key])
+        best = float(best_metrics[key])
+        if higher_is_better:
+            if current > best + min_delta:
+                return True
+            if current < best - min_delta:
+                return False
+        else:
+            if current < best - min_delta:
+                return True
+            if current > best + min_delta:
+                return False
+    return False
+
+
+class TemporalZPHeadTrainer:
+    """Train a temporal z->p head on windowed frozen VLM features."""
+
+    def __init__(self, head: nn.Module, cfg: TemporalZPHeadTrainerConfig) -> None:
+        self.head = head.to(cfg.device)
+        self.cfg = cfg
+        self.device = torch.device(cfg.device)
+        self.best_state: dict[str, torch.Tensor] | None = None
+        self.best_epoch = -1
+        self.best_val_loss = float("inf")
+        self.best_val_metrics: dict[str, float] | None = None
+
+    def _build_scheduler(
+        self, optimizer: torch.optim.Optimizer
+    ) -> torch.optim.lr_scheduler.ReduceLROnPlateau:
+        kwargs: dict[str, Any] = {
+            "mode": "min",
+            "factor": 0.5,
+            "patience": self.cfg.lr_patience,
+        }
+        if "verbose" in inspect.signature(
+            torch.optim.lr_scheduler.ReduceLROnPlateau.__init__
+        ).parameters:
+            kwargs["verbose"] = True
+        return torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, **kwargs)
+
+    def _phase_criterion(self, train_loader: DataLoader) -> nn.Module:
+        if not self.cfg.use_class_weights:
+            return nn.CrossEntropyLoss(label_smoothing=self.cfg.label_smoothing)
+
+        phase_counts = torch.zeros(self.cfg.num_phases, dtype=torch.float32)
+        for batch in train_loader:
+            phase_center = batch["phase_center"]
+            for phase_id in range(self.cfg.num_phases):
+                phase_counts[phase_id] += (phase_center == phase_id).sum().item()
+        weights = 1.0 / (phase_counts + 1.0)
+        weights = weights / weights.sum() * self.cfg.num_phases
+        logger.info("temporal z/p class weights: %s", weights.tolist())
+        return nn.CrossEntropyLoss(
+            weight=weights.to(self.device),
+            label_smoothing=self.cfg.label_smoothing,
+        )
+
+    def train_epoch(
+        self,
+        train_loader: DataLoader,
+        optimizer: torch.optim.Optimizer,
+        phase_criterion: nn.Module,
+        *,
+        epoch: int,
+    ) -> float:
+        self.head.train()
+        progress_criterion = nn.SmoothL1Loss(beta=self.cfg.progress_beta)
+        global_progress_criterion = nn.SmoothL1Loss(beta=self.cfg.progress_beta)
+        total_loss = 0.0
+        total_count = 0
+
+        for batch in tqdm(train_loader, desc="train_zp", leave=False):
+            feature_window = batch["feature_window"].to(self.device)
+            phase_center = batch["phase_center"].to(self.device)
+            phase_progress_center = batch["phase_progress_center"].to(self.device)
+            global_progress_center = batch["global_progress_center"].to(self.device)
+
+            optimizer.zero_grad(set_to_none=True)
+            if epoch <= self.cfg.stage_only_epochs:
+                out = self.head(feature_window, stage_prior=None)
+                loss = self.cfg.phase_loss_weight * phase_criterion(
+                    out["phase_logits"],
+                    phase_center,
+                )
+            else:
+                stage_out = self.head(feature_window, stage_prior=None)
+                stage_prior = _build_stage_prior(
+                    phase_center,
+                    stage_out["phase_logits"],
+                    epoch=epoch,
+                    cfg=self.cfg,
+                    dtype=feature_window.dtype,
+                )
+                out = self.head(feature_window, stage_prior=stage_prior)
+                loss = self.cfg.phase_loss_weight * phase_criterion(
+                    out["phase_logits"],
+                    phase_center,
+                )
+                loss = loss + self.cfg.progress_loss_weight * progress_criterion(
+                    out["phase_progress"],
+                    phase_progress_center,
+                )
+                if self.cfg.global_progress_loss_weight > 0.0:
+                    loss = loss + self.cfg.global_progress_loss_weight * global_progress_criterion(
+                        out["global_progress"],
+                        global_progress_center,
+                    )
+
+            loss.backward()
+            if self.cfg.max_grad_norm is not None:
+                nn.utils.clip_grad_norm_(self.head.parameters(), self.cfg.max_grad_norm)
+            optimizer.step()
+
+            batch_size = int(feature_window.shape[0])
+            total_loss += float(loss.item()) * batch_size
+            total_count += batch_size
+
+        return total_loss / max(total_count, 1)
+
+    @torch.no_grad()
+    def evaluate(
+        self,
+        data_loader: DataLoader,
+        phase_criterion: nn.Module,
+    ) -> dict[str, float]:
+        self.head.eval()
+        progress_criterion = nn.SmoothL1Loss(beta=self.cfg.progress_beta)
+        global_progress_criterion = nn.SmoothL1Loss(beta=self.cfg.progress_beta)
+        total_loss = 0.0
+        total_count = 0
+        all_logits: list[torch.Tensor] = []
+        all_phase_true: list[torch.Tensor] = []
+        all_progress_pred: list[torch.Tensor] = []
+        all_progress_true: list[torch.Tensor] = []
+        all_global_pred: list[torch.Tensor] = []
+        all_global_true: list[torch.Tensor] = []
+
+        for batch in data_loader:
+            feature_window = batch["feature_window"].to(self.device)
+            phase_center = batch["phase_center"].to(self.device)
+            phase_progress_center = batch["phase_progress_center"].to(self.device)
+            global_progress_center = batch["global_progress_center"].to(self.device)
+
+            out = self.head(feature_window, stage_prior=None)
+            loss = self.cfg.phase_loss_weight * phase_criterion(
+                out["phase_logits"],
+                phase_center,
+            )
+            loss = loss + self.cfg.progress_loss_weight * progress_criterion(
+                out["phase_progress"],
+                phase_progress_center,
+            )
+            if self.cfg.global_progress_loss_weight > 0.0:
+                loss = loss + self.cfg.global_progress_loss_weight * global_progress_criterion(
+                    out["global_progress"],
+                    global_progress_center,
+                )
+
+            batch_size = int(feature_window.shape[0])
+            total_loss += float(loss.item()) * batch_size
+            total_count += batch_size
+            all_logits.append(out["phase_logits"].detach().cpu())
+            all_phase_true.append(phase_center.detach().cpu())
+            all_progress_pred.append(out["phase_progress"].detach().cpu())
+            all_progress_true.append(phase_progress_center.detach().cpu())
+            all_global_pred.append(out["global_progress"].detach().cpu())
+            all_global_true.append(global_progress_center.detach().cpu())
+
+        metrics = _compute_temporal_metrics(
+            phase_logits=torch.cat(all_logits, dim=0),
+            phase_progress_pred=torch.cat(all_progress_pred, dim=0),
+            global_progress_pred=torch.cat(all_global_pred, dim=0),
+            phase_true=torch.cat(all_phase_true, dim=0),
+            phase_progress_true=torch.cat(all_progress_true, dim=0),
+            global_progress_true=torch.cat(all_global_true, dim=0),
+            num_phases=self.cfg.num_phases,
+        )
+        metrics["loss"] = total_loss / max(total_count, 1)
+        return metrics
+
+    def fit(
+        self,
+        train_loader: DataLoader,
+        val_loader: DataLoader,
+    ) -> dict[str, Any]:
+        phase_criterion = self._phase_criterion(train_loader)
+        optimizer = torch.optim.AdamW(
+            self.head.parameters(),
+            lr=self.cfg.lr,
+            weight_decay=self.cfg.weight_decay,
+        )
+        scheduler = self._build_scheduler(optimizer)
+        patience = 0
+        history: list[dict[str, Any]] = []
+
+        for epoch in range(1, self.cfg.max_epochs + 1):
+            train_loss = self.train_epoch(
+                train_loader,
+                optimizer,
+                phase_criterion,
+                epoch=epoch,
+            )
+            val_metrics = self.evaluate(val_loader, phase_criterion)
+            scheduler.step(val_metrics["loss"])
+            history.append(
+                {
+                    "epoch": epoch,
+                    "train_loss": train_loss,
+                    **{f"val_{key}": value for key, value in val_metrics.items()},
+                }
+            )
+            logger.info(
+                "zp epoch=%d train_loss=%.6f val_loss=%.6f "
+                "val_phase_acc=%.4f val_progress_mae=%.4f val_global_mae=%.4f",
+                epoch,
+                train_loss,
+                val_metrics["loss"],
+                val_metrics["phase_acc"],
+                val_metrics["progress_mae"],
+                val_metrics["global_progress_mae"],
+            )
+
+            if _is_better_temporal_checkpoint(
+                val_metrics,
+                self.best_val_metrics,
+                min_delta=self.cfg.early_stop_delta,
+            ):
+                self.best_val_loss = float(val_metrics["loss"])
+                self.best_epoch = epoch
+                self.best_val_metrics = {
+                    key: float(value) for key, value in val_metrics.items()
+                }
+                self.best_state = {
+                    key: value.detach().cpu().clone()
+                    for key, value in self.head.state_dict().items()
+                }
+                patience = 0
+            else:
+                patience += 1
+
+            if patience >= self.cfg.early_stop_patience:
+                logger.info(
+                    "early stopping temporal z/p head at epoch=%d best_epoch=%d",
+                    epoch,
+                    self.best_epoch,
+                )
+                break
+
+        if self.best_state is not None:
+            self.head.load_state_dict(self.best_state)
+
+        return {
+            "best_epoch": self.best_epoch,
+            "best_val_loss": self.best_val_loss,
+            "best_val_metrics": self.best_val_metrics,
             "history": history,
         }
