@@ -76,13 +76,32 @@ output:
   comparison_path: null
 
 zp:
+  head_type: temporal_z_mlp_p
   hidden_dim: 256
   dropout: 0.1
   trunk_depth: 1
+  window_size: 5
+  num_layers: 2
+  num_heads: 4
+  ffn_dim: 512
+  stage_embedding_dim: 32
+  progress_hidden_dim: 256
+  progress_depth: 2
   lr: 1.0e-3
   weight_decay: 1.0e-4
   max_epochs: 100
   early_stop_patience: 10
+  phase_loss_weight: 1.0
+  progress_loss_weight: 1.0
+  global_progress_loss_weight: 0.25
+  label_smoothing: 0.05
+  use_class_weights: true
+  progress_beta: 0.05
+  max_grad_norm: null
+  stage_only_epochs: 4
+  gt_stage_prior_epochs: 6
+  stage_prior_ramp_epochs: 10
+  max_pred_stage_prior_weight: 0.7
 
 fusion:
   hidden_dim: 256
