@@ -85,7 +85,13 @@ def _predict_split(
         for batch in loader:
             raw_logits = batch["raw_logits"].to(device_obj)
             if "feature_window" in batch:
-                head_out = zp_head(batch["feature_window"].to(device_obj), stage_prior=None)
+                head_kwargs = {"stage_prior": None}
+                if getattr(zp_head, "USES_VALID_MASK", False):
+                    head_kwargs["valid_mask"] = batch["valid_mask"].to(device_obj)
+                head_out = zp_head(
+                    batch["feature_window"].to(device_obj),
+                    **head_kwargs,
+                )
             else:
                 head_out = zp_head(batch["features"].to(device_obj))
             delta_logits = fusion(

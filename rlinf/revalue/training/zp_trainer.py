@@ -435,19 +435,27 @@ class TemporalZPHeadTrainer:
 
         for batch in tqdm(train_loader, desc="train_zp", leave=False):
             feature_window = batch["feature_window"].to(self.device)
+            valid_mask = batch.get("valid_mask")
+            valid_mask = valid_mask.to(self.device) if valid_mask is not None else None
             phase_center = batch["phase_center"].to(self.device)
             phase_progress_center = batch["phase_progress_center"].to(self.device)
             global_progress_center = batch["global_progress_center"].to(self.device)
 
             optimizer.zero_grad(set_to_none=True)
             if epoch <= self.cfg.stage_only_epochs:
-                out = self.head(feature_window, stage_prior=None)
+                head_kwargs = {"stage_prior": None}
+                if getattr(self.head, "USES_VALID_MASK", False):
+                    head_kwargs["valid_mask"] = valid_mask
+                out = self.head(feature_window, **head_kwargs)
                 loss = self.cfg.phase_loss_weight * phase_criterion(
                     out["phase_logits"],
                     phase_center,
                 )
             else:
-                stage_out = self.head(feature_window, stage_prior=None)
+                head_kwargs = {"stage_prior": None}
+                if getattr(self.head, "USES_VALID_MASK", False):
+                    head_kwargs["valid_mask"] = valid_mask
+                stage_out = self.head(feature_window, **head_kwargs)
                 stage_prior = _build_stage_prior(
                     phase_center,
                     stage_out["phase_logits"],
@@ -455,7 +463,10 @@ class TemporalZPHeadTrainer:
                     cfg=self.cfg,
                     dtype=feature_window.dtype,
                 )
-                out = self.head(feature_window, stage_prior=stage_prior)
+                head_kwargs = {"stage_prior": stage_prior}
+                if getattr(self.head, "USES_VALID_MASK", False):
+                    head_kwargs["valid_mask"] = valid_mask
+                out = self.head(feature_window, **head_kwargs)
                 loss = self.cfg.phase_loss_weight * phase_criterion(
                     out["phase_logits"],
                     phase_center,
@@ -501,11 +512,16 @@ class TemporalZPHeadTrainer:
 
         for batch in data_loader:
             feature_window = batch["feature_window"].to(self.device)
+            valid_mask = batch.get("valid_mask")
+            valid_mask = valid_mask.to(self.device) if valid_mask is not None else None
             phase_center = batch["phase_center"].to(self.device)
             phase_progress_center = batch["phase_progress_center"].to(self.device)
             global_progress_center = batch["global_progress_center"].to(self.device)
 
-            out = self.head(feature_window, stage_prior=None)
+            head_kwargs = {"stage_prior": None}
+            if getattr(self.head, "USES_VALID_MASK", False):
+                head_kwargs["valid_mask"] = valid_mask
+            out = self.head(feature_window, **head_kwargs)
             loss = self.cfg.phase_loss_weight * phase_criterion(
                 out["phase_logits"],
                 phase_center,

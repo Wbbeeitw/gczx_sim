@@ -18,6 +18,7 @@ from rlinf.revalue.models.fusion import LogitFusionMLP, fuse_logits, value_from_
 from rlinf.revalue.models.feature_extractor import VLMFeatureExtractor
 from rlinf.revalue.models.heads import SharedMLPPhaseProgressHead
 from rlinf.revalue.models.temporal_heads import (
+    TemporalLocalStageGatedProgressHead,
     TemporalStagePriorProgressHead,
     TemporalStageExpertsProgressHead,
     TemporalZMLPProgressHead,
@@ -26,6 +27,7 @@ from rlinf.revalue.models.temporal_heads import (
 __all__ = [
     "LogitFusionMLP",
     "SharedMLPPhaseProgressHead",
+    "TemporalLocalStageGatedProgressHead",
     "TemporalStagePriorProgressHead",
     "TemporalStageExpertsProgressHead",
     "TemporalZMLPProgressHead",

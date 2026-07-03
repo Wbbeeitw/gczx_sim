@@ -25,6 +25,7 @@ import torch
 from rlinf.revalue.data.advantage_table import build_fusion_loaders
 from rlinf.revalue.data.feature_cache import (
     HEAD_TYPE_SHARED_MLP,
+    HEAD_TYPE_TEMPORAL_LOCAL_STAGE_GATED,
     HEAD_TYPE_TEMPORAL_STAGE_PRIOR,
     HEAD_TYPE_TEMPORAL_STAGE_EXPERTS,
     HEAD_TYPE_TEMPORAL_Z_MLP_P,
@@ -35,6 +36,7 @@ from rlinf.revalue.io import save_json
 from rlinf.revalue.models import (
     LogitFusionMLP,
     SharedMLPPhaseProgressHead,
+    TemporalLocalStageGatedProgressHead,
     TemporalStagePriorProgressHead,
     TemporalStageExpertsProgressHead,
     TemporalZMLPProgressHead,
@@ -143,6 +145,22 @@ def train_zp_head(cfg: ZPTrainingConfig) -> Path:
         ).tolist()
         if cfg.head_type == HEAD_TYPE_TEMPORAL_STAGE_PRIOR:
             head = TemporalStagePriorProgressHead(
+                feature_dim=feature_dim,
+                num_phases=cfg.num_phases,
+                hidden_dim=cfg.hidden_dim,
+                dropout=cfg.dropout,
+                window_size=cfg.window_size,
+                num_layers=cfg.num_layers,
+                num_heads=cfg.num_heads,
+                ffn_dim=cfg.ffn_dim,
+                stage_embedding_dim=cfg.stage_embedding_dim,
+                progress_hidden_dim=cfg.progress_hidden_dim,
+                progress_depth=cfg.progress_depth,
+                trunk_depth=cfg.trunk_depth,
+                phase_span_priors=phase_span_priors,
+            )
+        elif cfg.head_type == HEAD_TYPE_TEMPORAL_LOCAL_STAGE_GATED:
+            head = TemporalLocalStageGatedProgressHead(
                 feature_dim=feature_dim,
                 num_phases=cfg.num_phases,
                 hidden_dim=cfg.hidden_dim,
@@ -292,6 +310,22 @@ def load_zp_head(path: str | Path, *, device: str = "cpu") -> torch.nn.Module:
                 progress_hidden_dim=int(checkpoint["progress_hidden_dim"]),
                 progress_depth=int(checkpoint["progress_depth"]),
                 trunk_depth=int(checkpoint.get("trunk_depth", 1)),
+                phase_span_priors=phase_span_priors,
+            )
+        elif head_type == HEAD_TYPE_TEMPORAL_LOCAL_STAGE_GATED:
+            head = TemporalLocalStageGatedProgressHead(
+                feature_dim=int(checkpoint["feature_dim"]),
+                num_phases=int(checkpoint["num_phases"]),
+                hidden_dim=int(checkpoint["hidden_dim"]),
+                dropout=float(checkpoint["dropout"]),
+                window_size=int(checkpoint["window_size"]),
+                num_layers=int(checkpoint["num_layers"]),
+                num_heads=int(checkpoint["num_heads"]),
+                ffn_dim=int(checkpoint["ffn_dim"]),
+                stage_embedding_dim=int(checkpoint["stage_embedding_dim"]),
+                progress_hidden_dim=int(checkpoint["progress_hidden_dim"]),
+                progress_depth=int(checkpoint["progress_depth"]),
+                trunk_depth=int(checkpoint.get("trunk_depth", 2)),
                 phase_span_priors=phase_span_priors,
             )
         elif head_type == HEAD_TYPE_TEMPORAL_STAGE_EXPERTS:

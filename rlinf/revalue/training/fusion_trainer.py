@@ -136,9 +136,12 @@ class FusionTrainer:
 
         with torch.no_grad():
             if "feature_window" in batch:
+                head_kwargs = {"stage_prior": None}
+                if getattr(self.zp_head, "USES_VALID_MASK", False):
+                    head_kwargs["valid_mask"] = batch["valid_mask"].to(self.device)
                 head_out = self.zp_head(
                     batch["feature_window"].to(self.device),
-                    stage_prior=None,
+                    **head_kwargs,
                 )
             else:
                 head_out = self.zp_head(batch["features"].to(self.device))
