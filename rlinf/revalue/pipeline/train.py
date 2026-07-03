@@ -25,6 +25,7 @@ import torch
 from rlinf.revalue.data.advantage_table import build_fusion_loaders
 from rlinf.revalue.data.feature_cache import (
     HEAD_TYPE_SHARED_MLP,
+    HEAD_TYPE_TEMPORAL_STAGE_PRIOR,
     HEAD_TYPE_TEMPORAL_STAGE_EXPERTS,
     HEAD_TYPE_TEMPORAL_Z_MLP_P,
     TEMPORAL_HEAD_TYPES,
@@ -34,6 +35,7 @@ from rlinf.revalue.io import save_json
 from rlinf.revalue.models import (
     LogitFusionMLP,
     SharedMLPPhaseProgressHead,
+    TemporalStagePriorProgressHead,
     TemporalStageExpertsProgressHead,
     TemporalZMLPProgressHead,
 )
@@ -139,7 +141,23 @@ def train_zp_head(cfg: ZPTrainingConfig) -> Path:
         phase_span_priors = (
             phase_counts / phase_counts.sum().clamp(min=1.0)
         ).tolist()
-        if cfg.head_type == HEAD_TYPE_TEMPORAL_STAGE_EXPERTS:
+        if cfg.head_type == HEAD_TYPE_TEMPORAL_STAGE_PRIOR:
+            head = TemporalStagePriorProgressHead(
+                feature_dim=feature_dim,
+                num_phases=cfg.num_phases,
+                hidden_dim=cfg.hidden_dim,
+                dropout=cfg.dropout,
+                window_size=cfg.window_size,
+                num_layers=cfg.num_layers,
+                num_heads=cfg.num_heads,
+                ffn_dim=cfg.ffn_dim,
+                stage_embedding_dim=cfg.stage_embedding_dim,
+                progress_hidden_dim=cfg.progress_hidden_dim,
+                progress_depth=cfg.progress_depth,
+                trunk_depth=cfg.trunk_depth,
+                phase_span_priors=phase_span_priors,
+            )
+        elif cfg.head_type == HEAD_TYPE_TEMPORAL_STAGE_EXPERTS:
             head = TemporalStageExpertsProgressHead(
                 feature_dim=feature_dim,
                 num_phases=cfg.num_phases,
@@ -260,7 +278,23 @@ def load_zp_head(path: str | Path, *, device: str = "cpu") -> torch.nn.Module:
         phase_span_priors = [
             float(value) for value in checkpoint["phase_span_priors"]
         ]
-        if head_type == HEAD_TYPE_TEMPORAL_STAGE_EXPERTS:
+        if head_type == HEAD_TYPE_TEMPORAL_STAGE_PRIOR:
+            head = TemporalStagePriorProgressHead(
+                feature_dim=int(checkpoint["feature_dim"]),
+                num_phases=int(checkpoint["num_phases"]),
+                hidden_dim=int(checkpoint["hidden_dim"]),
+                dropout=float(checkpoint["dropout"]),
+                window_size=int(checkpoint["window_size"]),
+                num_layers=int(checkpoint["num_layers"]),
+                num_heads=int(checkpoint["num_heads"]),
+                ffn_dim=int(checkpoint["ffn_dim"]),
+                stage_embedding_dim=int(checkpoint["stage_embedding_dim"]),
+                progress_hidden_dim=int(checkpoint["progress_hidden_dim"]),
+                progress_depth=int(checkpoint["progress_depth"]),
+                trunk_depth=int(checkpoint.get("trunk_depth", 1)),
+                phase_span_priors=phase_span_priors,
+            )
+        elif head_type == HEAD_TYPE_TEMPORAL_STAGE_EXPERTS:
             head = TemporalStageExpertsProgressHead(
                 feature_dim=int(checkpoint["feature_dim"]),
                 num_phases=int(checkpoint["num_phases"]),
@@ -333,7 +367,14 @@ def train_fusion(cfg: FusionTrainingConfig) -> Path:
         )
 
     zp_head = load_zp_head(cfg.zp_head_path, device=cfg.device)
-    use_phase_progress_all = str(zp_head_spec["head_type"]) == HEAD_TYPE_TEMPORAL_STAGE_EXPERTS
+    head_type = str(zp_head_spec["head_type"])
+    use_phase_progress_all = head_type == HEAD_TYPE_TEMPORAL_STAGE_EXPERTS
+    use_shared_hidden_context = head_type == HEAD_TYPE_TEMPORAL_STAGE_PRIOR
+    shared_hidden_dim = (
+        int(getattr(zp_head, "hidden_dim"))
+        if use_shared_hidden_context and hasattr(zp_head, "hidden_dim")
+        else None
+    )
     fusion = LogitFusionMLP(
         num_bins=cfg.num_bins,
         num_phases=cfg.num_phases,
@@ -341,6 +382,8 @@ def train_fusion(cfg: FusionTrainingConfig) -> Path:
         dropout=cfg.fusion_dropout,
         depth=cfg.fusion_depth,
         use_phase_progress_all=use_phase_progress_all,
+        shared_hidden_dim=shared_hidden_dim,
+        shared_hidden_proj_dim=32 if use_shared_hidden_context else 0,
     )
     trainer_cfg = FusionTrainerConfig(
         lr=cfg.lr,
@@ -368,6 +411,8 @@ def train_fusion(cfg: FusionTrainingConfig) -> Path:
         "depth": cfg.fusion_depth,
         "alpha": cfg.alpha,
         "use_phase_progress_all": use_phase_progress_all,
+        "shared_hidden_dim": shared_hidden_dim,
+        "shared_hidden_proj_dim": 32 if use_shared_hidden_context else 0,
         "atoms": atoms.cpu(),
     }
     output_path = output_dir / "fusion.pt"
@@ -391,6 +436,8 @@ def load_fusion(
         dropout=float(checkpoint["dropout"]),
         depth=int(checkpoint["depth"]),
         use_phase_progress_all=bool(checkpoint.get("use_phase_progress_all", False)),
+        shared_hidden_dim=checkpoint.get("shared_hidden_dim"),
+        shared_hidden_proj_dim=int(checkpoint.get("shared_hidden_proj_dim", 0)),
     )
     fusion.load_state_dict(checkpoint["state_dict"])
     atoms = checkpoint["atoms"].float().to(device)

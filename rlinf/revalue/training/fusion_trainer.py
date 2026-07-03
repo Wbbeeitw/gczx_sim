@@ -149,6 +149,7 @@ class FusionTrainer:
             head_out["phase_progress"],
             head_out["global_progress"],
             phase_progress_all=head_out.get("phase_progress_all"),
+            shared_hidden=head_out.get("shared_hidden"),
         )
         fused_logits = fuse_logits(raw_logits, delta_logits, self.cfg.alpha)
         fused_value = value_from_logits(fused_logits, self.atoms)

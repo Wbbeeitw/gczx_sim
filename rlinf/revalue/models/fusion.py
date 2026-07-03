@@ -41,6 +41,8 @@ class LogitFusionMLP(nn.Module):
         dropout: float = 0.1,
         depth: int = 2,
         use_phase_progress_all: bool = False,
+        shared_hidden_dim: int | None = None,
+        shared_hidden_proj_dim: int = 0,
     ) -> None:
         super().__init__()
         if depth < 1:
@@ -51,8 +53,26 @@ class LogitFusionMLP(nn.Module):
         self.hidden_dim = int(hidden_dim)
         self.depth = int(depth)
         self.use_phase_progress_all = bool(use_phase_progress_all)
+        self.shared_hidden_dim = (
+            int(shared_hidden_dim) if shared_hidden_dim is not None else None
+        )
+        self.shared_hidden_proj_dim = int(shared_hidden_proj_dim)
         progress_dim = self.num_phases if self.use_phase_progress_all else 1
         self.input_dim = self.num_bins + self.num_phases + progress_dim + 1
+        if self.shared_hidden_proj_dim > 0:
+            if self.shared_hidden_dim is None or self.shared_hidden_dim < 1:
+                raise ValueError(
+                    "shared_hidden_dim must be provided when shared_hidden_proj_dim > 0"
+                )
+            self.shared_hidden_proj = nn.Sequential(
+                nn.Linear(self.shared_hidden_dim, self.shared_hidden_proj_dim),
+                nn.LayerNorm(self.shared_hidden_proj_dim),
+                nn.GELU(),
+                nn.Dropout(dropout) if dropout > 0.0 else nn.Identity(),
+            )
+            self.input_dim += self.shared_hidden_proj_dim
+        else:
+            self.shared_hidden_proj = None
 
         layers: list[nn.Module] = []
         in_dim = self.input_dim
@@ -87,6 +107,7 @@ class LogitFusionMLP(nn.Module):
         phase_progress: torch.Tensor,
         global_progress: torch.Tensor,
         phase_progress_all: torch.Tensor | None = None,
+        shared_hidden: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Return additive delta logits.
 
@@ -97,6 +118,7 @@ class LogitFusionMLP(nn.Module):
             global_progress: Expected global progress, shape ``[batch]``.
             phase_progress_all: Per-phase local progress hypotheses, shape
                 ``[batch, num_phases]`` when enabled.
+            shared_hidden: Refined shared temporal feature for the center frame.
 
         Returns:
             Delta logits of shape ``[batch, num_bins]``.
@@ -110,15 +132,20 @@ class LogitFusionMLP(nn.Module):
             progress_input = phase_progress_all
         else:
             progress_input = phase_progress.unsqueeze(-1)
-        fused_input = torch.cat(
-            [
-                raw_logits,
-                phase_repr,
-                progress_input,
-                global_progress.unsqueeze(-1),
-            ],
-            dim=-1,
-        )
+        inputs = [
+            raw_logits,
+            phase_repr,
+            progress_input,
+            global_progress.unsqueeze(-1),
+        ]
+        if self.shared_hidden_proj is not None:
+            if shared_hidden is None:
+                raise ValueError(
+                    "Fusion head was configured with shared hidden context but "
+                    "no shared_hidden tensor was provided."
+                )
+            inputs.append(self.shared_hidden_proj(shared_hidden))
+        fused_input = torch.cat(inputs, dim=-1)
         return self.delta_head(self.trunk(fused_input))
 
 
