@@ -29,7 +29,8 @@ class LogitFusionMLP(nn.Module):
         fused_logits = raw_logits + alpha * delta_logits
 
     where ``delta_logits`` is produced from ``[raw_logits, phase_probs,
-    phase_progress, global_progress]``.
+        phase_progress, global_progress]`` or, for richer temporal heads,
+        ``[raw_logits, phase_probs, phase_progress_all, global_progress]``.
     """
 
     def __init__(
@@ -39,6 +40,7 @@ class LogitFusionMLP(nn.Module):
         hidden_dim: int = 256,
         dropout: float = 0.1,
         depth: int = 2,
+        use_phase_progress_all: bool = False,
     ) -> None:
         super().__init__()
         if depth < 1:
@@ -48,7 +50,9 @@ class LogitFusionMLP(nn.Module):
         self.num_phases = int(num_phases)
         self.hidden_dim = int(hidden_dim)
         self.depth = int(depth)
-        self.input_dim = self.num_bins + self.num_phases + 2
+        self.use_phase_progress_all = bool(use_phase_progress_all)
+        progress_dim = self.num_phases if self.use_phase_progress_all else 1
+        self.input_dim = self.num_bins + self.num_phases + progress_dim + 1
 
         layers: list[nn.Module] = []
         in_dim = self.input_dim
@@ -82,6 +86,7 @@ class LogitFusionMLP(nn.Module):
         phase_repr: torch.Tensor,
         phase_progress: torch.Tensor,
         global_progress: torch.Tensor,
+        phase_progress_all: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Return additive delta logits.
 
@@ -90,15 +95,26 @@ class LogitFusionMLP(nn.Module):
             phase_repr: Phase probabilities, shape ``[batch, num_phases]``.
             phase_progress: Phase-local progress, shape ``[batch]``.
             global_progress: Expected global progress, shape ``[batch]``.
+            phase_progress_all: Per-phase local progress hypotheses, shape
+                ``[batch, num_phases]`` when enabled.
 
         Returns:
             Delta logits of shape ``[batch, num_bins]``.
         """
+        if self.use_phase_progress_all:
+            if phase_progress_all is None:
+                raise ValueError(
+                    "Fusion head was configured with use_phase_progress_all=True "
+                    "but no phase_progress_all tensor was provided."
+                )
+            progress_input = phase_progress_all
+        else:
+            progress_input = phase_progress.unsqueeze(-1)
         fused_input = torch.cat(
             [
                 raw_logits,
                 phase_repr,
-                phase_progress.unsqueeze(-1),
+                progress_input,
                 global_progress.unsqueeze(-1),
             ],
             dim=-1,

@@ -16,8 +16,10 @@
 
 from rlinf.revalue.data.feature_cache import (
     HEAD_TYPE_SHARED_MLP,
+    HEAD_TYPE_TEMPORAL_STAGE_EXPERTS,
     HEAD_TYPE_TEMPORAL_Z_MLP_P,
     FeatureCache,
+    TEMPORAL_HEAD_TYPES,
     TemporalWindowDataset,
     build_feature_loaders,
     collate_feature_batch,
@@ -52,7 +54,9 @@ __all__ = [
     "FeatureCache",
     "FeatureResplitConfig",
     "HEAD_TYPE_SHARED_MLP",
+    "HEAD_TYPE_TEMPORAL_STAGE_EXPERTS",
     "HEAD_TYPE_TEMPORAL_Z_MLP_P",
+    "TEMPORAL_HEAD_TYPES",
     "TemporalWindowDataset",
     "build_episode_manifest",
     "build_feature_loaders",

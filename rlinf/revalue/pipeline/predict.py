@@ -93,6 +93,7 @@ def _predict_split(
                 head_out["phase_probs"],
                 head_out["phase_progress"],
                 head_out["global_progress"],
+                phase_progress_all=head_out.get("phase_progress_all"),
             )
             fused_logits = fuse_logits(raw_logits, delta_logits, alpha)
             fused_values = value_from_logits(fused_logits, atoms)

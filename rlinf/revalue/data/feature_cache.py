@@ -32,6 +32,11 @@ _REQUIRED_KEYS = {
 }
 HEAD_TYPE_SHARED_MLP = "shared_mlp"
 HEAD_TYPE_TEMPORAL_Z_MLP_P = "temporal_z_mlp_p"
+HEAD_TYPE_TEMPORAL_STAGE_EXPERTS = "temporal_stage_experts"
+TEMPORAL_HEAD_TYPES = {
+    HEAD_TYPE_TEMPORAL_Z_MLP_P,
+    HEAD_TYPE_TEMPORAL_STAGE_EXPERTS,
+}
 
 
 class FeatureCache(Dataset):
@@ -212,7 +217,7 @@ def _maybe_wrap_temporal(
     head_type: str,
     window_size: int,
 ) -> Dataset:
-    if head_type == HEAD_TYPE_TEMPORAL_Z_MLP_P:
+    if head_type in TEMPORAL_HEAD_TYPES:
         return TemporalWindowDataset(dataset, window_size=window_size)
     return dataset
 

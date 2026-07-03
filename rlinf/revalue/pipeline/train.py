@@ -25,13 +25,16 @@ import torch
 from rlinf.revalue.data.advantage_table import build_fusion_loaders
 from rlinf.revalue.data.feature_cache import (
     HEAD_TYPE_SHARED_MLP,
+    HEAD_TYPE_TEMPORAL_STAGE_EXPERTS,
     HEAD_TYPE_TEMPORAL_Z_MLP_P,
+    TEMPORAL_HEAD_TYPES,
     build_feature_loaders,
 )
 from rlinf.revalue.io import save_json
 from rlinf.revalue.models import (
     LogitFusionMLP,
     SharedMLPPhaseProgressHead,
+    TemporalStageExpertsProgressHead,
     TemporalZMLPProgressHead,
 )
 from rlinf.revalue.training import (
@@ -128,7 +131,7 @@ def train_zp_head(cfg: ZPTrainingConfig) -> Path:
         window_size=cfg.window_size,
     )
     feature_dim = train_loader.dataset.feature_dim
-    if cfg.head_type == HEAD_TYPE_TEMPORAL_Z_MLP_P:
+    if cfg.head_type in TEMPORAL_HEAD_TYPES:
         phase_counts = torch.bincount(
             train_loader.dataset.phase,
             minlength=cfg.num_phases,
@@ -136,20 +139,37 @@ def train_zp_head(cfg: ZPTrainingConfig) -> Path:
         phase_span_priors = (
             phase_counts / phase_counts.sum().clamp(min=1.0)
         ).tolist()
-        head = TemporalZMLPProgressHead(
-            feature_dim=feature_dim,
-            num_phases=cfg.num_phases,
-            hidden_dim=cfg.hidden_dim,
-            dropout=cfg.dropout,
-            window_size=cfg.window_size,
-            num_layers=cfg.num_layers,
-            num_heads=cfg.num_heads,
-            ffn_dim=cfg.ffn_dim,
-            stage_embedding_dim=cfg.stage_embedding_dim,
-            progress_hidden_dim=cfg.progress_hidden_dim,
-            progress_depth=cfg.progress_depth,
-            phase_span_priors=phase_span_priors,
-        )
+        if cfg.head_type == HEAD_TYPE_TEMPORAL_STAGE_EXPERTS:
+            head = TemporalStageExpertsProgressHead(
+                feature_dim=feature_dim,
+                num_phases=cfg.num_phases,
+                hidden_dim=cfg.hidden_dim,
+                dropout=cfg.dropout,
+                window_size=cfg.window_size,
+                num_layers=cfg.num_layers,
+                num_heads=cfg.num_heads,
+                ffn_dim=cfg.ffn_dim,
+                stage_embedding_dim=cfg.stage_embedding_dim,
+                progress_hidden_dim=cfg.progress_hidden_dim,
+                progress_depth=cfg.progress_depth,
+                trunk_depth=cfg.trunk_depth,
+                phase_span_priors=phase_span_priors,
+            )
+        else:
+            head = TemporalZMLPProgressHead(
+                feature_dim=feature_dim,
+                num_phases=cfg.num_phases,
+                hidden_dim=cfg.hidden_dim,
+                dropout=cfg.dropout,
+                window_size=cfg.window_size,
+                num_layers=cfg.num_layers,
+                num_heads=cfg.num_heads,
+                ffn_dim=cfg.ffn_dim,
+                stage_embedding_dim=cfg.stage_embedding_dim,
+                progress_hidden_dim=cfg.progress_hidden_dim,
+                progress_depth=cfg.progress_depth,
+                phase_span_priors=phase_span_priors,
+            )
         trainer_cfg = TemporalZPHeadTrainerConfig(
             lr=cfg.lr,
             weight_decay=cfg.weight_decay,
@@ -184,6 +204,7 @@ def train_zp_head(cfg: ZPTrainingConfig) -> Path:
             "stage_embedding_dim": cfg.stage_embedding_dim,
             "progress_hidden_dim": cfg.progress_hidden_dim,
             "progress_depth": cfg.progress_depth,
+            "trunk_depth": cfg.trunk_depth,
             "phase_span_priors": phase_span_priors,
         }
     else:
@@ -226,7 +247,7 @@ def inspect_zp_head_checkpoint(path: str | Path) -> dict[str, int | str | None]:
     return {
         "head_type": head_type,
         "window_size": int(checkpoint.get("window_size", 1))
-        if head_type == HEAD_TYPE_TEMPORAL_Z_MLP_P
+        if head_type in TEMPORAL_HEAD_TYPES
         else None,
     }
 
@@ -235,24 +256,41 @@ def load_zp_head(path: str | Path, *, device: str = "cpu") -> torch.nn.Module:
     """Load a z/p head checkpoint saved by :func:`train_zp_head`."""
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
     head_type = str(checkpoint.get("head_type", HEAD_TYPE_SHARED_MLP))
-    if head_type == HEAD_TYPE_TEMPORAL_Z_MLP_P:
+    if head_type in TEMPORAL_HEAD_TYPES:
         phase_span_priors = [
             float(value) for value in checkpoint["phase_span_priors"]
         ]
-        head = TemporalZMLPProgressHead(
-            feature_dim=int(checkpoint["feature_dim"]),
-            num_phases=int(checkpoint["num_phases"]),
-            hidden_dim=int(checkpoint["hidden_dim"]),
-            dropout=float(checkpoint["dropout"]),
-            window_size=int(checkpoint["window_size"]),
-            num_layers=int(checkpoint["num_layers"]),
-            num_heads=int(checkpoint["num_heads"]),
-            ffn_dim=int(checkpoint["ffn_dim"]),
-            stage_embedding_dim=int(checkpoint["stage_embedding_dim"]),
-            progress_hidden_dim=int(checkpoint["progress_hidden_dim"]),
-            progress_depth=int(checkpoint["progress_depth"]),
-            phase_span_priors=phase_span_priors,
-        )
+        if head_type == HEAD_TYPE_TEMPORAL_STAGE_EXPERTS:
+            head = TemporalStageExpertsProgressHead(
+                feature_dim=int(checkpoint["feature_dim"]),
+                num_phases=int(checkpoint["num_phases"]),
+                hidden_dim=int(checkpoint["hidden_dim"]),
+                dropout=float(checkpoint["dropout"]),
+                window_size=int(checkpoint["window_size"]),
+                num_layers=int(checkpoint["num_layers"]),
+                num_heads=int(checkpoint["num_heads"]),
+                ffn_dim=int(checkpoint["ffn_dim"]),
+                stage_embedding_dim=int(checkpoint["stage_embedding_dim"]),
+                progress_hidden_dim=int(checkpoint["progress_hidden_dim"]),
+                progress_depth=int(checkpoint["progress_depth"]),
+                trunk_depth=int(checkpoint.get("trunk_depth", 1)),
+                phase_span_priors=phase_span_priors,
+            )
+        else:
+            head = TemporalZMLPProgressHead(
+                feature_dim=int(checkpoint["feature_dim"]),
+                num_phases=int(checkpoint["num_phases"]),
+                hidden_dim=int(checkpoint["hidden_dim"]),
+                dropout=float(checkpoint["dropout"]),
+                window_size=int(checkpoint["window_size"]),
+                num_layers=int(checkpoint["num_layers"]),
+                num_heads=int(checkpoint["num_heads"]),
+                ffn_dim=int(checkpoint["ffn_dim"]),
+                stage_embedding_dim=int(checkpoint["stage_embedding_dim"]),
+                progress_hidden_dim=int(checkpoint["progress_hidden_dim"]),
+                progress_depth=int(checkpoint["progress_depth"]),
+                phase_span_priors=phase_span_priors,
+            )
     else:
         head = SharedMLPPhaseProgressHead(
             feature_dim=int(checkpoint["feature_dim"]),
@@ -295,12 +333,14 @@ def train_fusion(cfg: FusionTrainingConfig) -> Path:
         )
 
     zp_head = load_zp_head(cfg.zp_head_path, device=cfg.device)
+    use_phase_progress_all = str(zp_head_spec["head_type"]) == HEAD_TYPE_TEMPORAL_STAGE_EXPERTS
     fusion = LogitFusionMLP(
         num_bins=cfg.num_bins,
         num_phases=cfg.num_phases,
         hidden_dim=cfg.fusion_hidden_dim,
         dropout=cfg.fusion_dropout,
         depth=cfg.fusion_depth,
+        use_phase_progress_all=use_phase_progress_all,
     )
     trainer_cfg = FusionTrainerConfig(
         lr=cfg.lr,
@@ -327,6 +367,7 @@ def train_fusion(cfg: FusionTrainingConfig) -> Path:
         "dropout": cfg.fusion_dropout,
         "depth": cfg.fusion_depth,
         "alpha": cfg.alpha,
+        "use_phase_progress_all": use_phase_progress_all,
         "atoms": atoms.cpu(),
     }
     output_path = output_dir / "fusion.pt"
@@ -349,6 +390,7 @@ def load_fusion(
         hidden_dim=int(checkpoint["hidden_dim"]),
         dropout=float(checkpoint["dropout"]),
         depth=int(checkpoint["depth"]),
+        use_phase_progress_all=bool(checkpoint.get("use_phase_progress_all", False)),
     )
     fusion.load_state_dict(checkpoint["state_dict"])
     atoms = checkpoint["atoms"].float().to(device)
