@@ -38,13 +38,13 @@ class AdvantagePreservingDataset:
         self,
         base_dataset: Any,
         transformed_dataset: Any,
-        advantages_lookup: dict[tuple[int, int], bool] | None = None,
+        advantages_lookup: dict[tuple[int, int], Any] | None = None,
     ):
         self._transformed_dataset = transformed_dataset
-        self._advantage_by_index = self._build_advantage_index(
+        self._metadata_by_index = self._build_metadata_index(
             base_dataset, advantages_lookup
         )
-        self._base_dataset = base_dataset if self._advantage_by_index is None else None
+        self._base_dataset = base_dataset if self._metadata_by_index is None else None
 
     @staticmethod
     def _get_hf_dataset(dataset: Any) -> Any:
@@ -58,11 +58,11 @@ class AdvantagePreservingDataset:
                 return None
         return None
 
-    def _build_advantage_index(
+    def _build_metadata_index(
         self,
         base_dataset: Any,
-        advantages_lookup: dict[tuple[int, int], bool] | None,
-    ) -> dict[int, bool] | None:
+        advantages_lookup: dict[tuple[int, int], Any] | None,
+    ) -> dict[int, dict[str, Any]] | None:
         hf_dataset = self._get_hf_dataset(base_dataset)
         if hf_dataset is None:
             logger.warning(
@@ -74,12 +74,16 @@ class AdvantagePreservingDataset:
         if advantages_lookup is not None:
             ep_indices = hf_dataset["episode_index"]
             frame_indices = hf_dataset["frame_index"]
-            advantage_by_index = {}
+            metadata_by_index: dict[int, dict[str, Any]] = {}
             missing_keys = []
             for i in range(len(hf_dataset)):
                 key = (int(ep_indices[i]), int(frame_indices[i]))
                 if key in advantages_lookup:
-                    advantage_by_index[i] = advantages_lookup[key]
+                    record = advantages_lookup[key]
+                    if isinstance(record, dict):
+                        metadata_by_index[i] = dict(record)
+                    else:
+                        metadata_by_index[i] = {"advantage": bool(record)}
                 else:
                     missing_keys.append(key)
             if missing_keys:
@@ -89,11 +93,11 @@ class AdvantagePreservingDataset:
                     f"The advantages parquet does not match this dataset. "
                     f"Re-run compute_advantages.py."
                 )
-            return advantage_by_index
+            return metadata_by_index
 
         if "advantage" in hf_dataset.column_names:
             advantages = hf_dataset["advantage"]
-            return {i: bool(v) for i, v in enumerate(advantages)}
+            return {i: {"advantage": bool(v)} for i, v in enumerate(advantages)}
 
         raise ValueError(
             "[AdvantagePreservingDataset] No advantage data found: "
@@ -107,14 +111,14 @@ class AdvantagePreservingDataset:
     def __getitem__(self, idx: int) -> dict[str, Any]:
         sample = self._transformed_dataset[idx]
 
-        if self._advantage_by_index is not None:
-            if idx not in self._advantage_by_index:
+        if self._metadata_by_index is not None:
+            if idx not in self._metadata_by_index:
                 raise KeyError(
                     f"[AdvantagePreservingDataset] Index {idx} not found in advantage index. "
                     f"Dataset size: {len(self._transformed_dataset)}, "
-                    f"advantage index size: {len(self._advantage_by_index)}."
+                    f"advantage index size: {len(self._metadata_by_index)}."
                 )
-            sample["advantage"] = self._advantage_by_index[idx]
+            sample.update(self._metadata_by_index[idx])
         else:
             base_sample = self._base_dataset[idx]
             if "advantage" not in base_sample:
@@ -133,7 +137,7 @@ class AdvantagePreservingDataset:
 class CFGDataLoaderImpl(BaseDataLoaderImpl):
     """DataLoader wrapper that yields CFG training tuples."""
 
-    def __iter__(self) -> Iterator[tuple[Any, Any, torch.Tensor]]:
+    def __iter__(self) -> Iterator[tuple[Any, Any, dict[str, torch.Tensor]]]:
         for batch in self._data_loader:
             observation = CFGObservation.from_dict(batch)
             actions = batch["actions"]
@@ -141,8 +145,21 @@ class CFGDataLoaderImpl(BaseDataLoaderImpl):
             advantage = batch["advantage"]
             if not isinstance(advantage, torch.Tensor):
                 advantage = torch.tensor(advantage, dtype=torch.bool)
+            metadata: dict[str, torch.Tensor] = {
+                "advantage": advantage.to(dtype=torch.bool),
+            }
+            for key, dtype in (
+                ("cfg_quality_label", torch.long),
+                ("cfg_percentile_rank", torch.float32),
+                ("cfg_loss_weight", torch.float32),
+            ):
+                if key in batch:
+                    value = batch[key]
+                    if not isinstance(value, torch.Tensor):
+                        value = torch.tensor(value, dtype=dtype)
+                    metadata[key] = value.to(dtype=dtype)
 
-            yield observation, actions, advantage
+            yield observation, actions, metadata
 
 
 @dataclasses.dataclass(frozen=True)
@@ -168,11 +185,13 @@ class TokenizePromptWithGuidance:
         tokens, token_masks = self.tokenizer.tokenize(prompt, state)
 
         positive_prompt = f"{prompt}\nAdvantage: positive"
+        neutral_prompt = f"{prompt}\nAdvantage: neutral"
         negative_prompt = f"{prompt}\nAdvantage: negative"
 
         positive_tokens, positive_masks = self.tokenizer.tokenize(
             positive_prompt, state
         )
+        neutral_tokens, neutral_masks = self.tokenizer.tokenize(neutral_prompt, state)
         negative_tokens, negative_masks = self.tokenizer.tokenize(
             negative_prompt, state
         )
@@ -183,6 +202,8 @@ class TokenizePromptWithGuidance:
             "tokenized_prompt_mask": token_masks,
             "tokenized_positive_guidance_prompt": positive_tokens,
             "tokenized_positive_guidance_prompt_mask": positive_masks,
+            "tokenized_neutral_guidance_prompt": neutral_tokens,
+            "tokenized_neutral_guidance_prompt_mask": neutral_masks,
             "tokenized_negative_guidance_prompt": negative_tokens,
             "tokenized_negative_guidance_prompt_mask": negative_masks,
         }

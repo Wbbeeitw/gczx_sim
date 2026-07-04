@@ -34,6 +34,10 @@ from examples.recap.process.episode_subset_utils import (
     resolve_episode_split_for_dataset,
     resolve_episode_subset_for_dataset,
 )
+from rlinf.data.datasets.recap.cfg_strategy import (
+    CFGStrategyConfig,
+    build_cfg_sample_metadata,
+)
 from rlinf.data.datasets.recap.cfg_model import (
     AdvantagePreservingDataset,
     CFGDataLoaderImpl,
@@ -101,7 +105,10 @@ class FSDPCfgWorker(FSDPSftWorker):
     def _load_advantages_lookup(
         data_path: str,
         advantage_tag: str | None = None,
-    ) -> dict[tuple[int, int], bool]:
+        *,
+        strategy_cfg: CFGStrategyConfig | None = None,
+        episodes: list[int] | None = None,
+    ) -> dict[tuple[int, int], Any]:
         """Load advantage lookup from meta/advantages_{tag}.parquet or meta/advantages.parquet.
 
         Args:
@@ -109,7 +116,8 @@ class FSDPCfgWorker(FSDPSftWorker):
             advantage_tag: Advantage tag name. If None, loads meta/advantages.parquet.
 
         Returns:
-            Dict mapping (episode_index, frame_index) -> bool.
+            Dict mapping (episode_index, frame_index) to legacy bool labels or richer
+            CSA-CFG metadata.
         """
         import pandas as pd
 
@@ -126,16 +134,16 @@ class FSDPCfgWorker(FSDPSftWorker):
 
         adv_df = pd.read_parquet(meta_path)
 
-        lookup = dict(
-            zip(
-                zip(
-                    adv_df["episode_index"].values.astype(int).tolist(),
-                    adv_df["frame_index"].values.astype(int).tolist(),
-                ),
-                adv_df["advantage"].values.astype(bool).tolist(),
-            )
+        if episodes is not None:
+            episode_set = {int(ep) for ep in episodes}
+            adv_df = adv_df[adv_df["episode_index"].astype(int).isin(episode_set)].copy()
+
+        strategy_cfg = strategy_cfg or CFGStrategyConfig()
+        return build_cfg_sample_metadata(
+            adv_df,
+            strategy_cfg=strategy_cfg,
+            dataset_id=str(data_path),
         )
-        return lookup
 
     def _resolve_dataset_episodes(
         self,
@@ -221,6 +229,14 @@ class FSDPCfgWorker(FSDPSftWorker):
         data_cfg = self.cfg.get("data", {})
         openpi_cfg = self.cfg.actor.model.openpi
         advantage_tag = data_cfg.get("advantage_tag", None)
+        strategy_cfg = CFGStrategyConfig(
+            strategy=str(data_cfg.get("cfg_strategy", "binary")),
+            positive_quantile=float(data_cfg.get("csa_positive_quantile", 0.30)),
+            bottom_quantile=float(data_cfg.get("csa_bottom_quantile", 0.15)),
+            bottom_negative_prob=float(data_cfg.get("csa_bottom_negative_prob", 0.50)),
+            weight_lambda=float(data_cfg.get("csa_weight_lambda", 0.20)),
+            seed=int(data_cfg.get("seed", 42)),
+        )
 
         datasets_config = data_cfg.get("train_data_paths", [])
         if not datasets_config:
@@ -288,7 +304,12 @@ class FSDPCfgWorker(FSDPSftWorker):
                 base_dataset, transforms_list
             )
 
-            advantages_lookup = self._load_advantages_lookup(data_path, advantage_tag)
+            advantages_lookup = self._load_advantages_lookup(
+                data_path,
+                advantage_tag,
+                strategy_cfg=strategy_cfg,
+                episodes=episodes,
+            )
             if self._rank == 0:
                 adv_filename = (
                     f"advantages_{advantage_tag}.parquet"
@@ -297,7 +318,8 @@ class FSDPCfgWorker(FSDPSftWorker):
                 )
                 self.log_info(
                     f"Loaded advantages from "
-                    f"meta/{adv_filename} ({len(advantages_lookup)} entries)"
+                    f"meta/{adv_filename} ({len(advantages_lookup)} entries, "
+                    f"cfg_strategy={strategy_cfg.strategy})"
                 )
 
             final_dataset = AdvantagePreservingDataset(
@@ -447,14 +469,14 @@ class FSDPCfgWorker(FSDPSftWorker):
                 )
 
                 try:
-                    observation, actions, advantage = next(self.data_iter)
+                    observation, actions, metadata = next(self.data_iter)
                 except StopIteration:
                     self._data_epoch = getattr(self, "_data_epoch", 0) + 1
                     self._current_epoch = self._data_epoch
                     self._data_iter_offset = 0
                     self.data_loader.set_epoch(self._data_epoch)
                     self.data_iter = iter(self.data_loader)
-                    observation, actions, advantage = next(self.data_iter)
+                    observation, actions, metadata = next(self.data_iter)
                 self._data_iter_offset += 1
 
                 register_pytree_dataclasses(observation)
@@ -467,15 +489,29 @@ class FSDPCfgWorker(FSDPSftWorker):
                     observation,
                 )
                 actions = actions.to(torch.float32).to(self.device, non_blocking=True)
-                advantage = advantage.to(self.device, non_blocking=True)
+                if isinstance(metadata, dict):
+                    metadata = {
+                        key: value.to(self.device, non_blocking=True)
+                        if isinstance(value, torch.Tensor)
+                        else torch.as_tensor(value, device=self.device)
+                        for key, value in metadata.items()
+                    }
+                    advantage = metadata["advantage"]
+                else:
+                    advantage = metadata.to(self.device, non_blocking=True)
+                    metadata = {"advantage": advantage}
 
                 with self.amp_context:
+                    model_inputs = {
+                        "observation": observation,
+                        "actions": actions,
+                        "advantage": advantage,
+                    }
+                    for key in ("cfg_quality_label", "cfg_percentile_rank", "cfg_loss_weight"):
+                        if key in metadata:
+                            model_inputs[key] = metadata[key]
                     loss, metrics_data = self.model(
-                        data={
-                            "observation": observation,
-                            "actions": actions,
-                            "advantage": advantage,
-                        },
+                        data=model_inputs,
                     )
                     loss = loss.mean()
 
@@ -511,9 +547,13 @@ class FSDPCfgWorker(FSDPSftWorker):
                 "conditional_count",
                 "unconditional_count",
                 "positive_label_count",
+                "neutral_label_count",
                 "negative_label_count",
                 "positive_conditional_count",
+                "positive_to_neutral_count",
+                "neutral_conditional_count",
                 "positive_unconditional_count",
+                "neutral_unconditional_count",
                 "negative_conditional_count",
                 "negative_unconditional_count",
             }
@@ -521,7 +561,10 @@ class FSDPCfgWorker(FSDPSftWorker):
                 "conditional_loss_sum",
                 "unconditional_loss_sum",
                 "positive_conditional_loss_sum",
+                "positive_to_neutral_loss_sum",
+                "neutral_conditional_loss_sum",
                 "positive_unconditional_loss_sum",
+                "neutral_unconditional_loss_sum",
                 "negative_conditional_loss_sum",
                 "negative_unconditional_loss_sum",
             }
@@ -549,14 +592,26 @@ class FSDPCfgWorker(FSDPSftWorker):
                     mean_m["positive_label_ratio"] = (
                         sum_m.get("positive_label_count", 0) / total
                     )
+                    mean_m["neutral_label_ratio"] = (
+                        sum_m.get("neutral_label_count", 0) / total
+                    )
                     mean_m["negative_label_ratio"] = (
                         sum_m.get("negative_label_count", 0) / total
                     )
                     mean_m["positive_conditional_ratio"] = (
                         sum_m.get("positive_conditional_count", 0) / total
                     )
+                    mean_m["positive_to_neutral_ratio"] = (
+                        sum_m.get("positive_to_neutral_count", 0) / total
+                    )
+                    mean_m["neutral_conditional_ratio"] = (
+                        sum_m.get("neutral_conditional_count", 0) / total
+                    )
                     mean_m["positive_unconditional_ratio"] = (
                         sum_m.get("positive_unconditional_count", 0) / total
+                    )
+                    mean_m["neutral_unconditional_ratio"] = (
+                        sum_m.get("neutral_unconditional_count", 0) / total
                     )
                     mean_m["negative_conditional_ratio"] = (
                         sum_m.get("negative_conditional_count", 0) / total
@@ -570,8 +625,20 @@ class FSDPCfgWorker(FSDPSftWorker):
                     mean_m["positive_effective_conditional_ratio"] = (
                         sum_m.get("positive_conditional_count", 0) / positive_total
                     )
+                    mean_m["positive_effective_neutral_ratio"] = (
+                        sum_m.get("positive_to_neutral_count", 0) / positive_total
+                    )
                     mean_m["positive_effective_unconditional_ratio"] = (
                         sum_m.get("positive_unconditional_count", 0) / positive_total
+                    )
+
+                neutral_total = sum_m.get("neutral_label_count", 0)
+                if neutral_total > 0:
+                    mean_m["neutral_effective_conditional_ratio"] = (
+                        sum_m.get("neutral_conditional_count", 0) / neutral_total
+                    )
+                    mean_m["neutral_effective_unconditional_ratio"] = (
+                        sum_m.get("neutral_unconditional_count", 0) / neutral_total
                     )
 
                 negative_total = sum_m.get("negative_label_count", 0)
@@ -596,9 +663,21 @@ class FSDPCfgWorker(FSDPSftWorker):
                         "positive_conditional_loss_sum",
                         "positive_conditional_count",
                     ),
+                    "positive_to_neutral_loss": (
+                        "positive_to_neutral_loss_sum",
+                        "positive_to_neutral_count",
+                    ),
+                    "neutral_conditional_loss": (
+                        "neutral_conditional_loss_sum",
+                        "neutral_conditional_count",
+                    ),
                     "positive_unconditional_loss": (
                         "positive_unconditional_loss_sum",
                         "positive_unconditional_count",
+                    ),
+                    "neutral_unconditional_loss": (
+                        "neutral_unconditional_loss_sum",
+                        "neutral_unconditional_count",
                     ),
                     "negative_conditional_loss": (
                         "negative_conditional_loss_sum",

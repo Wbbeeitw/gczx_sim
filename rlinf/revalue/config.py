@@ -191,8 +191,16 @@ class RevalueCFGTrainConfig:
     log_dir: str | None = None
     model_type: str = "cfg_model"
     openpi_config_name: str = "pi05_libero"
+    strategy: str = "binary"
     guidance_type: str = "positive"
     positive_only_conditional: bool = True
+    unconditional_prob: float = 0.1
+    negative_guidance_scale: float = 0.0
+    csa_positive_quantile: float = 0.30
+    csa_bottom_quantile: float = 0.15
+    csa_positive_prompt_prob: float = 0.85
+    csa_bottom_negative_prob: float = 0.50
+    csa_weight_lambda: float = 0.20
     max_epochs: int = -1
     max_steps: int = 5000
     save_interval: int = 5000
@@ -226,6 +234,7 @@ class RevaluePolicyEvalConfig:
     openpi_config_name: str = "pi05_libero"
     guidance_type: str = "positive"
     positive_only_conditional: bool = True
+    negative_guidance_scale: float = 0.0
     python_bin: str | None = None
     extra_overrides: list[str] = field(default_factory=list)
 

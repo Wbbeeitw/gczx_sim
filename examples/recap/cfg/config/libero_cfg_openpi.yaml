@@ -34,6 +34,14 @@ data:
   # Tag: loads meta/advantages_{tag}.parquet from each dataset
   # If null, loads meta/advantages.parquet (legacy format)
   advantage_tag: null
+  # Downstream routing strategy:
+  # - binary: legacy positive/negative CFG from bool advantage
+  # - csa_soft: conservative soft-advantage CFG from continuous advantage
+  cfg_strategy: "binary"
+  csa_positive_quantile: 0.30
+  csa_bottom_quantile: 0.15
+  csa_bottom_negative_prob: 0.50
+  csa_weight_lambda: 0.20
   # Optional episode filters to keep CFG training aligned with probe splits.
   episode_subset_path: null
   episode_split_path: null
@@ -67,10 +75,12 @@ actor:
     openpi:
       config_name: "pi05_libero"
       cfgrl_guidance_scale: 1.0
+      cfgrl_negative_guidance_scale: 0.0
       unconditional_prob: 0.1
       train_expert_only: False
       guidance_type: "positive"
       positive_only_conditional: true
+      csa_positive_prompt_prob: 0.85
 
   optim:
     lr: 1.0e-5

@@ -55,8 +55,16 @@ class DownstreamCFGTrainingConfig:
     episode_split_name: str = "train"
     model_type: str = "cfg_model"
     openpi_config_name: str = "pi05_libero"
+    strategy: str = "binary"
     guidance_type: str = "positive"
     positive_only_conditional: bool = True
+    unconditional_prob: float = 0.1
+    negative_guidance_scale: float = 0.0
+    csa_positive_quantile: float = 0.30
+    csa_bottom_quantile: float = 0.15
+    csa_positive_prompt_prob: float = 0.85
+    csa_bottom_negative_prob: float = 0.50
+    csa_weight_lambda: float = 0.20
     max_epochs: int = -1
     max_steps: int = 5000
     save_interval: int = 5000
@@ -92,6 +100,7 @@ class PolicyEvaluationConfig:
     task_id_filter: list[int] = field(default_factory=list)
     python_bin: str | None = None
     extra_overrides: list[str] = field(default_factory=list)
+    negative_guidance_scale: float = 0.0
 
 
 @dataclass
@@ -310,10 +319,21 @@ def train_cfg_from_advantages(cfg: DownstreamCFGTrainingConfig) -> dict[str, Any
             ]
         )
     if cfg.model_type == "cfg_model":
+        effective_positive_only_conditional = (
+            cfg.positive_only_conditional if cfg.strategy == "binary" else False
+        )
         overrides.extend(
             [
+                f"data.cfg_strategy={_quote_override(cfg.strategy)}",
+                f"data.csa_positive_quantile={cfg.csa_positive_quantile}",
+                f"data.csa_bottom_quantile={cfg.csa_bottom_quantile}",
+                f"data.csa_bottom_negative_prob={cfg.csa_bottom_negative_prob}",
+                f"data.csa_weight_lambda={cfg.csa_weight_lambda}",
                 f"actor.model.openpi.guidance_type={_quote_override(cfg.guidance_type)}",
-                f"actor.model.openpi.positive_only_conditional={_quote_override(cfg.positive_only_conditional)}",
+                f"actor.model.openpi.positive_only_conditional={_quote_override(effective_positive_only_conditional)}",
+                f"actor.model.openpi.unconditional_prob={cfg.unconditional_prob}",
+                f"actor.model.openpi.cfgrl_negative_guidance_scale={cfg.negative_guidance_scale}",
+                f"actor.model.openpi.csa_positive_prompt_prob={cfg.csa_positive_prompt_prob}",
             ]
         )
     overrides.extend(cfg.extra_overrides)
@@ -387,6 +407,7 @@ def evaluate_policy_checkpoint(cfg: PolicyEvaluationConfig) -> dict[str, Any]:
             [
                 f"+actor.model.openpi.guidance_type={_quote_override(cfg.guidance_type)}",
                 f"+actor.model.openpi.positive_only_conditional={_quote_override(cfg.positive_only_conditional)}",
+                f"+actor.model.openpi.cfgrl_negative_guidance_scale={cfg.negative_guidance_scale}",
             ]
         )
     overrides.extend(cfg.extra_overrides)
