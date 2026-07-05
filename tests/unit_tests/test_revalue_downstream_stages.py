@@ -137,4 +137,48 @@ def test_train_cfg_from_advantages_appends_csa_overrides(monkeypatch, tmp_path: 
     assert "actor.model.openpi.unconditional_prob=0.1" in overrides
     assert "actor.model.openpi.cfgrl_negative_guidance_scale=0.25" in overrides
     assert "actor.model.openpi.csa_positive_prompt_prob=0.85" in overrides
+    assert "actor.model.openpi.positive_residual_alpha=0.5" in overrides
+    assert "actor.model.openpi.positive_only_conditional=false" in overrides
+
+
+def test_train_cfg_from_advantages_appends_residual_strategy_override(
+    monkeypatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {}
+
+    class DummyProc:
+        returncode = 0
+        stdout = ""
+
+    def fake_run_python_entry(**kwargs):
+        captured.update(kwargs)
+        return DummyProc()
+
+    monkeypatch.setattr(
+        "rlinf.revalue.pipeline.embodied._run_python_entry",
+        fake_run_python_entry,
+    )
+    monkeypatch.setattr(
+        "rlinf.revalue.pipeline.embodied._latest_checkpoint_path",
+        lambda *_args, **_kwargs: None,
+    )
+
+    train_cfg_from_advantages(
+        DownstreamCFGTrainingConfig(
+            repo_root=str(tmp_path),
+            dataset_path="/workspace/datasets/recap_libero10_task0/libero10_task0_train",
+            base_model_path="/workspace/models/RLinf-Pi05-LIBERO-SFT",
+            advantage_tag="fused_test",
+            experiment_name="cfg_residual_test",
+            log_dir=str(tmp_path / "logs"),
+            strategy="csa_residual",
+            positive_only_conditional=True,
+            positive_residual_alpha=0.75,
+        )
+    )
+
+    overrides = captured["overrides"]
+    assert isinstance(overrides, list)
+    assert 'data.cfg_strategy="csa_residual"' in overrides
+    assert "actor.model.openpi.positive_residual_alpha=0.75" in overrides
     assert "actor.model.openpi.positive_only_conditional=false" in overrides

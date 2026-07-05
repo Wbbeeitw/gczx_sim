@@ -620,6 +620,7 @@ def run_revalue(cfg: RevalueConfig) -> None:
                     csa_positive_prompt_prob=cfg.cfg_train.csa_positive_prompt_prob,
                     csa_bottom_negative_prob=cfg.cfg_train.csa_bottom_negative_prob,
                     csa_weight_lambda=cfg.cfg_train.csa_weight_lambda,
+                    positive_residual_alpha=cfg.cfg_train.positive_residual_alpha,
                     max_epochs=cfg.cfg_train.max_epochs,
                     max_steps=cfg.cfg_train.max_steps,
                     save_interval=cfg.cfg_train.save_interval,

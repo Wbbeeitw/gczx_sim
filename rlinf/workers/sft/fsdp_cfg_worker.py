@@ -507,7 +507,12 @@ class FSDPCfgWorker(FSDPSftWorker):
                         "actions": actions,
                         "advantage": advantage,
                     }
-                    for key in ("cfg_quality_label", "cfg_percentile_rank", "cfg_loss_weight"):
+                    for key in (
+                        "cfg_quality_label",
+                        "cfg_residual_positive_mask",
+                        "cfg_percentile_rank",
+                        "cfg_loss_weight",
+                    ):
                         if key in metadata:
                             model_inputs[key] = metadata[key]
                     loss, metrics_data = self.model(

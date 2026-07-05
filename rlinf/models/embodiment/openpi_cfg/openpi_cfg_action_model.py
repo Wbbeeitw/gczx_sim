@@ -162,6 +162,7 @@ class OpenPi0Config(Pi0Config):
     guidance_type: str = "positive"
     positive_only_conditional: bool = False
     csa_positive_prompt_prob: float = 0.85
+    positive_residual_alpha: float = 0.5
 
     def __post_init__(self):
         if self.guidance_type not in _VALID_GUIDANCE_TYPES:
@@ -177,6 +178,11 @@ class OpenPi0Config(Pi0Config):
             raise ValueError(
                 "csa_positive_prompt_prob must be in [0, 1], "
                 f"got {self.csa_positive_prompt_prob}"
+            )
+        if self.positive_residual_alpha < 0.0:
+            raise ValueError(
+                "positive_residual_alpha must be >= 0, "
+                f"got {self.positive_residual_alpha}"
             )
         if not isinstance(self.num_steps, int) or self.num_steps <= 0:
             raise ValueError(
@@ -460,6 +466,23 @@ class OpenPi0ForCFGActionPrediction(BasePolicy, PI0Pytorch):
         """Return the summed loss over a boolean mask."""
         return masked_loss_sum(per_sample_loss, mask)
 
+    @staticmethod
+    def _index_batch_tensor(
+        batch_tensor: torch.Tensor,
+        index: torch.Tensor,
+    ) -> torch.Tensor:
+        """Select a batch subset while preserving the remaining dimensions."""
+        return batch_tensor.index_select(0, index)
+
+    @classmethod
+    def _index_batch_tensor_list(
+        cls,
+        batch_tensors: list[torch.Tensor],
+        index: torch.Tensor,
+    ) -> list[torch.Tensor]:
+        """Apply the same batch selection to each tensor in a list."""
+        return [cls._index_batch_tensor(batch_tensor, index) for batch_tensor in batch_tensors]
+
     def forward(
         self,
         data: dict[str, torch.Tensor],
@@ -510,6 +533,71 @@ class OpenPi0ForCFGActionPrediction(BasePolicy, PI0Pytorch):
         sample_weight = data.get("cfg_loss_weight")
         if sample_weight is not None:
             sample_weight = sample_weight.to(device=device, dtype=torch.float32)
+
+        actions = actions.to(device, dtype=torch.float32)
+        if kwargs.get("time", None) is not None:
+            time = kwargs.get("time")
+        else:
+            time = self.sample_time(actions.shape[0], device)
+
+        if kwargs.get("noise", None) is not None:
+            noise = kwargs.get("noise")
+        else:
+            noise = self.sample_noise(actions.shape, device)
+
+        if "cfg_residual_positive_mask" in data:
+            positive_mask = data["cfg_residual_positive_mask"].to(
+                device=device, dtype=torch.bool
+            )
+            uncond_loss, _, _ = self._compute_flow_losses(
+                images=images,
+                img_masks=img_masks,
+                state=state,
+                actions=actions,
+                lang_tokens=lang_tokens,
+                lang_masks=lang_masks,
+                device=device,
+                time=time,
+                noise=noise,
+            )
+
+            positive_loss = torch.zeros_like(uncond_loss)
+            positive_count = int(positive_mask.sum().item())
+            if positive_count > 0:
+                positive_index = positive_mask.nonzero(as_tuple=False).squeeze(-1)
+                positive_loss, _, _ = self._compute_flow_losses(
+                    images=self._index_batch_tensor_list(images, positive_index),
+                    img_masks=self._index_batch_tensor_list(img_masks, positive_index),
+                    state=self._index_batch_tensor(state, positive_index),
+                    actions=self._index_batch_tensor(actions, positive_index),
+                    lang_tokens=self._index_batch_tensor(
+                        positive_guidance_lang_tokens, positive_index
+                    ),
+                    lang_masks=self._index_batch_tensor(
+                        positive_guidance_lang_masks, positive_index
+                    ),
+                    device=device,
+                    time=self._index_batch_tensor(time, positive_index),
+                    noise=self._index_batch_tensor(noise, positive_index),
+                )
+
+            weighted_positive_loss = self.config.positive_residual_alpha * positive_loss
+            flow_loss = uncond_loss + weighted_positive_loss
+
+            metrics = {
+                "residual_top_positive_ratio": (
+                    float(positive_count) / float(actions.shape[0])
+                    if actions.shape[0] > 0
+                    else 0.0
+                ),
+                "residual_uncond_loss": float(uncond_loss.detach().item()),
+                "residual_positive_loss": float(positive_loss.detach().item()),
+                "residual_positive_weighted_loss": float(
+                    weighted_positive_loss.detach().item()
+                ),
+                "residual_total_loss": float(flow_loss.detach().item()),
+            }
+            return flow_loss, metrics
 
         if "cfg_quality_label" in data:
             quality_label = data["cfg_quality_label"].to(device=device, dtype=torch.long)
@@ -612,17 +700,6 @@ class OpenPi0ForCFGActionPrediction(BasePolicy, PI0Pytorch):
                     guidance_lang_masks,
                     lang_masks,
                 )
-
-        actions = actions.to(device, dtype=torch.float32)
-        if kwargs.get("time", None) is not None:
-            time = kwargs.get("time")
-        else:
-            time = self.sample_time(actions.shape[0], device)
-
-        if kwargs.get("noise", None) is not None:
-            noise = kwargs.get("noise")
-        else:
-            noise = self.sample_noise(actions.shape, device)
         flow_loss, per_sample_loss, per_sample_loss_detached = self._compute_flow_losses(
             images=images,
             img_masks=img_masks,

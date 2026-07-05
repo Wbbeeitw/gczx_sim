@@ -201,6 +201,7 @@ class RevalueCFGTrainConfig:
     csa_positive_prompt_prob: float = 0.85
     csa_bottom_negative_prob: float = 0.50
     csa_weight_lambda: float = 0.20
+    positive_residual_alpha: float = 0.50
     max_epochs: int = -1
     max_steps: int = 5000
     save_interval: int = 5000

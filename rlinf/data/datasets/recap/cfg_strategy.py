@@ -15,7 +15,12 @@ QUALITY_LABEL_NEGATIVE = 2
 
 CFG_STRATEGY_BINARY = "binary"
 CFG_STRATEGY_CSA_SOFT = "csa_soft"
-SUPPORTED_CFG_STRATEGIES = (CFG_STRATEGY_BINARY, CFG_STRATEGY_CSA_SOFT)
+CFG_STRATEGY_CSA_RESIDUAL = "csa_residual"
+SUPPORTED_CFG_STRATEGIES = (
+    CFG_STRATEGY_BINARY,
+    CFG_STRATEGY_CSA_SOFT,
+    CFG_STRATEGY_CSA_RESIDUAL,
+)
 
 
 @dataclass(frozen=True)
@@ -35,16 +40,18 @@ class CFGStrategyConfig:
                 f"Unsupported CFG strategy {self.strategy!r}; "
                 f"expected one of {SUPPORTED_CFG_STRATEGIES}."
             )
-        if not 0.0 < self.positive_quantile < 1.0:
-            raise ValueError("positive_quantile must be in (0, 1).")
-        if not 0.0 < self.bottom_quantile < 1.0:
-            raise ValueError("bottom_quantile must be in (0, 1).")
-        if self.positive_quantile + self.bottom_quantile >= 1.0:
-            raise ValueError(
-                "positive_quantile + bottom_quantile must stay below 1.0."
-            )
-        if not 0.0 <= self.bottom_negative_prob <= 1.0:
-            raise ValueError("bottom_negative_prob must be in [0, 1].")
+        if self.strategy != CFG_STRATEGY_BINARY:
+            if not 0.0 < self.positive_quantile < 1.0:
+                raise ValueError("positive_quantile must be in (0, 1).")
+        if self.strategy == CFG_STRATEGY_CSA_SOFT:
+            if not 0.0 < self.bottom_quantile < 1.0:
+                raise ValueError("bottom_quantile must be in (0, 1).")
+            if self.positive_quantile + self.bottom_quantile >= 1.0:
+                raise ValueError(
+                    "positive_quantile + bottom_quantile must stay below 1.0."
+                )
+            if not 0.0 <= self.bottom_negative_prob <= 1.0:
+                raise ValueError("bottom_negative_prob must be in [0, 1].")
 
 
 def _stable_uniform_01(*, dataset_id: str, episode_index: int, frame_index: int, seed: int) -> float:
@@ -73,10 +80,11 @@ def build_cfg_sample_metadata(
     """Build per-sample metadata consumed by downstream CFG training.
 
     The returned mapping always includes the legacy ``advantage`` boolean to keep the
-    existing training path intact. CSA-CFG adds:
+    existing training path intact. Strategy-specific additions:
     - ``cfg_quality_label``: 0=positive, 1=neutral, 2=negative
     - ``cfg_percentile_rank``: rank of continuous advantage in [0, 1]
     - ``cfg_loss_weight``: smooth weight derived from percentile rank
+    - ``cfg_residual_positive_mask``: top-positive mask for residual CFG
     """
 
     required_keys = {"episode_index", "frame_index", "advantage"}
@@ -96,7 +104,8 @@ def build_cfg_sample_metadata(
 
     if "advantage_continuous" not in advantages_df.columns:
         raise ValueError(
-            "CSA-CFG requires 'advantage_continuous' in the advantage parquet. "
+            "Continuous-advantage CFG strategies require "
+            "'advantage_continuous' in the advantage parquet. "
             "Export fused advantages before launching CSA-CFG."
         )
 
@@ -104,10 +113,24 @@ def build_cfg_sample_metadata(
     positive_threshold = float(
         np.percentile(values.to_numpy(dtype=np.float64), (1.0 - strategy_cfg.positive_quantile) * 100.0)
     )
+    percentile_rank = _normalized_percentile_rank(values)
+
+    if strategy_cfg.strategy == CFG_STRATEGY_CSA_RESIDUAL:
+        metadata: dict[tuple[int, int], dict[str, Any]] = {}
+        for idx, row in enumerate(advantages_df.to_dict("records")):
+            episode_index = int(row["episode_index"])
+            frame_index = int(row["frame_index"])
+            is_positive = float(row["advantage_continuous"]) >= positive_threshold
+            metadata[(episode_index, frame_index)] = {
+                "advantage": bool(is_positive),
+                "cfg_residual_positive_mask": bool(is_positive),
+                "cfg_percentile_rank": float(percentile_rank[idx]),
+            }
+        return metadata
+
     bottom_threshold = float(
         np.percentile(values.to_numpy(dtype=np.float64), strategy_cfg.bottom_quantile * 100.0)
     )
-    percentile_rank = _normalized_percentile_rank(values)
 
     metadata: dict[tuple[int, int], dict[str, Any]] = {}
     for idx, row in enumerate(advantages_df.to_dict("records")):

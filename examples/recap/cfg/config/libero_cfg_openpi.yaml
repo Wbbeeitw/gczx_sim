@@ -37,6 +37,7 @@ data:
   # Downstream routing strategy:
   # - binary: legacy positive/negative CFG from bool advantage
   # - csa_soft: conservative soft-advantage CFG from continuous advantage
+  # - csa_residual: unconditional on all samples + extra positive loss on top samples
   cfg_strategy: "binary"
   csa_positive_quantile: 0.30
   csa_bottom_quantile: 0.15
@@ -81,6 +82,7 @@ actor:
       guidance_type: "positive"
       positive_only_conditional: true
       csa_positive_prompt_prob: 0.85
+      positive_residual_alpha: 0.50
 
   optim:
     lr: 1.0e-5

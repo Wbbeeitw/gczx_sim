@@ -65,6 +65,7 @@ class DownstreamCFGTrainingConfig:
     csa_positive_prompt_prob: float = 0.85
     csa_bottom_negative_prob: float = 0.50
     csa_weight_lambda: float = 0.20
+    positive_residual_alpha: float = 0.50
     max_epochs: int = -1
     max_steps: int = 5000
     save_interval: int = 5000
@@ -334,6 +335,7 @@ def train_cfg_from_advantages(cfg: DownstreamCFGTrainingConfig) -> dict[str, Any
                 f"actor.model.openpi.unconditional_prob={cfg.unconditional_prob}",
                 f"actor.model.openpi.cfgrl_negative_guidance_scale={cfg.negative_guidance_scale}",
                 f"actor.model.openpi.csa_positive_prompt_prob={cfg.csa_positive_prompt_prob}",
+                f"actor.model.openpi.positive_residual_alpha={cfg.positive_residual_alpha}",
             ]
         )
     overrides.extend(cfg.extra_overrides)

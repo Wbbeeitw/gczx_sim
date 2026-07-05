@@ -150,6 +150,7 @@ class CFGDataLoaderImpl(BaseDataLoaderImpl):
             }
             for key, dtype in (
                 ("cfg_quality_label", torch.long),
+                ("cfg_residual_positive_mask", torch.bool),
                 ("cfg_percentile_rank", torch.float32),
                 ("cfg_loss_weight", torch.float32),
             ):

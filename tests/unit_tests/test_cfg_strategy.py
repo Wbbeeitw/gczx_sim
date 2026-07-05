@@ -29,6 +29,7 @@ cfg_routing = _load_module(
 )
 
 CFG_STRATEGY_BINARY = cfg_strategy.CFG_STRATEGY_BINARY
+CFG_STRATEGY_CSA_RESIDUAL = cfg_strategy.CFG_STRATEGY_CSA_RESIDUAL
 CFG_STRATEGY_CSA_SOFT = cfg_strategy.CFG_STRATEGY_CSA_SOFT
 CFGStrategyConfig = cfg_strategy.CFGStrategyConfig
 QUALITY_LABEL_NEGATIVE = cfg_strategy.QUALITY_LABEL_NEGATIVE
@@ -116,6 +117,34 @@ def test_build_cfg_sample_metadata_csa_soft_bottom_split_is_deterministic() -> N
     second = build_cfg_sample_metadata(df, strategy_cfg=cfg, dataset_id="dataset_c")
 
     assert first == second
+
+
+def test_build_cfg_sample_metadata_csa_residual_marks_only_top_bucket() -> None:
+    df = pd.DataFrame(
+        {
+            "episode_index": [0] * 10,
+            "frame_index": list(range(10)),
+            "advantage": [False] * 10,
+            "advantage_continuous": list(range(10)),
+        }
+    )
+
+    metadata = build_cfg_sample_metadata(
+        df,
+        strategy_cfg=CFGStrategyConfig(
+            strategy=CFG_STRATEGY_CSA_RESIDUAL,
+            positive_quantile=0.30,
+        ),
+        dataset_id="dataset_residual",
+    )
+
+    assert metadata[(0, 9)]["advantage"] is True
+    assert metadata[(0, 8)]["cfg_residual_positive_mask"] is True
+    assert metadata[(0, 7)]["cfg_residual_positive_mask"] is True
+    assert metadata[(0, 6)]["cfg_residual_positive_mask"] is False
+    assert metadata[(0, 0)]["advantage"] is False
+    assert "cfg_quality_label" not in metadata[(0, 9)]
+    assert "cfg_loss_weight" not in metadata[(0, 9)]
 
 
 def test_compute_binary_cfg_routing_masks_matches_legacy_semantics() -> None:

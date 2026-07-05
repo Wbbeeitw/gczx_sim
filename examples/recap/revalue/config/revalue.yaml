@@ -142,8 +142,17 @@ cfg_train:
   log_dir: null
   model_type: cfg_model
   openpi_config_name: pi05_libero
+  strategy: binary
   guidance_type: positive
   positive_only_conditional: true
+  unconditional_prob: 0.1
+  negative_guidance_scale: 0.0
+  csa_positive_quantile: 0.30
+  csa_bottom_quantile: 0.15
+  csa_positive_prompt_prob: 0.85
+  csa_bottom_negative_prob: 0.50
+  csa_weight_lambda: 0.20
+  positive_residual_alpha: 0.50
   max_epochs: -1
   max_steps: 5000
   save_interval: 5000
@@ -173,6 +182,7 @@ policy_eval:
   openpi_config_name: pi05_libero
   guidance_type: positive
   positive_only_conditional: true
+  negative_guidance_scale: 0.0
   python_bin: null
   extra_overrides: []
 
