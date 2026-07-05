@@ -36,6 +36,8 @@ data:
   advantage_tag: null
   # Downstream routing strategy:
   # - binary: legacy positive/negative CFG from bool advantage
+  # - binary_weighted: positive-only CFG with fused-advantage sample weighting
+  # - acp_cfg: ACP-CFG / advantage-calibrated positive-only CFG
   # - csa_soft: conservative soft-advantage CFG from continuous advantage
   # - csa_residual: unconditional on all samples + extra positive loss on top samples
   cfg_strategy: "binary"

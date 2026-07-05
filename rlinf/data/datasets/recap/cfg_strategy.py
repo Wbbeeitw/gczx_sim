@@ -14,10 +14,14 @@ QUALITY_LABEL_NEUTRAL = 1
 QUALITY_LABEL_NEGATIVE = 2
 
 CFG_STRATEGY_BINARY = "binary"
+CFG_STRATEGY_BINARY_WEIGHTED = "binary_weighted"
+CFG_STRATEGY_ACP_CFG = "acp_cfg"
 CFG_STRATEGY_CSA_SOFT = "csa_soft"
 CFG_STRATEGY_CSA_RESIDUAL = "csa_residual"
 SUPPORTED_CFG_STRATEGIES = (
     CFG_STRATEGY_BINARY,
+    CFG_STRATEGY_BINARY_WEIGHTED,
+    CFG_STRATEGY_ACP_CFG,
     CFG_STRATEGY_CSA_SOFT,
     CFG_STRATEGY_CSA_RESIDUAL,
 )
@@ -114,6 +118,25 @@ def build_cfg_sample_metadata(
         np.percentile(values.to_numpy(dtype=np.float64), (1.0 - strategy_cfg.positive_quantile) * 100.0)
     )
     percentile_rank = _normalized_percentile_rank(values)
+
+    if strategy_cfg.strategy in (
+        CFG_STRATEGY_BINARY_WEIGHTED,
+        CFG_STRATEGY_ACP_CFG,
+    ):
+        metadata: dict[tuple[int, int], dict[str, Any]] = {}
+        for idx, row in enumerate(advantages_df.to_dict("records")):
+            episode_index = int(row["episode_index"])
+            frame_index = int(row["frame_index"])
+            rank = float(percentile_rank[idx])
+            is_positive = float(row["advantage_continuous"]) >= positive_threshold
+            metadata[(episode_index, frame_index)] = {
+                "advantage": bool(is_positive),
+                "cfg_percentile_rank": rank,
+                "cfg_loss_weight": float(
+                    1.0 + strategy_cfg.weight_lambda * (2.0 * rank - 1.0)
+                ),
+            }
+        return metadata
 
     if strategy_cfg.strategy == CFG_STRATEGY_CSA_RESIDUAL:
         metadata: dict[tuple[int, int], dict[str, Any]] = {}

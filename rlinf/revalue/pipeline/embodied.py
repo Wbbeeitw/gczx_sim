@@ -320,8 +320,11 @@ def train_cfg_from_advantages(cfg: DownstreamCFGTrainingConfig) -> dict[str, Any
             ]
         )
     if cfg.model_type == "cfg_model":
+        binary_style_strategies = {"binary", "binary_weighted", "acp_cfg"}
         effective_positive_only_conditional = (
-            cfg.positive_only_conditional if cfg.strategy == "binary" else False
+            cfg.positive_only_conditional
+            if cfg.strategy in binary_style_strategies
+            else False
         )
         overrides.extend(
             [

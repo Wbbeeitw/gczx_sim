@@ -182,3 +182,93 @@ def test_train_cfg_from_advantages_appends_residual_strategy_override(
     assert 'data.cfg_strategy="csa_residual"' in overrides
     assert "actor.model.openpi.positive_residual_alpha=0.75" in overrides
     assert "actor.model.openpi.positive_only_conditional=false" in overrides
+
+
+def test_train_cfg_from_advantages_keeps_binary_weighted_positive_only_cfg(
+    monkeypatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {}
+
+    class DummyProc:
+        returncode = 0
+        stdout = ""
+
+    def fake_run_python_entry(**kwargs):
+        captured.update(kwargs)
+        return DummyProc()
+
+    monkeypatch.setattr(
+        "rlinf.revalue.pipeline.embodied._run_python_entry",
+        fake_run_python_entry,
+    )
+    monkeypatch.setattr(
+        "rlinf.revalue.pipeline.embodied._latest_checkpoint_path",
+        lambda *_args, **_kwargs: None,
+    )
+
+    train_cfg_from_advantages(
+        DownstreamCFGTrainingConfig(
+            repo_root=str(tmp_path),
+            dataset_path="/workspace/datasets/recap_libero10_task0/libero10_task0_train",
+            base_model_path="/workspace/models/RLinf-Pi05-LIBERO-SFT",
+            advantage_tag="fused_test",
+            experiment_name="cfg_binary_weighted_test",
+            log_dir=str(tmp_path / "logs"),
+            strategy="binary_weighted",
+            positive_only_conditional=True,
+            csa_positive_quantile=0.30,
+            csa_weight_lambda=0.10,
+        )
+    )
+
+    overrides = captured["overrides"]
+    assert isinstance(overrides, list)
+    assert 'data.cfg_strategy="binary_weighted"' in overrides
+    assert "data.csa_positive_quantile=0.3" in overrides
+    assert "data.csa_weight_lambda=0.1" in overrides
+    assert "actor.model.openpi.positive_only_conditional=true" in overrides
+
+
+def test_train_cfg_from_advantages_keeps_acp_cfg_positive_only_cfg(
+    monkeypatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {}
+
+    class DummyProc:
+        returncode = 0
+        stdout = ""
+
+    def fake_run_python_entry(**kwargs):
+        captured.update(kwargs)
+        return DummyProc()
+
+    monkeypatch.setattr(
+        "rlinf.revalue.pipeline.embodied._run_python_entry",
+        fake_run_python_entry,
+    )
+    monkeypatch.setattr(
+        "rlinf.revalue.pipeline.embodied._latest_checkpoint_path",
+        lambda *_args, **_kwargs: None,
+    )
+
+    train_cfg_from_advantages(
+        DownstreamCFGTrainingConfig(
+            repo_root=str(tmp_path),
+            dataset_path="/workspace/datasets/recap_libero10_task0/libero10_task0_train",
+            base_model_path="/workspace/models/RLinf-Pi05-LIBERO-SFT",
+            advantage_tag="fused_test",
+            experiment_name="cfg_acp_cfg_test",
+            log_dir=str(tmp_path / "logs"),
+            strategy="acp_cfg",
+            positive_only_conditional=True,
+            csa_positive_quantile=0.30,
+            csa_weight_lambda=0.10,
+        )
+    )
+
+    overrides = captured["overrides"]
+    assert isinstance(overrides, list)
+    assert 'data.cfg_strategy="acp_cfg"' in overrides
+    assert "data.csa_positive_quantile=0.3" in overrides
+    assert "data.csa_weight_lambda=0.1" in overrides
+    assert "actor.model.openpi.positive_only_conditional=true" in overrides

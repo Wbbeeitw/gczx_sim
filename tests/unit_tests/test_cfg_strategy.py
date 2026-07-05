@@ -29,6 +29,8 @@ cfg_routing = _load_module(
 )
 
 CFG_STRATEGY_BINARY = cfg_strategy.CFG_STRATEGY_BINARY
+CFG_STRATEGY_BINARY_WEIGHTED = cfg_strategy.CFG_STRATEGY_BINARY_WEIGHTED
+CFG_STRATEGY_ACP_CFG = cfg_strategy.CFG_STRATEGY_ACP_CFG
 CFG_STRATEGY_CSA_RESIDUAL = cfg_strategy.CFG_STRATEGY_CSA_RESIDUAL
 CFG_STRATEGY_CSA_SOFT = cfg_strategy.CFG_STRATEGY_CSA_SOFT
 CFGStrategyConfig = cfg_strategy.CFGStrategyConfig
@@ -94,6 +96,63 @@ def test_build_cfg_sample_metadata_csa_soft_assigns_labels_and_weights() -> None
     assert metadata[(0, 4)]["advantage"] is False
     assert abs(metadata[(0, 0)]["cfg_loss_weight"] - 0.8) < 1.0e-6
     assert abs(metadata[(0, 9)]["cfg_loss_weight"] - 1.2) < 1.0e-6
+
+
+def test_build_cfg_sample_metadata_binary_weighted_preserves_binary_routing() -> None:
+    df = pd.DataFrame(
+        {
+            "episode_index": [0] * 10,
+            "frame_index": list(range(10)),
+            "advantage": [False] * 10,
+            "advantage_continuous": list(range(10)),
+        }
+    )
+
+    metadata = build_cfg_sample_metadata(
+        df,
+        strategy_cfg=CFGStrategyConfig(
+            strategy=CFG_STRATEGY_BINARY_WEIGHTED,
+            positive_quantile=0.30,
+            weight_lambda=0.20,
+        ),
+        dataset_id="dataset_weighted_binary",
+    )
+
+    assert metadata[(0, 9)]["advantage"] is True
+    assert metadata[(0, 7)]["advantage"] is True
+    assert metadata[(0, 6)]["advantage"] is False
+    assert abs(metadata[(0, 0)]["cfg_loss_weight"] - 0.8) < 1.0e-6
+    assert abs(metadata[(0, 9)]["cfg_loss_weight"] - 1.2) < 1.0e-6
+    assert "cfg_quality_label" not in metadata[(0, 9)]
+    assert "cfg_residual_positive_mask" not in metadata[(0, 9)]
+
+
+def test_build_cfg_sample_metadata_acp_cfg_matches_weighted_binary_behavior() -> None:
+    df = pd.DataFrame(
+        {
+            "episode_index": [0] * 10,
+            "frame_index": list(range(10)),
+            "advantage": [False] * 10,
+            "advantage_continuous": list(range(10)),
+        }
+    )
+
+    metadata = build_cfg_sample_metadata(
+        df,
+        strategy_cfg=CFGStrategyConfig(
+            strategy=CFG_STRATEGY_ACP_CFG,
+            positive_quantile=0.30,
+            weight_lambda=0.10,
+        ),
+        dataset_id="dataset_acp_cfg",
+    )
+
+    assert metadata[(0, 9)]["advantage"] is True
+    assert metadata[(0, 6)]["advantage"] is False
+    assert abs(metadata[(0, 0)]["cfg_loss_weight"] - 0.9) < 1.0e-6
+    assert abs(metadata[(0, 9)]["cfg_loss_weight"] - 1.1) < 1.0e-6
+    assert "cfg_quality_label" not in metadata[(0, 9)]
+    assert "cfg_residual_positive_mask" not in metadata[(0, 9)]
 
 
 def test_build_cfg_sample_metadata_csa_soft_bottom_split_is_deterministic() -> None:
