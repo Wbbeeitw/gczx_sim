@@ -15,6 +15,7 @@ import av
 import cv2
 import numpy as np
 import pandas as pd
+from PIL import Image
 
 
 # Color map for phases (BGR for OpenCV).
@@ -183,27 +184,8 @@ def render_episode(
     width = int(video_stream.width)
     height = int(video_stream.height)
 
-    try:
-        output_container = av.open(str(output_path), "w")
-        # Try H.264 first for Windows compatibility, then fall back to AV1 (svtav1)
-        # or mpeg4. The server environment may only provide libsvtav1.
-        output_stream = None
-        for codec in ("libx264", "h264", "mpeg4", "libsvtav1"):
-            try:
-                output_stream = output_container.add_stream(codec, rate=fps)
-                output_stream.width = width
-                output_stream.height = height
-                output_stream.pix_fmt = "yuv420p"
-                break
-            except Exception:
-                continue
-        if output_stream is None:
-            raise RuntimeError("no available video encoder (tried libx264, h264, mpeg4, libsvtav1)")
-    except Exception as e:
-        print(f"[warn] cannot create output video {output_path}: {e}")
-        container.close()
-        return
-
+    # Decode all frames and apply overlay.
+    frames_bgr: list[np.ndarray] = []
     frame_idx = 0
     for frame in container.decode(video_stream):
         img = frame.to_ndarray(format="bgr24")
@@ -221,18 +203,61 @@ def render_episode(
                 task=task,
             )
 
-        out_frame = av.VideoFrame.from_ndarray(img, format="bgr24")
-        for packet in output_stream.encode(out_frame):
-            output_container.mux(packet)
+        frames_bgr.append(img)
         frame_idx += 1
 
-    # Flush encoder.
-    for packet in output_stream.encode():
-        output_container.mux(packet)
-
     container.close()
-    output_container.close()
-    print(f"[saved] {output_path}")
+
+    if not frames_bgr:
+        print(f"[warn] no frames decoded for episode {episode_index}")
+        return
+
+    # Try to write an mp4 video first, fall back to GIF if no encoder is available.
+    video_saved = False
+    try:
+        output_container = av.open(str(output_path), "w")
+        output_stream = None
+        for codec in ("libx264", "h264", "mpeg4", "libsvtav1"):
+            try:
+                output_stream = output_container.add_stream(codec, rate=fps)
+                output_stream.width = width
+                output_stream.height = height
+                output_stream.pix_fmt = "yuv420p"
+                break
+            except Exception:
+                continue
+        if output_stream is None:
+            raise RuntimeError("no available video encoder")
+
+        for img in frames_bgr:
+            out_frame = av.VideoFrame.from_ndarray(img, format="bgr24")
+            for packet in output_stream.encode(out_frame):
+                output_container.mux(packet)
+        for packet in output_stream.encode():
+            output_container.mux(packet)
+
+        output_container.close()
+        video_saved = True
+        print(f"[saved] {output_path}")
+    except Exception as e:
+        print(f"[warn] mp4 encoding failed: {e}")
+
+    if not video_saved:
+        gif_path = output_path.with_suffix(".gif")
+        try:
+            # Convert BGR to RGB for PIL.
+            pil_frames = [Image.fromarray(img[:, :, ::-1]) for img in frames_bgr]
+            duration_ms = max(1, int(1000 / fps))
+            pil_frames[0].save(
+                gif_path,
+                save_all=True,
+                append_images=pil_frames[1:],
+                duration=duration_ms,
+                loop=0,
+            )
+            print(f"[saved] {gif_path}")
+        except Exception as e2:
+            print(f"[warn] gif encoding also failed: {e2}")
 
 
 def select_demo_episodes(dataset_path: Path, annotations: pd.DataFrame, num_total: int) -> list[int]:
