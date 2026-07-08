@@ -1,0 +1,244 @@
+"""Visualize phase annotations on top of episode videos.
+
+Reads a LeRobot dataset with `meta/phase_progress_semantic.parquet` and renders
+a few demo videos with phase overlay and progress bar.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+from pathlib import Path
+
+import cv2
+import numpy as np
+import pandas as pd
+
+
+# Color map for phases (BGR for OpenCV).
+PHASE_COLORS = {
+    0: (0, 200, 255),    # orange
+    1: (0, 255, 0),      # green
+    2: (255, 0, 0),      # blue
+    3: (255, 0, 255),    # magenta
+    4: (0, 255, 255),    # yellow
+}
+
+
+def load_collection_summary(dataset_path: Path) -> dict:
+    summary_path = dataset_path / "collection_summary.json"
+    if summary_path.exists():
+        with open(summary_path, encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def infer_video_path(dataset_path: Path, episode_index: int, video_key: str = "image") -> Path | None:
+    """Infer the video file path for an episode.
+
+    Tries the standard LeRobot layout: videos/chunk-XXX/{video_key}/episode_XXXXXX.mp4
+    """
+    chunk = episode_index // 1000
+    candidate = (
+        dataset_path
+        / "videos"
+        / f"chunk-{chunk:03d}"
+        / video_key
+        / f"episode_{episode_index:06d}.mp4"
+    )
+    if candidate.exists():
+        return candidate
+
+    # Fallback: search recursively.
+    videos_root = dataset_path / "videos"
+    if not videos_root.exists():
+        return None
+    for candidate in videos_root.rglob(f"episode_{episode_index:06d}.mp4"):
+        return candidate
+    return None
+
+
+def overlay_phase_info(
+    frame: np.ndarray,
+    phase: int,
+    phase_progress: float,
+    global_progress: float,
+    frame_index: int,
+    episode_index: int,
+    task: str | None = None,
+) -> np.ndarray:
+    """Draw phase text, progress bar, and frame info on the frame."""
+    h, w = frame.shape[:2]
+    color = PHASE_COLORS.get(phase, (255, 255, 255))
+
+    # Black translucent top bar.
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (0, 0), (w, 70), (0, 0, 0), -1)
+    frame = cv2.addWeighted(overlay, 0.6, frame, 0.4, 0)
+
+    # Text info.
+    task_text = f"task: {task}" if task else ""
+    info_text = (
+        f"ep={episode_index}  frame={frame_index}  "
+        f"phase={phase}  phase_progress={phase_progress:.2f}  global_progress={global_progress:.2f}"
+    )
+    cv2.putText(frame, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+    if task_text:
+        cv2.putText(frame, task_text, (10, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+
+    # Progress bar at the bottom.
+    bar_h = 20
+    bar_y = h - bar_h - 10
+    bar_w = w - 40
+    cv2.rectangle(frame, (20, bar_y), (20 + bar_w, bar_y + bar_h), (50, 50, 50), -1)
+    filled_w = int(bar_w * global_progress)
+    cv2.rectangle(frame, (20, bar_y), (20 + filled_w, bar_y + bar_h), color, -1)
+    cv2.rectangle(frame, (20, bar_y), (20 + bar_w, bar_y + bar_h), (255, 255, 255), 2)
+
+    # Current phase marker on the bar.
+    marker_x = 20 + filled_w
+    cv2.circle(frame, (marker_x, bar_y + bar_h // 2), 8, (255, 255, 255), -1)
+    cv2.circle(frame, (marker_x, bar_y + bar_h // 2), 8, color, 2)
+
+    return frame
+
+
+def render_episode(
+    dataset_path: Path,
+    annotations: pd.DataFrame,
+    episode_index: int,
+    output_path: Path,
+    task: str | None = None,
+    video_key: str = "image",
+) -> None:
+    """Render one episode video with phase overlay."""
+    video_path = infer_video_path(dataset_path, episode_index, video_key=video_key)
+    if video_path is None:
+        print(f"[warn] video not found for episode {episode_index}")
+        return
+
+    ep_ann = annotations[annotations["episode_index"] == episode_index].sort_values("frame_index")
+    if ep_ann.empty:
+        print(f"[warn] no annotations for episode {episode_index}")
+        return
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        print(f"[warn] cannot open video {video_path}")
+        return
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 10.0
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+
+    frame_idx = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        ann_rows = ep_ann[ep_ann["frame_index"] == frame_idx]
+        if not ann_rows.empty:
+            row = ann_rows.iloc[0]
+            frame = overlay_phase_info(
+                frame,
+                phase=int(row["phase"]),
+                phase_progress=float(row["phase_progress"]),
+                global_progress=float(row["global_progress"]),
+                frame_index=frame_idx,
+                episode_index=episode_index,
+                task=task,
+            )
+        writer.write(frame)
+        frame_idx += 1
+
+    cap.release()
+    writer.release()
+    print(f"[saved] {output_path}")
+
+
+def select_demo_episodes(dataset_path: Path, annotations: pd.DataFrame, num_total: int) -> list[int]:
+    """Select a mix of successful and failed episodes if summary is available."""
+    summary = load_collection_summary(dataset_path)
+    all_eps = sorted(annotations["episode_index"].unique())
+
+    # Try to read per-episode success from parquet if available.
+    if "is_success" in annotations.columns:
+        success_eps = sorted(annotations[annotations["is_success"]]["episode_index"].unique())
+        failure_eps = sorted(annotations[~annotations["is_success"]]["episode_index"].unique())
+    else:
+        success_eps = []
+        failure_eps = []
+
+    selected: list[int] = []
+    selected.extend(success_eps[: num_total // 2])
+    selected.extend(failure_eps[: num_total - len(selected)])
+
+    # Fill remaining slots.
+    for ep in all_eps:
+        if ep not in selected:
+            selected.append(ep)
+        if len(selected) >= num_total:
+            break
+
+    return selected[:num_total]
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Visualize phase annotations on episode videos.")
+    parser.add_argument("--dataset_path", required=True, help="Path to LeRobot dataset root.")
+    parser.add_argument(
+        "--output_dir",
+        default=None,
+        help="Output directory for demo videos. Defaults to <repo_root>/phase_split_script/output_demo.",
+    )
+    parser.add_argument("--num_episodes", type=int, default=4, help="Number of demo episodes to render.")
+    parser.add_argument("--video_key", default="image", help="Video key to render (image or wrist_image).")
+    parser.add_argument("--task", default=None, help="Optional task description to overlay.")
+    args = parser.parse_args()
+
+    dataset_path = Path(args.dataset_path)
+    annotations_path = dataset_path / "meta" / "phase_progress_semantic.parquet"
+    if not annotations_path.exists():
+        raise FileNotFoundError(f"Annotations not found: {annotations_path}")
+
+    annotations = pd.read_parquet(annotations_path)
+
+    if args.output_dir is None:
+        repo_root = Path(__file__).resolve().parent
+        output_dir = repo_root / "output_demo"
+    else:
+        output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Clear old demo videos to avoid confusion.
+    for old_mp4 in output_dir.glob("*.mp4"):
+        old_mp4.unlink()
+
+    episodes = select_demo_episodes(dataset_path, annotations, args.num_episodes)
+
+    task = args.task
+    if task is None:
+        summary = load_collection_summary(dataset_path)
+        task = summary.get("task_suite_name", "")
+
+    for ep_idx in episodes:
+        output_path = output_dir / f"task1_episode_{ep_idx:03d}_phases.mp4"
+        render_episode(
+            dataset_path=dataset_path,
+            annotations=annotations,
+            episode_index=ep_idx,
+            output_path=output_path,
+            task=task,
+            video_key=args.video_key,
+        )
+
+    print(f"\nDone. Rendered {len(episodes)} demo videos to {output_dir}")
+
+
+if __name__ == "__main__":
+    main()
