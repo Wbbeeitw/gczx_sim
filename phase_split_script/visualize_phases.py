@@ -185,9 +185,10 @@ def render_episode(
 
     try:
         output_container = av.open(str(output_path), "w")
-        # Try H.264 first for Windows compatibility, fall back to generic h264/mpeg4.
+        # Try H.264 first for Windows compatibility, then fall back to AV1 (svtav1)
+        # or mpeg4. The server environment may only provide libsvtav1.
         output_stream = None
-        for codec in ("libx264", "h264", "mpeg4"):
+        for codec in ("libx264", "h264", "mpeg4", "libsvtav1"):
             try:
                 output_stream = output_container.add_stream(codec, rate=fps)
                 output_stream.width = width
@@ -197,7 +198,7 @@ def render_episode(
             except Exception:
                 continue
         if output_stream is None:
-            raise RuntimeError("no available video encoder (tried libx264, h264, mpeg4)")
+            raise RuntimeError("no available video encoder (tried libx264, h264, mpeg4, libsvtav1)")
     except Exception as e:
         print(f"[warn] cannot create output video {output_path}: {e}")
         container.close()
