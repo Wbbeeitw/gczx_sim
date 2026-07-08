@@ -183,9 +183,25 @@ def render_episode(
     width = int(video_stream.width)
     height = int(video_stream.height)
 
-    # Use H.264 (avc1) so the output plays on Windows and browsers.
-    fourcc = cv2.VideoWriter_fourcc(*"avc1")
-    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+    try:
+        output_container = av.open(str(output_path), "w")
+        # Try H.264 first for Windows compatibility, fall back to generic h264/mpeg4.
+        output_stream = None
+        for codec in ("libx264", "h264", "mpeg4"):
+            try:
+                output_stream = output_container.add_stream(codec, rate=fps)
+                output_stream.width = width
+                output_stream.height = height
+                output_stream.pix_fmt = "yuv420p"
+                break
+            except Exception:
+                continue
+        if output_stream is None:
+            raise RuntimeError("no available video encoder (tried libx264, h264, mpeg4)")
+    except Exception as e:
+        print(f"[warn] cannot create output video {output_path}: {e}")
+        container.close()
+        return
 
     frame_idx = 0
     for frame in container.decode(video_stream):
@@ -203,11 +219,18 @@ def render_episode(
                 episode_index=episode_index,
                 task=task,
             )
-        writer.write(img)
+
+        out_frame = av.VideoFrame.from_ndarray(img, format="bgr24")
+        for packet in output_stream.encode(out_frame):
+            output_container.mux(packet)
         frame_idx += 1
 
+    # Flush encoder.
+    for packet in output_stream.encode():
+        output_container.mux(packet)
+
     container.close()
-    writer.release()
+    output_container.close()
     print(f"[saved] {output_path}")
 
 
