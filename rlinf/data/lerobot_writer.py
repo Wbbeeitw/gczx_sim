@@ -19,19 +19,26 @@ from typing import Any
 
 from rlinf.utils.logging import get_logger
 
-# Monkey-patch LeRobot's video encoder to use H.264 by default for better
-# compatibility (AV1 is smaller but often cannot be decoded by OpenCV).
+# Monkey-patch LeRobot's video encoder to prefer H.264 for better compatibility.
+# If H.264 is unavailable (e.g. the server ffmpeg only ships libsvtav1), fall
+# back to libsvtav1 (AV1) so data collection still succeeds.
 import lerobot.common.datasets.video_utils as _video_utils
 
 _original_encode_video_frames = _video_utils.encode_video_frames
 
 
-def _encode_video_frames_h264(*args, **kwargs):
+def _encode_video_frames_with_fallback(*args, **kwargs):
     kwargs.setdefault("vcodec", "h264")
-    return _original_encode_video_frames(*args, **kwargs)
+    try:
+        return _original_encode_video_frames(*args, **kwargs)
+    except Exception:
+        if kwargs.get("vcodec") == "h264":
+            kwargs["vcodec"] = "libsvtav1"
+            return _original_encode_video_frames(*args, **kwargs)
+        raise
 
 
-_video_utils.encode_video_frames = _encode_video_frames_h264
+_video_utils.encode_video_frames = _encode_video_frames_with_fallback
 
 
 class LeRobotDatasetWriter:
