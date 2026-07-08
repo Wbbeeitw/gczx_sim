@@ -143,11 +143,7 @@ class LeRobotDatasetWriter:
             image_writer_processes=image_writer_processes,
         )
 
-    def add_episode(
-        self,
-        episode_data: list[dict[str, Any]],
-        task: str | None = None,
-    ) -> None:
+    def add_episode(self, episode_data: list[dict[str, Any]]) -> None:
         """
         Add an episode to the dataset.
 
@@ -157,9 +153,9 @@ class LeRobotDatasetWriter:
                 - wrist_image: np.ndarray [H, W, C] (optional)
                 - state: np.ndarray [state_dim]
                 - actions: np.ndarray [action_dim]
+                - task: str (task instruction)
                 - intervene_flag: np.ndarray [1] of bool (optional; matches schema)
                 - Any other fields defined in the features schema
-            task: Optional task instruction string for the episode.
 
         The frames will be automatically processed to include both the original
         image format and the observation.images format (transposed to [C, H, W]).
@@ -171,11 +167,11 @@ class LeRobotDatasetWriter:
             self.logger.warning("Empty episode_data provided, skipping.")
             return
         for frame_data in episode_data:
-            self.dataset.add_frame(frame_data, task=task)
+            self.dataset.add_frame(frame_data)
 
         self.dataset.save_episode()
         self.logger.info(
-            f"Saved episode with {len(episode_data)} frames, task: '{task or 'N/A'}'"
+            f"Saved episode with {len(episode_data)} frames, task: '{episode_data[0].get('task', 'N/A')}'"
         )
 
     def finalize(self) -> None:

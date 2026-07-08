@@ -680,6 +680,7 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
                     "state": state,
                     "actions": action.astype(np.float32),
                     "reward": np.array([reward_value], dtype=np.float32),
+                    "task": str(task_description),
                     "done": np.array([False], dtype=bool),
                     "is_success": np.array([False], dtype=bool),
                 }
@@ -718,7 +719,7 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
                 has_intervene_flag=False,
             )
 
-        writer.add_episode(frames, task=task_description)
+        writer.add_episode(frames)
         all_returns.append(float(returns[0]) if len(returns) > 0 else 0.0)
         episode_lengths.append(ep_len)
         logger.info(
