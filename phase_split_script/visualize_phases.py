@@ -34,11 +34,44 @@ def load_collection_summary(dataset_path: Path) -> dict:
     return {}
 
 
-def infer_video_path(dataset_path: Path, episode_index: int, video_key: str = "image") -> Path | None:
+def load_info(dataset_path: Path) -> dict:
+    info_path = dataset_path / "meta" / "info.json"
+    if info_path.exists():
+        with open(info_path, encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def list_video_files(dataset_path: Path) -> list[Path]:
+    videos_root = dataset_path / "videos"
+    if not videos_root.exists():
+        return []
+    return sorted(videos_root.rglob("*.mp4"))
+
+
+def infer_video_path(
+    dataset_path: Path, episode_index: int, video_key: str = "image"
+) -> Path | None:
     """Infer the video file path for an episode.
 
-    Tries the standard LeRobot layout: videos/chunk-XXX/{video_key}/episode_XXXXXX.mp4
+    First uses meta/info.json video_path pattern, then falls back to recursive search.
     """
+    info = load_info(dataset_path)
+    video_path_pattern = info.get("video_path")
+
+    if video_path_pattern:
+        # LeRobot info.json uses braces like {episode_chunk:03d}
+        formatted = (
+            video_path_pattern
+            .replace("{episode_chunk:03d}", f"{episode_index // 1000:03d}")
+            .replace("{episode_index:06d}", f"{episode_index:06d}")
+            .replace("{video_key}", video_key)
+        )
+        candidate = dataset_path / formatted
+        if candidate.exists():
+            return candidate
+
+    # Fallback: standard LeRobot layout.
     chunk = episode_index // 1000
     candidate = (
         dataset_path
@@ -50,12 +83,20 @@ def infer_video_path(dataset_path: Path, episode_index: int, video_key: str = "i
     if candidate.exists():
         return candidate
 
-    # Fallback: search recursively.
+    # Fallback: recursive search for any matching episode file.
     videos_root = dataset_path / "videos"
     if not videos_root.exists():
         return None
-    for candidate in videos_root.rglob(f"episode_{episode_index:06d}.mp4"):
-        return candidate
+
+    patterns = [
+        f"episode_{episode_index:06d}.mp4",
+        f"episode_{episode_index:03d}.mp4",
+        f"episode_{episode_index}.mp4",
+        f"*{episode_index}*.mp4",
+    ]
+    for pattern in patterns:
+        for candidate in videos_root.rglob(pattern):
+            return candidate
     return None
 
 
@@ -115,7 +156,14 @@ def render_episode(
     """Render one episode video with phase overlay."""
     video_path = infer_video_path(dataset_path, episode_index, video_key=video_key)
     if video_path is None:
+        available = list_video_files(dataset_path)[:10]
         print(f"[warn] video not found for episode {episode_index}")
+        if available:
+            print(f"[debug] available videos (first {len(available)}):")
+            for p in available:
+                print(f"  - {p.relative_to(dataset_path)}")
+        else:
+            print("[debug] no .mp4 files found under videos/")
         return
 
     ep_ann = annotations[annotations["episode_index"] == episode_index].sort_values("frame_index")
