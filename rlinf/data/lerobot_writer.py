@@ -19,6 +19,20 @@ from typing import Any
 
 from rlinf.utils.logging import get_logger
 
+# Monkey-patch LeRobot's video encoder to use H.264 by default for better
+# compatibility (AV1 is smaller but often cannot be decoded by OpenCV).
+import lerobot.common.datasets.video_utils as _video_utils
+
+_original_encode_video_frames = _video_utils.encode_video_frames
+
+
+def _encode_video_frames_h264(*args, **kwargs):
+    kwargs.setdefault("vcodec", "h264")
+    return _original_encode_video_frames(*args, **kwargs)
+
+
+_video_utils.encode_video_frames = _encode_video_frames_h264
+
 
 class LeRobotDatasetWriter:
     """

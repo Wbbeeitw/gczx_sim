@@ -11,6 +11,7 @@ import json
 import shutil
 from pathlib import Path
 
+import av
 import cv2
 import numpy as np
 import pandas as pd
@@ -171,29 +172,30 @@ def render_episode(
         print(f"[warn] no annotations for episode {episode_index}")
         return
 
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        print(f"[warn] cannot open video {video_path}")
+    try:
+        container = av.open(str(video_path))
+        video_stream = container.streams.video[0]
+    except Exception as e:
+        print(f"[warn] cannot open video {video_path}: {e}")
         return
 
-    fps = cap.get(cv2.CAP_PROP_FPS) or 10.0
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = float(video_stream.average_rate) if video_stream.average_rate else 10.0
+    width = int(video_stream.width)
+    height = int(video_stream.height)
 
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    # Use H.264 (avc1) so the output plays on Windows and browsers.
+    fourcc = cv2.VideoWriter_fourcc(*"avc1")
     writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
 
     frame_idx = 0
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+    for frame in container.decode(video_stream):
+        img = frame.to_ndarray(format="bgr24")
 
         ann_rows = ep_ann[ep_ann["frame_index"] == frame_idx]
         if not ann_rows.empty:
             row = ann_rows.iloc[0]
-            frame = overlay_phase_info(
-                frame,
+            img = overlay_phase_info(
+                img,
                 phase=int(row["phase"]),
                 phase_progress=float(row["phase_progress"]),
                 global_progress=float(row["global_progress"]),
@@ -201,10 +203,10 @@ def render_episode(
                 episode_index=episode_index,
                 task=task,
             )
-        writer.write(frame)
+        writer.write(img)
         frame_idx += 1
 
-    cap.release()
+    container.close()
     writer.release()
     print(f"[saved] {output_path}")
 
