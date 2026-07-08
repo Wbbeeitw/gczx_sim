@@ -505,7 +505,7 @@ def _build_features(image_shape, state_dim, action_dim):
         "is_success": {"dtype": "bool", "shape": (1,), "names": ["is_success"]},
         "reward": {"dtype": "float32", "shape": (1,), "names": ["reward"]},
         "return": {"dtype": "float32", "shape": (1,), "names": ["return"]},
-        "prompt": {"dtype": "string", "shape": (1,), "names": ["prompt"]},
+        "task": {"dtype": "string", "shape": (1,), "names": ["task"]},
     }
 
 
@@ -681,7 +681,7 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
                     "state": state,
                     "actions": action.astype(np.float32),
                     "reward": np.array([reward_value], dtype=np.float32),
-                    "prompt": str(task_description),
+                    "task": str(task_description),
                     "done": np.array([False], dtype=bool),
                     "is_success": np.array([False], dtype=bool),
                 }
