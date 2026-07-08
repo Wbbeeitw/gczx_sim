@@ -480,17 +480,14 @@ def _max_steps_for_suite(suite_name: str) -> int:
 
 
 def _build_features(image_shape, state_dim, action_dim):
+    video_feature = {
+        "dtype": "video",
+        "shape": list(image_shape),
+        "names": ["height", "width", "channel"],
+    }
     return {
-        "image": {
-            "dtype": "image",
-            "shape": list(image_shape),
-            "names": ["height", "width", "channel"],
-        },
-        "wrist_image": {
-            "dtype": "image",
-            "shape": list(image_shape),
-            "names": ["height", "width", "channel"],
-        },
+        "image": video_feature,
+        "wrist_image": dict(video_feature),
         "state": {
             "dtype": "float32",
             "shape": (state_dim,),
