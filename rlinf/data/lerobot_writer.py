@@ -139,6 +139,7 @@ class LeRobotDatasetWriter:
             robot_type=robot_type,
             fps=fps,
             features=features,
+            use_videos=True,
             image_writer_threads=image_writer_threads,
             image_writer_processes=image_writer_processes,
         )
