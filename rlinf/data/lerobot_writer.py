@@ -169,7 +169,11 @@ class LeRobotDatasetWriter:
         for frame_data in episode_data:
             self.dataset.add_frame(frame_data)
 
-        self.dataset.save_episode()
+        task = episode_data[0].get("task")
+        if task is not None:
+            self.dataset.save_episode(task=task)
+        else:
+            self.dataset.save_episode()
         self.logger.info(
             f"Saved episode with {len(episode_data)} frames, task: '{episode_data[0].get('task', 'N/A')}'"
         )

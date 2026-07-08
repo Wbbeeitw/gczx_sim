@@ -505,7 +505,6 @@ def _build_features(image_shape, state_dim, action_dim):
         "is_success": {"dtype": "bool", "shape": (1,), "names": ["is_success"]},
         "reward": {"dtype": "float32", "shape": (1,), "names": ["reward"]},
         "return": {"dtype": "float32", "shape": (1,), "names": ["return"]},
-        "task": {"dtype": "string", "shape": (1,), "names": ["task"]},
     }
 
 
