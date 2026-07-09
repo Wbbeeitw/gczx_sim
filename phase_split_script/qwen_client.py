@@ -19,7 +19,7 @@ from PIL import Image
 
 
 DASHSCOPE_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
-DEFAULT_MODEL = "qwen3.6-plus"
+DEFAULT_MODEL = "qwen-vl-plus"
 MAX_RETRIES = 3
 
 
@@ -142,6 +142,8 @@ def call_qwen_vl(
                 json=payload,
                 timeout=120,
             )
+            if response.status_code == 400:
+                print(f"[debug] 400 response body: {response.text}")
             response.raise_for_status()
             response_json = response.json()
 
