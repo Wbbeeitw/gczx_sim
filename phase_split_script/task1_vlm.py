@@ -24,7 +24,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from PIL import Image
+from PIL import Image, ImageDraw
 from pydantic import BaseModel, Field
 from tqdm import tqdm
 
@@ -42,16 +42,17 @@ except ModuleNotFoundError:
 # Task-specific definitions
 # --------------------------------------------------------------------------- #
 TASK_DESCRIPTION = "Put both the cream cheese box and the butter in the basket"
+PROMPT_VERSION = "task1_v2_multiview_temporal"
 
 NUM_PHASES = 6
 
 PHASE_DEFINITIONS: dict[int, str] = {
-    0: "approaching and grasping the first object (cream cheese box)",
-    1: "transporting the first object to the basket",
-    2: "placing the first object into the basket",
-    3: "approaching and grasping the second object (butter)",
-    4: "transporting the second object to the basket",
-    5: "placing the second object into the basket / task completion",
+    0: "initially approaching and establishing control of a target object",
+    1: "moving or repositioning the currently controlled target object before a stable basket deposit",
+    2: "first stable single-object basket deposit milestone is visually completed",
+    3: "securing the remaining target object or regrouping both targets for the completion attempt",
+    4: "transporting the final payload toward the basket, including carrying both targets together",
+    5: "both target objects are stably inside the basket / task completion",
 }
 
 PHASE_NAME_TO_ID = {name.lower(): phase_id for phase_id, name in PHASE_DEFINITIONS.items()}
@@ -270,6 +271,76 @@ def _sample_frame_indices(
     return indices
 
 
+def _resize_to_height(img: Image.Image, target_height: int) -> Image.Image:
+    """Resize an image to a target height while preserving aspect ratio."""
+    if img.height == target_height:
+        return img
+    target_width = max(1, int(round(img.width * target_height / img.height)))
+    return img.resize((target_width, target_height), Image.Resampling.BILINEAR)
+
+
+def _compose_multiview_frame(
+    main_frame: Image.Image,
+    wrist_frame: Image.Image | None,
+    frame_index: int,
+    timestamp_seconds: float,
+) -> Image.Image:
+    """Compose a sampled frame with timestamp and optional wrist view."""
+    main_rgb = main_frame.convert("RGB")
+    header_h = 28
+    gap = 6
+    target_h = main_rgb.height
+
+    views: list[tuple[str, Image.Image]] = [("main", main_rgb)]
+    if wrist_frame is not None:
+        views.append(("wrist", _resize_to_height(wrist_frame.convert("RGB"), target_h)))
+
+    body_w = sum(img.width for _, img in views) + gap * (len(views) - 1)
+    canvas = Image.new("RGB", (body_w, target_h + header_h), color=(18, 18, 18))
+    draw = ImageDraw.Draw(canvas)
+    draw.rectangle((0, 0, body_w, header_h), fill=(0, 0, 0))
+    draw.text(
+        (8, 7),
+        f"frame={frame_index:04d}  t={timestamp_seconds:05.1f}s",
+        fill=(255, 255, 255),
+    )
+
+    x = 0
+    for label, img in views:
+        canvas.paste(img, (x, header_h))
+        draw.rectangle(
+            (x, header_h, x + img.width - 1, header_h + 17),
+            fill=(0, 0, 0),
+        )
+        draw.text((x + 6, header_h + 3), label, fill=(255, 255, 255))
+        x += img.width + gap
+
+    return canvas
+
+
+def _build_sampled_images(
+    main_frames: list[Image.Image],
+    wrist_frames: list[Image.Image] | None,
+    sampled_indices: list[int],
+    fps: float,
+) -> list[Image.Image]:
+    """Build chronologically ordered multi-view sampled images for the VLM."""
+    sampled_images: list[Image.Image] = []
+    for frame_index in sampled_indices:
+        wrist_frame = None
+        if wrist_frames is not None and frame_index < len(wrist_frames):
+            wrist_frame = wrist_frames[frame_index]
+        sampled_images.append(
+            _compose_multiview_frame(
+                main_frame=main_frames[frame_index],
+                wrist_frame=wrist_frame,
+                frame_index=frame_index,
+                timestamp_seconds=frame_index / max(fps, 1e-6),
+            )
+        )
+    return sampled_images
+
+
 # --------------------------------------------------------------------------- #
 # Prompt and parsing
 # --------------------------------------------------------------------------- #
@@ -325,12 +396,24 @@ def _build_prompt(
         f"  Frames are sampled every {1.0 / sample_fps:.1f} seconds "
         f"({sample_fps} fps) for annotation.\n\n"
         f"{outcome_hint}\n\n"
+        "Each image has a header with frame index and timestamp. If two views are shown, "
+        "the left panel is the main view and the right panel is the wrist view.\n\n"
         "Annotate the video with the following closed phase vocabulary. "
         "You may repeat phases if the robot retries an action (e.g. drops an object "
         "and re-grasps it). The phase sequence must reflect what actually happens visually, "
         "not what ideally should happen.\n\n"
         "Phase vocabulary (use these exact names):\n"
         f"{phase_lines}\n\n"
+        "Task-specific interpretation notes:\n"
+        "  - These phase names are semantic anchors, not a mandatory per-object checklist.\n"
+        "  - Some episodes combine substeps: the robot may drop one object near the other, "
+        "then grasp both together, or finish multiple subgoals in one continuous motion.\n"
+        "  - If an intermediate phase is not visually distinct, it is valid to skip it "
+        "instead of hallucinating it.\n"
+        "  - Phase 2 should be used only when a first stable single-object basket deposit "
+        "is clearly visible as its own milestone.\n"
+        "  - Phase 5 should be used only when both target objects are visibly and stably "
+        "inside the basket.\n\n"
         "Important rules:\n"
         "  1. Every frame must belong to exactly one contiguous phase segment.\n"
         "  2. Segments must be contiguous in time: the end of one segment equals "
@@ -338,7 +421,8 @@ def _build_prompt(
         "  3. The first segment must start at 00:00.000 and the last segment must "
         "     end at the video duration.\n"
         "  4. If the robot retries a phase, output the same phase name again.\n"
-        "  5. Use only names from the vocabulary above.\n\n"
+        "  5. Not every phase must appear; only output phases that are visually justified.\n"
+        "  6. Use only names from the vocabulary above.\n\n"
         "Output format:\n"
         "First, briefly describe what you observe (1-3 sentences). Then output ONLY "
         "a JSON object in this exact format (no markdown code fences):\n\n"
@@ -532,13 +616,14 @@ class AnnotateEpisodeResult:
 def _build_episode_df(
     episode_index: int,
     phase: np.ndarray,
+    is_success: bool | None,
 ) -> pd.DataFrame:
     """Build the standard frame-level annotation dataframe for one episode."""
     episode_length = len(phase)
     phase_progress, global_progress, overall_progress = compute_progress_per_segment(
         phase, NUM_PHASES
     )
-    return pd.DataFrame({
+    out = pd.DataFrame({
         "episode_index": np.full(episode_length, episode_index, dtype=np.int64),
         "frame_index": np.arange(episode_length, dtype=np.int64),
         "phase": phase.astype(np.int64),
@@ -546,6 +631,9 @@ def _build_episode_df(
         "global_progress": global_progress,
         "progress": overall_progress,
     })
+    if is_success is not None:
+        out["is_success"] = pd.array([is_success] * episode_length, dtype="boolean")
+    return out
 
 
 def _annotate_episode(
@@ -573,10 +661,17 @@ def _annotate_episode(
     cached = cache.get(episode_index)
     if cached is not None:
         # Reject stale cache entries whose config does not match the current run.
-        if cached.get("sample_fps") != sample_fps or cached.get("model") != model:
+        if (
+            cached.get("sample_fps") != sample_fps
+            or cached.get("model") != model
+            or cached.get("video_key") != video_key
+            or cached.get("wrist_video_key") != wrist_video_key
+            or cached.get("enable_reasoning") != enable_reasoning
+            or cached.get("prompt_version") != PROMPT_VERSION
+        ):
             print(
                 f"[info] stale cache for episode {episode_index} "
-                f"(sample_fps/model mismatch); re-annotating"
+                f"(config mismatch); re-annotating"
             )
             cached = None
     if cached is not None:
@@ -589,7 +684,11 @@ def _annotate_episode(
             phase = _segments_to_frame_phase(segments, episode_length, fps)
             return AnnotateEpisodeResult(
                 episode_index=episode_index,
-                df=_build_episode_df(episode_index, phase),
+                df=_build_episode_df(
+                    episode_index,
+                    phase,
+                    cached.get("is_success"),
+                ),
                 source="vlm",
             )
         except Exception as e:
@@ -604,7 +703,7 @@ def _annotate_episode(
             phase = _rule_based_annotation(ep_file, episode_length)
             return AnnotateEpisodeResult(
                 episode_index=episode_index,
-                df=_build_episode_df(episode_index, phase),
+                df=_build_episode_df(episode_index, phase, is_success),
                 source="rule_fallback",
                 error="video not found",
             )
@@ -617,9 +716,16 @@ def _annotate_episode(
 
     frames, fps = _load_video(video_path)
     duration = episode_length / fps
+    wrist_frames: list[Image.Image] | None = None
+    if wrist_video_key:
+        wrist_video_path = _infer_video_path(
+            dataset_path, episode_index, video_key=wrist_video_key
+        )
+        if wrist_video_path is not None:
+            wrist_frames, _ = _load_video(wrist_video_path)
 
     sampled_indices = _sample_frame_indices(episode_length, sample_fps, fps)
-    sampled_images = [frames[i] for i in sampled_indices]
+    sampled_images = _build_sampled_images(frames, wrist_frames, sampled_indices, fps)
 
     prompt = _build_prompt(
         task_description=TASK_DESCRIPTION,
@@ -649,6 +755,10 @@ def _annotate_episode(
                 "task_description": TASK_DESCRIPTION,
                 "model": model,
                 "sample_fps": sample_fps,
+                "video_key": video_key,
+                "wrist_video_key": wrist_video_key,
+                "enable_reasoning": enable_reasoning,
+                "prompt_version": PROMPT_VERSION,
                 "is_success": is_success,
                 "response": annotation.model_dump(),
             }
@@ -658,13 +768,19 @@ def _annotate_episode(
 
             return AnnotateEpisodeResult(
                 episode_index=episode_index,
-                df=_build_episode_df(episode_index, phase),
+                df=_build_episode_df(episode_index, phase, is_success),
                 source="vlm",
             )
         except Exception as e:
             last_error = e
             print(f"[warn] VLM annotation failed for episode {episode_index} (attempt {attempt + 1}): {e}")
-            # On second attempt, strengthen the failure hint.
+            # On second attempt, strengthen task-specific guidance.
+            if attempt == 0:
+                prompt += (
+                    "\n\nReminder: combined manipulations are allowed. If the robot groups both "
+                    "objects together, do not force a fake separate phase-2 milestone unless a "
+                    "stable single-object basket deposit is clearly visible."
+                )
             if attempt == 0 and is_success is False:
                 prompt += (
                     "\n\nReminder: this episode FAILED. Do NOT output phases that were "
@@ -676,7 +792,7 @@ def _annotate_episode(
         phase = _rule_based_annotation(ep_file, episode_length)
         return AnnotateEpisodeResult(
             episode_index=episode_index,
-            df=_build_episode_df(episode_index, phase),
+            df=_build_episode_df(episode_index, phase, is_success),
             source="rule_fallback",
             error=str(last_error),
         )
@@ -698,7 +814,7 @@ def annotate_dataset_with_vlm(
     model: str = DEFAULT_MODEL,
     sample_fps: float = 0.5,
     video_key: str = "image",
-    wrist_video_key: str | None = None,
+    wrist_video_key: str | None = "wrist_image",
     max_workers: int = 2,
     enable_reasoning: bool = True,
     fallback_on_failure: bool = True,
@@ -712,7 +828,6 @@ def annotate_dataset_with_vlm(
         sample_fps: Frame sampling rate sent to the VLM (original video fps / interval).
         video_key: Key for the main camera video.
         wrist_video_key: Key for the wrist camera video, or None to disable.
-            Not used for whole-video annotation yet, but kept for interface parity.
         max_workers: Number of episodes processed in parallel.
         enable_reasoning: Whether to request model reasoning/thinking.
         fallback_on_failure: Whether to fall back to rule-based annotation when
@@ -813,6 +928,12 @@ def annotate_dataset_with_vlm(
 # CLI
 # --------------------------------------------------------------------------- #
 def main() -> None:
+    def _parse_optional_str(value: str) -> str | None:
+        lowered = value.lower()
+        if lowered in {"none", "null", "false", "no"}:
+            return None
+        return value
+
     parser = argparse.ArgumentParser(
         description="Whole-video VLM phase annotation for LIBERO-10 Task 1."
     )
@@ -848,9 +969,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--wrist_video_key",
-        type=str,
-        default=None,
-        help="Video key for the wrist camera (currently unused).",
+        type=_parse_optional_str,
+        default="wrist_image",
+        help="Video key for the wrist camera, or set to none to disable.",
     )
     parser.add_argument(
         "--max_workers",
