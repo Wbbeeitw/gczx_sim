@@ -3,7 +3,7 @@
 This script avoids whole-video phase segmentation. Instead, it predicts three
 monotonic boundary events:
 
-    B1: first sustained, useful robot-caused control over a target object
+    B1: first clear robot-controlled grasp / pickup / drag of a target object
     B2: first late-stage milestone (one object stably in basket, or clear final
         joint-transfer setup at the basket)
     B3: task completion (both objects stably in basket)
@@ -47,7 +47,7 @@ except ModuleNotFoundError:
 
 
 TASK_DESCRIPTION = "Put both the cream cheese box and the butter in the basket"
-PROMPT_VERSION = "task1_boundary_v1_local_refine"
+PROMPT_VERSION = "task1_boundary_v2_pickup_search"
 NUM_PHASES = 4
 SUCCESS_PHASE = 3
 DEFAULT_VIDEO_FPS = 10.0
@@ -71,9 +71,10 @@ BOUNDARY_SPECS: tuple[BoundarySpec, ...] = (
         phase_id=1,
         window_seconds=4.0,
         description=(
-            "Earliest moment after reset-settling when the robot first establishes "
-            "sustained, useful control over at least one target object. Passive "
-            "drop, bounce, or gravity-driven slide at the start does NOT count."
+            "Earliest moment after reset-settling when the robot first clearly "
+            "grasps, lifts, or deliberately drags at least one target object under "
+            "robot control. Passive drop, bounce, gravity-driven slide, or a brief "
+            "incidental touch at the start does NOT count."
         ),
     ),
     BoundarySpec(
@@ -100,7 +101,7 @@ BOUNDARY_SPECS: tuple[BoundarySpec, ...] = (
 
 PHASE_DEFINITIONS: dict[int, str] = {
     0: "reset-settling or pre-manipulation",
-    1: "early robot-caused manipulation before any stable in-basket result",
+    1: "first robot-controlled pickup / drag before any stable in-basket result",
     2: "late unfinished stage after one in-basket result or clear final setup",
     3: "both objects stably inside the basket / completion",
 }
@@ -401,6 +402,56 @@ def _coarse_boundaries_from_legacy(
     return {"b1": b1, "b2": b2, "b3": b3}
 
 
+def _default_b1_fallback_frame(episode_length: int) -> int | None:
+    if episode_length <= 0:
+        return None
+    if episode_length == 1:
+        return 0
+    return min(episode_length - 1, max(1, int(round(episode_length * 0.02))))
+
+
+def _initial_center_for_boundary(
+    spec: BoundarySpec,
+    coarse_frame: int | None,
+    episode_length: int,
+    fps: float,
+    is_success: bool | None,
+) -> int | None:
+    if episode_length <= 0:
+        return None
+
+    if coarse_frame is not None:
+        coarse_frame = int(max(0, min(coarse_frame, episode_length - 1)))
+        if spec.key == "b1":
+            early_bias = max(1, int(round(1.0 * fps)))
+            return max(0, coarse_frame - early_bias)
+        return coarse_frame
+
+    if spec.key == "b1":
+        ratio = 0.18
+    elif spec.key == "b2":
+        ratio = 0.58 if is_success is True else 0.68
+    elif spec.key == "b3":
+        if is_success is False:
+            return None
+        ratio = 0.88
+    else:
+        return None
+
+    return int(round((episode_length - 1) * ratio))
+
+
+def _search_shift_frames(
+    spec: BoundarySpec,
+    fps: float,
+    has_coarse: bool,
+) -> int:
+    base = max(1, int(round(spec.window_seconds * fps / 3.0)))
+    if has_coarse:
+        return base
+    return max(base, int(round(spec.window_seconds * fps * 0.75)))
+
+
 def _window_sample_indices(
     center_frame: int,
     episode_length: int,
@@ -440,11 +491,17 @@ def _build_boundary_prompt(
         f"{outcome_hint}\n\n"
         f"Boundary to locate: {spec.key.upper()}\n"
         f"Boundary meaning: {spec.description}\n\n"
-        "You will see a short chronological window of frames around a coarse candidate. "
-        "Each image header already shows the exact frame index and timestamp.\n\n"
+        "You will see a short chronological window of frames around a candidate "
+        "boundary location. Each image header already shows the exact frame index "
+        "and timestamp.\n\n"
         "Important rules:\n"
         "  - Judge robot-caused task progress, not passive environment reset motion.\n"
-        "  - For B1 specifically, initial object drop / bounce / gravity slide at reset is NEVER enough.\n"
+        "  - For B1 specifically, initial object drop / bounce / gravity slide at "
+        "reset is NEVER enough.\n"
+        "  - For B1, trigger as soon as one target object is clearly grasped, "
+        "lifted, carried, or deliberately dragged under robot control; do NOT wait "
+        "for a long stable hold.\n"
+        "  - A brief accidental tap or uncontrolled bump is NOT enough for B1.\n"
         "  - Use 'within' only when one of the shown frames is the earliest frame where the boundary becomes true.\n"
         "  - Use 'before' if the boundary already happened before the first shown frame.\n"
         "  - Use 'after' if the boundary has still NOT happened by the last shown frame but likely occurs later.\n"
@@ -507,17 +564,24 @@ def _refine_boundary(
     is_success: bool | None,
     enable_reasoning: bool,
 ) -> BoundaryRefinement:
-    if coarse_frame is None:
+    center = _initial_center_for_boundary(
+        spec=spec,
+        coarse_frame=coarse_frame,
+        episode_length=episode_length,
+        fps=fps,
+        is_success=is_success,
+    )
+    if center is None:
         return BoundaryRefinement(
             key=spec.key,
-            coarse_frame=None,
+            coarse_frame=coarse_frame,
             final_frame=None,
             status="absent",
             source="coarse_absent",
             attempts=[],
         )
 
-    center = coarse_frame
+    seeded_search = coarse_frame is None
     attempts: list[dict[str, Any]] = []
     for _ in range(MAX_REFINE_ATTEMPTS):
         sampled_indices = _window_sample_indices(
@@ -548,7 +612,7 @@ def _refine_boundary(
                 coarse_frame=coarse_frame,
                 final_frame=decision.frame_index,
                 status="within",
-                source="vlm_refined",
+                source="vlm_seed_search" if seeded_search else "vlm_refined",
                 attempts=attempts,
             )
         if decision.status == "absent":
@@ -557,22 +621,21 @@ def _refine_boundary(
                 coarse_frame=coarse_frame,
                 final_frame=None,
                 status="absent",
-                source="vlm_absent",
+                source="vlm_absent_after_search" if seeded_search else "vlm_absent",
                 attempts=attempts,
             )
+        shift = _search_shift_frames(spec, fps, has_coarse=not seeded_search)
         if decision.status == "before":
-            shift = max(1, int(round(spec.window_seconds * fps / 3.0)))
             center = max(0, sampled_indices[0] - shift)
         else:
-            shift = max(1, int(round(spec.window_seconds * fps / 3.0)))
             center = min(episode_length - 1, sampled_indices[-1] + shift)
 
     return BoundaryRefinement(
         key=spec.key,
         coarse_frame=coarse_frame,
-        final_frame=coarse_frame,
-        status="fallback",
-        source="coarse_fallback",
+        final_frame=coarse_frame if coarse_frame is not None else None,
+        status="fallback" if coarse_frame is not None else "search_exhausted",
+        source="coarse_fallback" if coarse_frame is not None else "vlm_search_exhausted",
         attempts=attempts,
     )
 
@@ -595,9 +658,14 @@ def _finalize_boundaries(
 
     if is_success is False:
         final["b3"] = None
+    elif is_success is True and final["b3"] is None and episode_length > 0:
+        final["b3"] = episode_length - 1
 
     if final["b1"] is None and (final["b2"] is not None or final["b3"] is not None):
-        final["b1"] = coarse.get("b1", 0) or 0
+        fallback_b1 = coarse.get("b1")
+        if fallback_b1 is None:
+            fallback_b1 = _default_b1_fallback_frame(episode_length)
+        final["b1"] = fallback_b1
 
     if final["b2"] is not None and final["b1"] is not None and final["b2"] <= final["b1"]:
         final["b2"] = None
@@ -620,6 +688,44 @@ def _finalize_boundaries(
             final[key] = int(max(0, min(value, episode_length - 1)))
 
     return final
+
+
+def _sync_refinements_with_final(
+    coarse: dict[str, int | None],
+    refinements: dict[str, BoundaryRefinement],
+    final: dict[str, int | None],
+    is_success: bool | None,
+    episode_length: int,
+) -> None:
+    b1_ref = refinements.get("b1")
+    if final.get("b1") is not None and (b1_ref is None or b1_ref.final_frame is None):
+        source = "linked_fallback"
+        if coarse.get("b1") is None:
+            source = "default_b1_fallback"
+        refinements["b1"] = BoundaryRefinement(
+            key="b1",
+            coarse_frame=coarse.get("b1"),
+            final_frame=final["b1"],
+            status=source,
+            source=source,
+            attempts=[] if b1_ref is None else b1_ref.attempts,
+        )
+
+    b3_ref = refinements.get("b3")
+    if (
+        is_success is True
+        and episode_length > 0
+        and final.get("b3") == episode_length - 1
+        and (b3_ref is None or b3_ref.final_frame is None)
+    ):
+        refinements["b3"] = BoundaryRefinement(
+            key="b3",
+            coarse_frame=coarse.get("b3"),
+            final_frame=final["b3"],
+            status="success_tail_fallback",
+            source="success_tail_fallback",
+            attempts=[] if b3_ref is None else b3_ref.attempts,
+        )
 
 
 def boundaries_to_phase_array(
@@ -826,6 +932,13 @@ def _annotate_episode(
     final_boundaries = _finalize_boundaries(
         coarse=coarse,
         refinements=refinements,
+        is_success=is_success,
+        episode_length=episode_length,
+    )
+    _sync_refinements_with_final(
+        coarse=coarse,
+        refinements=refinements,
+        final=final_boundaries,
         is_success=is_success,
         episode_length=episode_length,
     )

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import numpy as np
+from PIL import Image
 
 from phase_split_script import task1_boundary_vlm
 
@@ -72,3 +73,97 @@ def test_build_phase_df_from_boundaries_freezes_failed_terminal_segment():
     assert df["phase"].tolist() == [0, 0, 1, 1, 2, 2]
     assert df["phase_progress"].tolist()[-2:] == [0.0, 0.0]
     assert df["global_progress"].tolist()[-2:] == [2 / 4, 2 / 4]
+
+
+def test_b1_prompt_uses_earlier_grasp_semantics():
+    spec = next(s for s in task1_boundary_vlm.BOUNDARY_SPECS if s.key == "b1")
+    prompt = task1_boundary_vlm._build_boundary_prompt(
+        spec=spec,
+        sampled_indices=[0, 10, 20],
+        fps=10.0,
+        is_success=True,
+        enable_reasoning=False,
+    )
+
+    assert "grasped, lifted, carried, or deliberately dragged" in prompt
+    assert "do NOT wait for a long stable hold" in prompt
+
+
+def test_refine_boundary_searches_without_coarse_for_success(monkeypatch):
+    spec = next(s for s in task1_boundary_vlm.BOUNDARY_SPECS if s.key == "b3")
+    frames = [Image.new("RGB", (8, 8), color="black") for _ in range(40)]
+    seen = {}
+
+    def fake_query(**kwargs):
+        seen["sampled_indices"] = kwargs["sampled_indices"]
+        return task1_boundary_vlm.BoundaryDecision(
+            status="within",
+            frame_index=kwargs["sampled_indices"][-1],
+            reasoning="found near the tail",
+        )
+
+    monkeypatch.setattr(task1_boundary_vlm, "_query_boundary_window", fake_query)
+    refinement = task1_boundary_vlm._refine_boundary(
+        spec=spec,
+        coarse_frame=None,
+        main_frames=frames,
+        wrist_frames=None,
+        fps=10.0,
+        episode_length=len(frames),
+        model="dummy-model",
+        is_success=True,
+        enable_reasoning=False,
+    )
+
+    assert seen["sampled_indices"]
+    assert refinement.status == "within"
+    assert refinement.source == "vlm_seed_search"
+    assert refinement.final_frame == seen["sampled_indices"][-1]
+
+
+def test_finalize_boundaries_backfills_success_tail_and_b1():
+    refinements = {
+        "b1": task1_boundary_vlm.BoundaryRefinement(
+            key="b1",
+            coarse_frame=None,
+            final_frame=None,
+            status="absent",
+            source="coarse_absent",
+            attempts=[],
+        ),
+        "b2": task1_boundary_vlm.BoundaryRefinement(
+            key="b2",
+            coarse_frame=None,
+            final_frame=None,
+            status="absent",
+            source="coarse_absent",
+            attempts=[],
+        ),
+        "b3": task1_boundary_vlm.BoundaryRefinement(
+            key="b3",
+            coarse_frame=None,
+            final_frame=None,
+            status="absent",
+            source="coarse_absent",
+            attempts=[],
+        ),
+    }
+    final = task1_boundary_vlm._finalize_boundaries(
+        coarse={"b1": None, "b2": None, "b3": None},
+        refinements=refinements,
+        is_success=True,
+        episode_length=50,
+    )
+    task1_boundary_vlm._sync_refinements_with_final(
+        coarse={"b1": None, "b2": None, "b3": None},
+        refinements=refinements,
+        final=final,
+        is_success=True,
+        episode_length=50,
+    )
+
+    assert final["b3"] == 49
+    assert final["b1"] is not None
+    assert final["b1"] < final["b3"]
+    assert refinements["b1"].source == "default_b1_fallback"
+    assert refinements["b3"].source == "success_tail_fallback"
