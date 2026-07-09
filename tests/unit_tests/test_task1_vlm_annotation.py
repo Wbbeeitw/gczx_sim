@@ -204,3 +204,33 @@ def test_validate_milestone_sequence_rejects_unapproved_skip_chain():
 
     with pytest.raises(ValueError, match="allowed sequences"):
         task1_vlm._validate_milestone_sequence(segments, is_success=None)
+
+
+def test_segments_to_frame_phase_preserves_initial_phase_zero_under_overlap():
+    segments = [
+        task1_vlm.PhaseSegment(
+            name=task1_vlm.PHASE_DEFINITIONS[0],
+            start_seconds=0.0,
+            end_seconds=0.05,
+        ),
+        task1_vlm.PhaseSegment(
+            name=task1_vlm.PHASE_DEFINITIONS[1],
+            start_seconds=0.05,
+            end_seconds=2.0,
+        ),
+        task1_vlm.PhaseSegment(
+            name=task1_vlm.PHASE_DEFINITIONS[2],
+            start_seconds=2.0,
+            end_seconds=3.0,
+        ),
+    ]
+
+    phase = task1_vlm._segments_to_frame_phase(segments, episode_length=30, fps=10.0)
+
+    assert phase[0] == 0
+    compressed = [int(phase[0])]
+    for phase_id in phase[1:]:
+        phase_id = int(phase_id)
+        if phase_id != compressed[-1]:
+            compressed.append(phase_id)
+    assert compressed == [0, 1, 2]

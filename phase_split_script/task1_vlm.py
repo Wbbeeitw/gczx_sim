@@ -719,13 +719,42 @@ def _segments_to_frame_phase(
     fps: float,
 ) -> np.ndarray:
     """Convert validated segments to a per-frame phase array."""
+    if episode_length <= 0:
+        return np.zeros(0, dtype=int)
+
     phase = np.zeros(episode_length, dtype=int)
-    for seg in segments:
+    next_start_frame = 0
+    expected_sequence: list[int] = []
+    for i, seg in enumerate(segments):
         phase_id = _resolve_phase_id(seg.name)
-        start_frame = min(int(seg.start_seconds * fps), episode_length - 1)
-        end_frame = min(int(np.ceil(seg.end_seconds * fps)), episode_length)
-        end_frame = max(end_frame, start_frame + 1)
+        expected_sequence.append(phase_id)
+        start_frame = next_start_frame
+        if i == len(segments) - 1:
+            end_frame = episode_length
+        else:
+            raw_end_frame = int(round(seg.end_seconds * fps))
+            min_end_frame = start_frame + 1
+            remaining_segments = len(segments) - i - 1
+            max_end_frame = episode_length - remaining_segments
+            if max_end_frame < min_end_frame:
+                raise ValueError(
+                    "Not enough frames to preserve all validated phase segments."
+                )
+            end_frame = min(max(raw_end_frame, min_end_frame), max_end_frame)
+
         phase[start_frame:end_frame] = phase_id
+        next_start_frame = end_frame
+
+    observed_sequence = [int(phase[0])]
+    for phase_id in phase[1:]:
+        phase_id = int(phase_id)
+        if phase_id != observed_sequence[-1]:
+            observed_sequence.append(phase_id)
+    if observed_sequence != expected_sequence:
+        raise ValueError(
+            f"Frame-level phase sequence {tuple(observed_sequence)} does not match "
+            f"validated segment sequence {tuple(expected_sequence)}"
+        )
     return phase
 
 
