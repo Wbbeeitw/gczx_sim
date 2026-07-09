@@ -43,16 +43,16 @@ except ModuleNotFoundError:
 # Task-specific definitions
 # --------------------------------------------------------------------------- #
 TASK_DESCRIPTION = "Put both the cream cheese box and the butter in the basket"
-PROMPT_VERSION = "task1_v5_four_phase_milestones"
+PROMPT_VERSION = "task1_v6_four_phase_strict_sequences"
 MAX_IMAGES_PER_PROMPT = 32
 
 NUM_PHASES = 4
 SUCCESS_PHASE = NUM_PHASES - 1
 
 PHASE_DEFINITIONS: dict[int, str] = {
-    0: "no stable task progress yet; both target objects remain outside the basket",
-    1: "clear early task progress; at least one target object is grasped, moved, or intentionally arranged",
-    2: "late partial-completion milestone; one stable subgoal is achieved or the final joint transfer setup is clearly established, but the task is not complete",
+    0: "no stable task progress yet; both target objects remain outside the basket and no clear successful grasp, displacement, or grouping has been established",
+    1: "clear early task progress; at least one target object is clearly grasped, displaced, pushed, or intentionally grouped, but no object is yet stably inside the basket",
+    2: "late partial-completion milestone; one target object is stably inside the basket or the final joint transfer setup is clearly established, but the task is not complete",
     3: "both target objects are stably inside the basket / task completion",
 }
 
@@ -411,6 +411,13 @@ def _build_prompt(
     phase_lines = "\n".join(
         f"  {phase_id}: {desc}" for phase_id, desc in sorted(phase_definitions.items())
     )
+    allowed_sequences_text = (
+        "  - Typical valid success chains: 0->1->3 or 0->1->2->3.\n"
+        "  - Typical valid failure chains: 0, 0->1, or 0->1->2.\n"
+        "  - Do not start directly from phase 1 or phase 2. The rollout begins from the untouched initial state, "
+        "so the first segment should be phase 0 unless the first sampled frames already show an unambiguous stable "
+        "transition out of the initial state."
+    )
 
     return (
         f"{think_prefix}You are an expert robotics video analyst. I will show you a sampled "
@@ -434,6 +441,12 @@ def _build_prompt(
         "Task-specific interpretation notes:\n"
         "  - Use phase changes only for stable world-state milestones. Short pauses, hesitations, "
         "or repeated attempts inside the same milestone should stay in the same phase.\n"
+        "  - Phase 0 includes reaching, hovering, alignment, or failed contact attempts that do NOT yet create a "
+        "clear persistent object displacement or grouping result.\n"
+        "  - Phase 1 begins only after clear task progress is visible: at least one object has been meaningfully "
+        "moved, grasped, pushed, or intentionally grouped, but neither object is yet stably inside the basket.\n"
+        "  - Phase 2 is reserved for late unfinished states: one object is already stably in the basket, or the "
+        "robot is clearly in a final joint-transfer setup for both objects, but the task is not yet complete.\n"
         "  - Some episodes combine substeps: the robot may drop one object near the other, "
         "then grasp both together, or finish multiple subgoals in one continuous motion.\n"
         "  - Skipping a phase is allowed only when the skipped milestone never appears as a stable "
@@ -441,6 +454,7 @@ def _build_prompt(
         "  - Once a milestone is reached, later segments must not go back to a smaller phase id.\n"
         "  - Do not use phase 0 for later stalls after clear task progress already happened; "
         "stalled failed episodes should remain at their highest achieved milestone.\n"
+        f"{allowed_sequences_text}\n"
         f"  - Phase {SUCCESS_PHASE} should be used only when both target objects are visibly "
         "and stably inside the basket.\n\n"
         "Important rules:\n"
@@ -549,9 +563,9 @@ def _validate_milestone_sequence(
     if not phase_ids:
         raise ValueError("No validated segments remain.")
 
-    if phase_ids[0] > 1:
+    if phase_ids[0] != 0:
         raise ValueError(
-            f"Episode starts too late in the milestone chain: phase {phase_ids[0]}"
+            f"Episode must start at phase 0, got phase {phase_ids[0]}"
         )
 
     for prev, cur in zip(phase_ids, phase_ids[1:]):
@@ -559,6 +573,25 @@ def _validate_milestone_sequence(
             raise ValueError(
                 f"Milestone phase regressed from {prev} to {cur}; sequence must be monotonic"
             )
+
+    success_sequences = {(0, 1, 3), (0, 1, 2, 3)}
+    failure_sequences = {(0,), (0, 1), (0, 1, 2)}
+    if is_success is True:
+        allowed_sequences = success_sequences
+    elif is_success is False:
+        allowed_sequences = failure_sequences
+    else:
+        allowed_sequences = success_sequences | failure_sequences
+
+    sequence = tuple(phase_ids)
+    if sequence not in allowed_sequences:
+        expected = ", ".join(
+            "->".join(str(phase_id) for phase_id in seq)
+            for seq in sorted(allowed_sequences)
+        )
+        raise ValueError(
+            f"Invalid milestone sequence {sequence}; allowed sequences: {expected}"
+        )
 
     final_phase = phase_ids[-1]
     if is_success is True and final_phase != SUCCESS_PHASE:
@@ -902,7 +935,8 @@ def _annotate_episode(
                     "\n\nReminder: output milestone states, not motion snippets. Combined "
                     "manipulations are allowed. If a retry or stall does not create a new stable "
                     "world state, keep the current phase instead of going backward or inventing a "
-                    "new phase transition."
+                    "new phase transition. The first segment should still be phase 0, and the "
+                    "sequence should normally look like 0->1->3, 0->1->2->3, 0, 0->1, or 0->1->2."
                 )
             if attempt == 0 and is_success is False:
                 prompt += (

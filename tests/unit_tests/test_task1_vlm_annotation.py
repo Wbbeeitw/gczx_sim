@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from phase_split_script import task1_vlm
@@ -37,6 +38,8 @@ def test_build_prompt_mentions_combined_manipulation_and_optional_skips():
     assert "Do not use phase 0 for later stalls" in prompt
     assert "Frames actually provided to you: 26" in prompt
     assert f"end with phase {task1_vlm.SUCCESS_PHASE}" in prompt
+    assert "Typical valid success chains: 0->1->3 or 0->1->2->3" in prompt
+    assert "the first segment should be phase 0" in prompt
 
 
 def test_compose_multiview_frame_adds_header_and_wrist_panel():
@@ -143,3 +146,61 @@ def test_validate_milestone_sequence_rejects_regression():
         assert "regressed" in str(exc)
     else:
         raise AssertionError("phase regression should be rejected")
+
+
+def test_validate_milestone_sequence_rejects_nonzero_start():
+    segments = [
+        task1_vlm.PhaseSegment(
+            name=task1_vlm.PHASE_DEFINITIONS[1],
+            start_seconds=0.0,
+            end_seconds=1.0,
+        ),
+    ]
+
+    with pytest.raises(ValueError, match="must start at phase 0"):
+        task1_vlm._validate_milestone_sequence(segments, is_success=None)
+
+
+def test_validate_milestone_sequence_accepts_strict_success_chain():
+    segments = [
+        task1_vlm.PhaseSegment(
+            name=task1_vlm.PHASE_DEFINITIONS[0],
+            start_seconds=0.0,
+            end_seconds=1.0,
+        ),
+        task1_vlm.PhaseSegment(
+            name=task1_vlm.PHASE_DEFINITIONS[1],
+            start_seconds=1.0,
+            end_seconds=2.0,
+        ),
+        task1_vlm.PhaseSegment(
+            name=task1_vlm.PHASE_DEFINITIONS[3],
+            start_seconds=2.0,
+            end_seconds=3.0,
+        ),
+    ]
+
+    task1_vlm._validate_milestone_sequence(segments, is_success=True)
+
+
+def test_validate_milestone_sequence_rejects_unapproved_skip_chain():
+    segments = [
+        task1_vlm.PhaseSegment(
+            name=task1_vlm.PHASE_DEFINITIONS[0],
+            start_seconds=0.0,
+            end_seconds=1.0,
+        ),
+        task1_vlm.PhaseSegment(
+            name=task1_vlm.PHASE_DEFINITIONS[2],
+            start_seconds=1.0,
+            end_seconds=2.0,
+        ),
+        task1_vlm.PhaseSegment(
+            name=task1_vlm.PHASE_DEFINITIONS[3],
+            start_seconds=2.0,
+            end_seconds=3.0,
+        ),
+    ]
+
+    with pytest.raises(ValueError, match="allowed sequences"):
+        task1_vlm._validate_milestone_sequence(segments, is_success=None)
