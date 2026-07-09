@@ -193,11 +193,6 @@ def _annotate_one_sample(
     phase = int(parsed.get("phase", 0))
     phase = max(0, min(phase, num_phases - 1))
 
-    confidence = str(parsed.get("confidence", "low")).lower()
-    if confidence == "low" and prev_phase is not None:
-        # Trust the previous decision rather than a low-confidence guess.
-        phase = prev_phase
-
     entry = {
         "episode_index": episode_index,
         "frame_index": frame_index,
