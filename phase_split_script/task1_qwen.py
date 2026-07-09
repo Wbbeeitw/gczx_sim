@@ -58,8 +58,8 @@ def main() -> None:
     parser.add_argument(
         "--model",
         type=str,
-        default="qwen-vl-plus",
-        help="DashScope model name (e.g. qwen-vl-plus, qwen-vl-max)."
+        default="qwen3-vl-flash",
+        help="DashScope model name (e.g. qwen3-vl-flash, qwen-vl-plus, qwen-vl-max)."
     )
     parser.add_argument(
         "--max_workers",

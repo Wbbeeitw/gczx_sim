@@ -1,6 +1,4 @@
-import os
 from PIL import Image
-import io
 
 from phase_split_script.qwen_client import call_qwen_vl
 
@@ -8,7 +6,7 @@ from phase_split_script.qwen_client import call_qwen_vl
 img = Image.new("RGB", (256, 256), color=(128, 128, 128))
 
 models = [
-    "qwen3.6-plus",
+    "qwen3-vl-flash",
     "qwen-vl-plus",
     "qwen-vl-max",
     "qwen2.5-vl-72b-instruct",
@@ -20,7 +18,7 @@ for model in models:
     try:
         result = call_qwen_vl(
             images=[img],
-            prompt="What is in this image? Reply with a JSON object: {\"description\": \"brief text\"}",
+            prompt='What is in this image? Reply with a JSON object: {"description": "brief text"}',
             model=model,
             max_retries=1,
         )
