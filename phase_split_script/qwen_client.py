@@ -176,6 +176,8 @@ def call_qwen_vl(
             If None, the default per-frame phase parser is used.
         max_tokens: Maximum number of output tokens. Increase this when the model
             needs to emit long reasoning plus a structured JSON answer.
+        enable_reasoning: Whether to enable Qwen3 thinking mode. Passed as the
+            top-level ``enable_thinking`` field for local vLLM.
 
     Returns:
         Parsed response dict, e.g. {"phase": 2, "confidence": "high"}.
@@ -194,9 +196,8 @@ def call_qwen_vl(
             "model": model,
             "messages": _build_local_messages(images, prompt),
             "max_tokens": max_tokens,
+            "enable_thinking": enable_reasoning,
         }
-        # NOTE: Some local models (e.g. Qwen3-VL-8B) do not accept the
-        # enable_thinking extra_body field. Reasoning is controlled via prompt.
     else:
         api_key = _get_api_key()
         headers["Authorization"] = f"Bearer {api_key}"

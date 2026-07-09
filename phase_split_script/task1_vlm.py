@@ -275,8 +275,12 @@ def _build_prompt(
     duration_seconds: float,
     sample_fps: float,
     is_success: bool | None,
+    enable_reasoning: bool = True,
 ) -> str:
     """Build the whole-video prompt with outcome hint and phase vocabulary."""
+    # Qwen3 uses /think and /no_think prefixes to control thinking mode.
+    think_prefix = "/think\n" if enable_reasoning else "/no_think\n"
+
     if is_success is True:
         outcome_hint = (
             "Environment outcome hint: this episode SUCCEEDED. "
@@ -300,7 +304,7 @@ def _build_prompt(
     )
 
     return (
-        "You are an expert robotics video analyst. I will show you a sampled "
+        f"{think_prefix}You are an expert robotics video analyst. I will show you a sampled "
         "sequence of frames from a single LIBERO-10 episode, in chronological order.\n\n"
         f'Task: "{task_description}"\n\n'
         f"Video statistics:\n"
@@ -612,6 +616,7 @@ def _annotate_episode(
         duration_seconds=duration,
         sample_fps=sample_fps,
         is_success=is_success,
+        enable_reasoning=enable_reasoning,
     )
 
     last_error: Exception | None = None
