@@ -24,7 +24,9 @@ def test_build_prompt_mentions_combined_manipulation_and_optional_skips():
         phase_definitions=task1_vlm.PHASE_DEFINITIONS,
         episode_length=520,
         duration_seconds=52.0,
-        sample_fps=0.5,
+        requested_sample_fps=0.5,
+        effective_sample_fps=0.5,
+        sampled_frame_count=26,
         is_success=None,
         enable_reasoning=False,
     )
@@ -33,6 +35,7 @@ def test_build_prompt_mentions_combined_manipulation_and_optional_skips():
     assert "drop one object near the other" in prompt
     assert "Not every phase must appear" in prompt
     assert "Phase 2 should be used only when a first stable single-object basket deposit" in prompt
+    assert "Frames actually provided to you: 26" in prompt
 
 
 def test_compose_multiview_frame_adds_header_and_wrist_panel():
@@ -65,6 +68,24 @@ def test_build_sampled_images_preserves_sampling_order():
 
     assert len(sampled) == 3
     assert all(img.size[1] > frames[0].size[1] for img in sampled)
+
+
+def test_limit_sampled_indices_respects_32_image_cap():
+    indices = list(range(0, 530, 10))
+    capped = task1_vlm._limit_sampled_indices(indices, max_images=32)
+
+    assert len(capped) == 32
+    assert capped[0] == indices[0]
+    assert capped[-1] == indices[-1]
+    assert capped == sorted(capped)
+
+
+def test_effective_sample_fps_reflects_capped_schedule():
+    capped = [0, 20, 40, 60, 80, 99]
+    eff = task1_vlm._effective_sample_fps(capped, video_fps=10.0, episode_length=100)
+
+    assert eff > 0.0
+    assert eff < 1.0
 
 
 def test_build_episode_df_keeps_nullable_success_flag():

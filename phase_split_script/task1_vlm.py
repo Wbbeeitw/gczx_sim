@@ -42,7 +42,8 @@ except ModuleNotFoundError:
 # Task-specific definitions
 # --------------------------------------------------------------------------- #
 TASK_DESCRIPTION = "Put both the cream cheese box and the butter in the basket"
-PROMPT_VERSION = "task1_v2_multiview_temporal"
+PROMPT_VERSION = "task1_v3_multiview_temporal_capped32"
+MAX_IMAGES_PER_PROMPT = 32
 
 NUM_PHASES = 6
 
@@ -271,6 +272,29 @@ def _sample_frame_indices(
     return indices
 
 
+def _limit_sampled_indices(indices: list[int], max_images: int) -> list[int]:
+    """Uniformly downsample sampled indices to satisfy image-count limits."""
+    if len(indices) <= max_images:
+        return indices
+    keep_positions = np.linspace(0, len(indices) - 1, num=max_images, dtype=int)
+    reduced = [indices[pos] for pos in keep_positions]
+    reduced[0] = indices[0]
+    reduced[-1] = indices[-1]
+    return reduced
+
+
+def _effective_sample_fps(
+    sampled_indices: list[int],
+    video_fps: float,
+    episode_length: int,
+) -> float:
+    """Estimate the effective frame sampling rate after any capping."""
+    if len(sampled_indices) <= 1 or episode_length <= 1:
+        return video_fps
+    duration_seconds = max((episode_length - 1) / max(video_fps, 1e-6), 1e-6)
+    return (len(sampled_indices) - 1) / duration_seconds
+
+
 def _resize_to_height(img: Image.Image, target_height: int) -> Image.Image:
     """Resize an image to a target height while preserving aspect ratio."""
     if img.height == target_height:
@@ -356,7 +380,9 @@ def _build_prompt(
     phase_definitions: dict[int, str],
     episode_length: int,
     duration_seconds: float,
-    sample_fps: float,
+    requested_sample_fps: float,
+    effective_sample_fps: float,
+    sampled_frame_count: int,
     is_success: bool | None,
     enable_reasoning: bool = True,
 ) -> str:
@@ -393,8 +419,10 @@ def _build_prompt(
         f"Video statistics:\n"
         f"  Total frames: {episode_length}\n"
         f"  Duration: {duration_seconds:.2f} seconds\n"
-        f"  Frames are sampled every {1.0 / sample_fps:.1f} seconds "
-        f"({sample_fps} fps) for annotation.\n\n"
+        f"  Requested sampling rate: {requested_sample_fps} fps\n"
+        f"  Frames actually provided to you: {sampled_frame_count}\n"
+        f"  Effective average sampling interval: {1.0 / max(effective_sample_fps, 1e-6):.1f} seconds "
+        f"(~{effective_sample_fps:.3f} fps)\n\n"
         f"{outcome_hint}\n\n"
         "Each image has a header with frame index and timestamp. If two views are shown, "
         "the left panel is the main view and the right panel is the wrist view.\n\n"
@@ -725,14 +753,18 @@ def _annotate_episode(
             wrist_frames, _ = _load_video(wrist_video_path)
 
     sampled_indices = _sample_frame_indices(episode_length, sample_fps, fps)
+    sampled_indices = _limit_sampled_indices(sampled_indices, MAX_IMAGES_PER_PROMPT)
     sampled_images = _build_sampled_images(frames, wrist_frames, sampled_indices, fps)
+    effective_sample_fps = _effective_sample_fps(sampled_indices, fps, episode_length)
 
     prompt = _build_prompt(
         task_description=TASK_DESCRIPTION,
         phase_definitions=PHASE_DEFINITIONS,
         episode_length=episode_length,
         duration_seconds=duration,
-        sample_fps=sample_fps,
+        requested_sample_fps=sample_fps,
+        effective_sample_fps=effective_sample_fps,
+        sampled_frame_count=len(sampled_indices),
         is_success=is_success,
         enable_reasoning=enable_reasoning,
     )
@@ -755,6 +787,8 @@ def _annotate_episode(
                 "task_description": TASK_DESCRIPTION,
                 "model": model,
                 "sample_fps": sample_fps,
+                "effective_sample_fps": effective_sample_fps,
+                "sampled_frame_count": len(sampled_indices),
                 "video_key": video_key,
                 "wrist_video_key": wrist_video_key,
                 "enable_reasoning": enable_reasoning,
