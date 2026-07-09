@@ -95,12 +95,16 @@ def _build_prompt(
     task_description: str,
     phase_definitions: dict[int, str],
     prev_phase: int | None,
+    gripper_width: float | None = None,
+    enable_reasoning: bool = True,
 ) -> str:
     """Build a Qwen prompt from the task description and phase definitions."""
     lines = [
         f'Task: "{task_description}"',
         "",
-        "You are annotating a robot manipulation video. "
+        "You are annotating a robot manipulation video.",
+        "The first image is the main scene view; the second image is the wrist camera view.",
+        "",
         "Classify the current frame into exactly one of these phases:",
         "",
     ]
@@ -108,15 +112,23 @@ def _build_prompt(
         lines.append(f"{phase_id}: {desc}")
     lines.append("")
 
+    if gripper_width is not None:
+        lines.append(
+            f"Current gripper width: {gripper_width:.3f} "
+            "(smaller = more closed, larger = more open)."
+        )
+        lines.append("")
+
     if prev_phase is not None:
         lines.append(f"Previous sampled frame was phase: {prev_phase}")
         lines.append("The current phase must be >= the previous phase.")
         lines.append("")
 
-    lines.append(
-        "Look at the robot arm, the gripper, and the objects. "
-        "Output ONLY JSON in this exact format:"
-    )
+    if not enable_reasoning:
+        lines.append("Do not include any thinking process. Output the final answer directly.")
+        lines.append("")
+
+    lines.append("Output ONLY a valid JSON object in this exact format:")
     lines.append('{"phase": <int>, "confidence": "high" or "medium" or "low"}')
     return "\n".join(lines)
 
@@ -156,9 +168,11 @@ def _annotate_one_sample(
     task_description: str,
     phase_definitions: dict[int, str],
     prev_phase: int | None,
+    gripper_width: float | None,
     model: str,
     cache_path: Path,
     cache: dict[tuple[int, int, str], dict[str, Any]],
+    enable_reasoning: bool = True,
 ) -> int:
     """Annotate a single sampled frame, using cache if available.
 
@@ -169,8 +183,19 @@ def _annotate_one_sample(
     if cached is not None:
         return int(cached["phase"])
 
-    prompt = _build_prompt(task_description, phase_definitions, prev_phase)
-    parsed = call_qwen_vl(images, prompt, model=model)
+    prompt = _build_prompt(
+        task_description,
+        phase_definitions,
+        prev_phase,
+        gripper_width=gripper_width,
+        enable_reasoning=enable_reasoning,
+    )
+    parsed = call_qwen_vl(
+        images,
+        prompt,
+        model=model,
+        enable_reasoning=enable_reasoning,
+    )
 
     num_phases = len(phase_definitions)
     phase = int(parsed.get("phase", 0))
@@ -181,6 +206,7 @@ def _annotate_one_sample(
         "frame_index": frame_index,
         "task_description": task_description,
         "model": model,
+        "enable_reasoning": enable_reasoning,
         "response": parsed,
         "phase": phase,
     }
@@ -251,6 +277,7 @@ def _annotate_episode(
     cache: dict[tuple[int, int], dict[str, Any]],
     video_key: str,
     wrist_video_key: str | None,
+    enable_reasoning: bool = True,
 ) -> pd.DataFrame | None:
     """Annotate one episode using Qwen-VL (sequential samples within episode)."""
     df = pd.read_parquet(ep_file)
@@ -259,6 +286,13 @@ def _annotate_episode(
 
     episode_index = int(df["episode_index"].iloc[0])
     episode_length = len(df)
+
+    # Extract gripper width from state for state-aware prompting.
+    gripper_widths = np.zeros(episode_length, dtype=np.float32)
+    if "state" in df.columns:
+        states = np.stack(df["state"].values)
+        gripper_qpos = states[:, 6:]
+        gripper_widths = np.abs(gripper_qpos).sum(axis=-1)
 
     main_video_path = _infer_video_path(dataset_path, episode_index, video_key=video_key)
     if main_video_path is None:
@@ -291,9 +325,11 @@ def _annotate_episode(
             task_description=task_description,
             phase_definitions=phase_definitions,
             prev_phase=prev_phase,
+            gripper_width=float(gripper_widths[frame_idx]),
             model=model,
             cache_path=cache_path,
             cache=cache,
+            enable_reasoning=enable_reasoning,
         )
         sampled_results.append((frame_idx, phase))
         prev_phase = phase
@@ -326,6 +362,7 @@ def annotate_dataset_with_qwen(
     wrist_video_key: str | None = "wrist_image",
     max_workers: int = 2,
     cache_name: str = "qwen_phase_cache.jsonl",
+    enable_reasoning: bool = True,
 ) -> Path:
     """Annotate an entire LeRobot dataset using Qwen-VL.
 
@@ -336,11 +373,12 @@ def annotate_dataset_with_qwen(
         num_phases: Number of phases (should match len(phase_definitions)).
         output_name: Output parquet filename under meta/.
         sample_interval: Call Qwen every N frames.
-        model: DashScope model name.
+        model: DashScope or local vLLM model name.
         video_key: Key for the main camera video.
         wrist_video_key: Key for the wrist camera video, or None to disable.
         max_workers: Number of episodes processed in parallel.
         cache_name: Cache filename under meta/.
+        enable_reasoning: Whether to request model reasoning/thinking.
 
     Returns:
         Path to the written parquet file.
@@ -380,6 +418,7 @@ def annotate_dataset_with_qwen(
                     cache,
                     video_key,
                     wrist_video_key,
+                    enable_reasoning,
                 ): ep_file
                 for ep_file in ep_files
             }
@@ -407,6 +446,7 @@ def annotate_dataset_with_qwen(
                 cache,
                 video_key,
                 wrist_video_key,
+                enable_reasoning,
             )
             if ep_df is not None:
                 records.append(ep_df)

@@ -1,7 +1,12 @@
-"""DashScope Qwen-VL API client for phase annotation.
+"""Qwen-VL API client for phase annotation.
 
-Requires the environment variable ``DASHSCOPE_API_KEY`` to be set.
-Uses the standard HTTP API so no extra SDK installation is needed.
+Supports two backends:
+1. DashScope (cloud): default, uses ``DASHSCOPE_API_KEY``.
+2. Local vLLM/OpenAI-compatible server: selected via ``QWEN_API_BASE`` env var.
+
+For local vLLM, set e.g.:
+    export QWEN_API_BASE=http://localhost:8001/v1
+    export QWEN_MODEL=qwen-local
 """
 
 from __future__ import annotations
@@ -28,13 +33,23 @@ def _get_api_key() -> str:
     if not key:
         raise RuntimeError(
             "DASHSCOPE_API_KEY environment variable is not set. "
-            "Get a key from https://dashscope.aliyun.com and export it."
+            "Get a key from https://dashscope.aliyun.com and export it, "
+            "or set QWEN_API_BASE to use a local vLLM server."
         )
     return key
 
 
+def _api_base() -> str:
+    return os.environ.get("QWEN_API_BASE", DASHSCOPE_URL).rstrip("/")
+
+
+def _is_local_mode() -> bool:
+    base = _api_base()
+    return "localhost" in base or "127.0.0.1" in base or ":800" in base
+
+
 def _pil_to_base64(img: Image.Image, fmt: str = "JPEG") -> str:
-    """Encode a PIL image to base64 string for the DashScope API."""
+    """Encode a PIL image to base64 string."""
     buffer = io.BytesIO()
     if img.mode != "RGB":
         img = img.convert("RGB")
@@ -42,12 +57,45 @@ def _pil_to_base64(img: Image.Image, fmt: str = "JPEG") -> str:
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
 
+def _build_local_messages(
+    images: list[Image.Image],
+    prompt: str,
+) -> list[dict[str, Any]]:
+    """Build OpenAI-compatible message content with images."""
+    content: list[dict[str, Any]] = []
+    for img in images:
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{_pil_to_base64(img)}"},
+        })
+    content.append({"type": "text", "text": prompt})
+    return [{"role": "user", "content": content}]
+
+
+def _build_dashscope_content(
+    images: list[Image.Image],
+    prompt: str,
+) -> list[dict[str, Any]]:
+    """Build DashScope-compatible message content with images."""
+    content: list[dict[str, Any]] = []
+    for img in images:
+        content.append({"image": f"data:image/jpeg;base64,{_pil_to_base64(img)}"})
+    content.append({"text": prompt})
+    return content
+
+
 def _extract_text(response_json: dict[str, Any]) -> str:
-    """Extract assistant text from a DashScope response, handling several shapes."""
+    """Extract assistant text from either DashScope or OpenAI response shapes."""
+    # DashScope shape: output.choices[0].message.content
     choices = response_json.get("output", {}).get("choices", [])
     if not choices:
+        # OpenAI / vLLM shape: choices[0].message.content
+        choices = response_json.get("choices", [])
+    if not choices:
         raise ValueError(f"No choices in response: {response_json}")
-    content = choices[0].get("message", {}).get("content", "")
+
+    message = choices[0].get("message", {})
+    content = message.get("content", "")
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -56,13 +104,19 @@ def _extract_text(response_json: dict[str, Any]) -> str:
     return str(content)
 
 
+def _strip_thinking(text: str) -> str:
+    """Remove <think>...</think> tags if the model emitted them inline."""
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    return text.strip()
+
+
 def _parse_json_phase(text: str, num_phases: int) -> dict[str, Any]:
     """Parse a phase number from model output text.
 
-    First tries to parse the whole text as JSON, then falls back to extracting
-    the first JSON object, and finally to regex search for a phase number.
+    First strips inline thinking tags, then tries whole-text JSON, then the
+    first JSON object, and finally regex search for a phase number.
     """
-    text = text.strip()
+    text = _strip_thinking(text)
 
     # Try whole-text JSON.
     try:
@@ -97,58 +151,70 @@ def call_qwen_vl(
     prompt: str,
     model: str = DEFAULT_MODEL,
     max_retries: int = MAX_RETRIES,
+    enable_reasoning: bool = True,
 ) -> dict[str, Any]:
     """Call Qwen-VL with a list of PIL images and a text prompt.
 
     Args:
         images: List of PIL images (e.g. main view + wrist view).
         prompt: Text prompt describing the task and phase definitions.
-        model: DashScope model name.
+        model: Model name (DashScope model or local vLLM served model).
         max_retries: Number of retries on transient failures.
+        enable_reasoning: Whether to request reasoning/thinking from the model.
+            For local Qwen3 models this is passed via ``extra_body`` and
+            reinforced in the prompt.
 
     Returns:
         Parsed response dict, e.g. {"phase": 2, "confidence": "high"}.
     """
-    api_key = _get_api_key()
+    api_base = _api_base()
+    local_mode = _is_local_mode()
 
-    content: list[dict[str, Any]] = []
-    for img in images:
-        content.append({"image": f"data:image/jpeg;base64,{_pil_to_base64(img)}"})
-    content.append({"text": prompt})
-
-    payload = {
-        "model": model,
-        "input": {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": content,
-                }
-            ]
-        },
-    }
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if local_mode:
+        # Local vLLM usually does not require an API key, but accept one if set.
+        api_key = os.environ.get("DASHSCOPE_API_KEY")
+        if api_key and api_key != "local":
+            headers["Authorization"] = f"Bearer {api_key}"
+        url = f"{api_base}/chat/completions"
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": _build_local_messages(images, prompt),
+        }
+        # Qwen3 models support an enable_thinking flag; pass it through vLLM.
+        payload["extra_body"] = {"enable_thinking": enable_reasoning}
+    else:
+        api_key = _get_api_key()
+        headers["Authorization"] = f"Bearer {api_key}"
+        url = api_base
+        payload = {
+            "model": model,
+            "input": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": _build_dashscope_content(images, prompt),
+                    }
+                ]
+            },
+        }
 
     last_error: Exception | None = None
     for attempt in range(max_retries):
         try:
             response = requests.post(
-                DASHSCOPE_URL,
+                url,
                 headers=headers,
                 json=payload,
-                timeout=120,
+                timeout=180,
             )
             if response.status_code == 400:
                 print(f"[debug] 400 response body: {response.text}")
             response.raise_for_status()
             response_json = response.json()
 
-            if response_json.get("code") is not None and response_json.get("code") != "":
-                # DashScope sometimes returns errors with HTTP 200.
+            # DashScope sometimes returns errors with HTTP 200.
+            if not local_mode and response_json.get("code") not in (None, ""):
                 raise RuntimeError(f"DashScope API error: {response_json}")
 
             text = _extract_text(response_json)
