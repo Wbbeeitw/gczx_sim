@@ -22,16 +22,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import av
 import numpy as np
 import pandas as pd
 from PIL import Image
 from pydantic import BaseModel, Field
 from tqdm import tqdm
 
-from common_annotator import compute_progress_per_segment
-from qwen_client import call_qwen_vl, DEFAULT_MODEL
-from task1 import annotate_task1
+try:
+    from common_annotator import compute_progress_per_segment
+    from qwen_client import call_qwen_vl, DEFAULT_MODEL
+    from task1 import annotate_task1
+except ModuleNotFoundError:
+    from phase_split_script.common_annotator import compute_progress_per_segment
+    from phase_split_script.qwen_client import call_qwen_vl, DEFAULT_MODEL
+    from phase_split_script.task1 import annotate_task1
 
 
 # --------------------------------------------------------------------------- #
@@ -232,6 +236,14 @@ def _infer_video_path(
 
 def _load_video(video_path: Path) -> tuple[list[Image.Image], float]:
     """Decode all frames from a video file and return PIL images plus fps."""
+    try:
+        import av
+    except ModuleNotFoundError as e:
+        raise ModuleNotFoundError(
+            "PyAV is required to decode rollout videos. Install the embodied "
+            "dependencies or run inside the dataset annotation environment."
+        ) from e
+
     container = av.open(str(video_path))
     stream = container.streams.video[0]
     fps = float(stream.average_rate) if stream.average_rate else DEFAULT_VIDEO_FPS

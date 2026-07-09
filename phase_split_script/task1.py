@@ -22,11 +22,18 @@ from pathlib import Path
 
 import numpy as np
 
-from common_annotator import (
-    annotate_dataset,
-    detect_segments,
-    smooth_1d,
-)
+try:
+    from common_annotator import (
+        annotate_dataset,
+        detect_segments,
+        smooth_1d,
+    )
+except ModuleNotFoundError:
+    from phase_split_script.common_annotator import (
+        annotate_dataset,
+        detect_segments,
+        smooth_1d,
+    )
 
 # --------------------------------------------------------------------------- #
 # State layout

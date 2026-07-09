@@ -84,6 +84,33 @@ def _build_dashscope_content(
     return content
 
 
+def _join_text_parts(value: Any) -> str:
+    """Flatten text-like response fields into a single string."""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        parts = [_join_text_parts(item) for item in value]
+        return "\n".join(part for part in parts if part)
+    if isinstance(value, dict):
+        if value.get("type") in {"image_url", "image"}:
+            return ""
+        parts = [
+            _join_text_parts(value.get("text")),
+            _join_text_parts(value.get("content")),
+            _join_text_parts(value.get("output_text")),
+        ]
+        return "\n".join(part for part in parts if part)
+    return ""
+
+
+def _summarize_response(response_json: dict[str, Any], limit: int = 1200) -> str:
+    """Build a compact response summary for parse/debug errors."""
+    text = json.dumps(response_json, ensure_ascii=False)
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}...(truncated)"
+
+
 def _extract_text(response_json: dict[str, Any]) -> str:
     """Extract assistant text from either DashScope or OpenAI response shapes."""
     # DashScope shape: output.choices[0].message.content
@@ -94,14 +121,39 @@ def _extract_text(response_json: dict[str, Any]) -> str:
     if not choices:
         raise ValueError(f"No choices in response: {response_json}")
 
-    message = choices[0].get("message", {})
-    content = message.get("content", "")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        texts = [item.get("text", "") for item in content if isinstance(item, dict)]
-        return "\n".join(texts)
-    return str(content)
+    choice = choices[0]
+    message = choice.get("message", {})
+    candidates = [
+        _join_text_parts(message.get("content")),
+        _join_text_parts(message.get("text")),
+        _join_text_parts(choice.get("text")),
+        _join_text_parts(choice.get("output_text")),
+        _join_text_parts(response_json.get("text")),
+        _join_text_parts(response_json.get("output_text")),
+    ]
+    text = "\n".join(part for part in candidates if part).strip()
+    if text:
+        return text
+
+    reasoning = "\n".join(
+        part
+        for part in (
+            _join_text_parts(message.get("reasoning_content")),
+            _join_text_parts(message.get("reasoning")),
+            _join_text_parts(choice.get("reasoning_content")),
+        )
+        if part
+    ).strip()
+    if reasoning:
+        raise ValueError(
+            "Assistant content missing in response; found reasoning text only. "
+            f"Response summary: {_summarize_response(response_json)}"
+        )
+
+    raise ValueError(
+        "No assistant text found in response. "
+        f"Response summary: {_summarize_response(response_json)}"
+    )
 
 
 def _strip_thinking(text: str) -> str:
@@ -170,14 +222,12 @@ def call_qwen_vl(
         model: Model name (DashScope model or local vLLM served model).
         max_retries: Number of retries on transient failures.
         enable_reasoning: Whether to request reasoning/thinking from the model.
-            For local Qwen3 models this is passed via ``extra_body`` and
+            For local Qwen3 models this is passed via ``chat_template_kwargs`` and
             reinforced in the prompt.
         response_parser: Optional callable that parses raw model text into a dict.
             If None, the default per-frame phase parser is used.
         max_tokens: Maximum number of output tokens. Increase this when the model
             needs to emit long reasoning plus a structured JSON answer.
-        enable_reasoning: Whether to enable Qwen3 thinking mode. Passed as the
-            top-level ``enable_thinking`` field for local vLLM.
 
     Returns:
         Parsed response dict, e.g. {"phase": 2, "confidence": "high"}.
@@ -196,7 +246,7 @@ def call_qwen_vl(
             "model": model,
             "messages": _build_local_messages(images, prompt),
             "max_tokens": max_tokens,
-            "enable_thinking": enable_reasoning,
+            "chat_template_kwargs": {"enable_thinking": enable_reasoning},
         }
     else:
         api_key = _get_api_key()
@@ -239,8 +289,9 @@ def call_qwen_vl(
             return response_parser(text)
         except Exception as e:
             last_error = e
-            wait = 2 ** attempt
-            time.sleep(wait)
+            if attempt + 1 < max_retries:
+                wait = 2 ** attempt
+                time.sleep(wait)
 
     raise RuntimeError(
         f"Qwen-VL API call failed after {max_retries} retries: {last_error}"
