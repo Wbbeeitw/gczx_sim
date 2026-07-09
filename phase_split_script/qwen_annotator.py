@@ -98,14 +98,11 @@ def _build_prompt(
     gripper_width: float | None = None,
     enable_reasoning: bool = True,
 ) -> str:
-    """Build a Qwen prompt from the task description and phase definitions."""
+    """Build a compact Qwen prompt from the task description and phase definitions."""
     lines = [
         f'Task: "{task_description}"',
         "",
-        "You are annotating a robot manipulation video.",
-        "The first image is the main scene view; the second image is the wrist camera view.",
-        "",
-        "Classify the current frame into exactly one of these phases:",
+        "Classify the current frame into one of these phases:",
         "",
     ]
     for phase_id, desc in sorted(phase_definitions.items()):
@@ -119,18 +116,11 @@ def _build_prompt(
         )
         lines.append("")
 
-    if prev_phase is not None:
-        lines.append(f"Previous sampled frame was phase: {prev_phase}")
-        lines.append("The current phase must be >= the previous phase.")
-        lines.append("")
-
     if not enable_reasoning:
         lines.append("Do not include any thinking process. Output the final answer directly.")
         lines.append("")
 
-    lines.append("Output ONLY the phase number (0-5).")
-    lines.append("Do not output JSON, explanations, confidence scores, or any extra text.")
-    lines.append("Example: 2")
+    lines.append('Output ONLY JSON: {"phase": <int 0-5>, "confidence": "high" or "low"}')
     return "\n".join(lines)
 
 
@@ -177,7 +167,8 @@ def _annotate_one_sample(
 ) -> int:
     """Annotate a single sampled frame, using cache if available.
 
-    Returns the phase number.
+    Returns the phase number. Low-confidence predictions fall back to the
+    previous phase to avoid introducing noise.
     """
     key = (episode_index, frame_index, task_description)
     cached = cache.get(key)
@@ -201,6 +192,11 @@ def _annotate_one_sample(
     num_phases = len(phase_definitions)
     phase = int(parsed.get("phase", 0))
     phase = max(0, min(phase, num_phases - 1))
+
+    confidence = str(parsed.get("confidence", "low")).lower()
+    if confidence == "low" and prev_phase is not None:
+        # Trust the previous decision rather than a low-confidence guess.
+        phase = prev_phase
 
     entry = {
         "episode_index": episode_index,
@@ -231,8 +227,15 @@ def _sampled_indices(episode_length: int, sample_interval: int) -> list[int]:
 def _sampled_phase_array(
     sampled_results: list[tuple[int, int]],
     num_phases: int,
+    max_regress: int = 1,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Build a monotonic phase array from sampled (frame_index, phase) pairs."""
+    """Build a temporally-smooth phase array from sampled (frame_index, phase) pairs.
+
+    The phase is allowed to increase freely but can only drop by at most
+    ``max_regress`` steps at a time. This prevents a single bad prediction
+    from locking the rest of the episode into a high phase while still
+    allowing small corrections.
+    """
     sampled_results = sorted(set(sampled_results), key=lambda x: x[0])
     if not sampled_results:
         return np.array([], dtype=int), np.array([], dtype=int)
@@ -240,9 +243,9 @@ def _sampled_phase_array(
     frame_indices = np.array([x[0] for x in sampled_results], dtype=int)
     phases = np.array([x[1] for x in sampled_results], dtype=int)
 
-    # Enforce monotonicity: phase can stay the same or increase.
+    # Allow small regressions to recover from single-frame misclassifications.
     for i in range(1, len(phases)):
-        phases[i] = max(phases[i], phases[i - 1])
+        phases[i] = max(phases[i], phases[i - 1] - max_regress)
 
     phases = np.clip(phases, 0, num_phases - 1)
     return frame_indices, phases
@@ -335,7 +338,7 @@ def _annotate_episode(
         sampled_results.append((frame_idx, phase))
         prev_phase = phase
 
-    frame_indices, phases = _sampled_phase_array(sampled_results, num_phases)
+    frame_indices, phases = _sampled_phase_array(sampled_results, num_phases, max_regress=1)
     full_phase = _interpolate_phases(frame_indices, phases, episode_length)
     phase_progress, global_progress, overall_progress = compute_progress(
         full_phase, num_phases
