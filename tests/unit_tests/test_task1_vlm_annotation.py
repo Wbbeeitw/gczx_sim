@@ -40,6 +40,7 @@ def test_build_prompt_mentions_combined_manipulation_and_optional_skips():
     assert f"end with phase {task1_vlm.SUCCESS_PHASE}" in prompt
     assert "Typical valid success chains: 0->1->3 or 0->1->2->3" in prompt
     assert "the first segment should be phase 0" in prompt
+    assert "passive reset-settling motion is ALWAYS phase 0" in prompt
 
 
 def test_compose_multiview_frame_adds_header_and_wrist_panel():
@@ -82,6 +83,30 @@ def test_limit_sampled_indices_respects_32_image_cap():
     assert capped[0] == indices[0]
     assert capped[-1] == indices[-1]
     assert capped == sorted(capped)
+
+
+def test_sample_frame_indices_preserves_dense_early_window():
+    indices = task1_vlm._sample_frame_indices(
+        episode_length=100,
+        sample_fps=1.0,
+        video_fps=10.0,
+    )
+
+    assert indices[:11] == [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
+
+
+def test_limit_sampled_indices_preserves_protected_prefix():
+    indices = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18] + list(range(20, 520, 10))
+    capped = task1_vlm._limit_sampled_indices(
+        indices,
+        max_images=16,
+        protected_prefix=8,
+    )
+
+    assert capped[:8] == indices[:8]
+    assert capped[0] == 0
+    assert capped[-1] == indices[-1]
+    assert len(capped) == 16
 
 
 def test_effective_sample_fps_reflects_capped_schedule():

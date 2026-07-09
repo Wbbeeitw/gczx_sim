@@ -43,16 +43,18 @@ except ModuleNotFoundError:
 # Task-specific definitions
 # --------------------------------------------------------------------------- #
 TASK_DESCRIPTION = "Put both the cream cheese box and the butter in the basket"
-PROMPT_VERSION = "task1_v6_four_phase_strict_sequences"
+PROMPT_VERSION = "task1_v7_reset_settling_and_dense_early_sampling"
 MAX_IMAGES_PER_PROMPT = 32
+EARLY_DENSE_SECONDS = 2.0
+EARLY_DENSE_FPS = 5.0
 
 NUM_PHASES = 4
 SUCCESS_PHASE = NUM_PHASES - 1
 
 PHASE_DEFINITIONS: dict[int, str] = {
-    0: "no stable task progress yet; both target objects remain outside the basket and no clear successful grasp, displacement, or grouping has been established",
-    1: "clear early task progress; at least one target object is clearly grasped, displaced, pushed, or intentionally grouped, but no object is yet stably inside the basket",
-    2: "late partial-completion milestone; one target object is stably inside the basket or the final joint transfer setup is clearly established, but the task is not complete",
+    0: "reset-settling or pre-manipulation stage; both target objects remain outside the basket and the robot has not yet established sustained, useful control over an object",
+    1: "clear early robot-caused manipulation after settling; at least one target object is under sustained robot control or has been deliberately relocated by the robot, but no object is yet stably inside the basket",
+    2: "late partial-completion milestone; one target object is stably inside the basket or both objects are under a clear final joint-transfer setup at the basket, but the task is not complete",
     3: "both target objects are stably inside the basket / task completion",
 }
 
@@ -262,22 +264,63 @@ def _sample_frame_indices(
     sample_fps: float,
     video_fps: float,
 ) -> list[int]:
-    """Return sampled frame indices at ``sample_fps``, including first/last."""
+    """Return sampled frame indices with dense early coverage plus first/last."""
     if episode_length <= 0:
         return []
     interval = max(1, int(round(video_fps / sample_fps)))
-    indices = list(range(0, episode_length, interval))
-    if indices[-1] != episode_length - 1:
-        indices.append(episode_length - 1)
+    base_indices = list(range(0, episode_length, interval))
+    early_interval = max(1, int(round(video_fps / EARLY_DENSE_FPS)))
+    early_stop = min(episode_length - 1, int(round(video_fps * EARLY_DENSE_SECONDS)))
+    early_indices = list(range(0, early_stop + 1, early_interval))
+    indices = sorted(set(base_indices) | set(early_indices) | {episode_length - 1})
     return indices
 
 
-def _limit_sampled_indices(indices: list[int], max_images: int) -> list[int]:
-    """Uniformly downsample sampled indices to satisfy image-count limits."""
+def _protected_prefix_count(
+    indices: list[int],
+    video_fps: float,
+    protected_seconds: float,
+) -> int:
+    """Return how many sampled indices lie within the protected early window."""
+    if not indices:
+        return 0
+    protected_max = int(round(video_fps * protected_seconds))
+    return sum(1 for idx in indices if idx <= protected_max)
+
+
+def _limit_sampled_indices(
+    indices: list[int],
+    max_images: int,
+    protected_prefix: int = 0,
+) -> list[int]:
+    """Downsample sampled indices while preserving a protected early prefix."""
     if len(indices) <= max_images:
         return indices
-    keep_positions = np.linspace(0, len(indices) - 1, num=max_images, dtype=int)
-    reduced = [indices[pos] for pos in keep_positions]
+    protected_prefix = max(0, min(protected_prefix, len(indices)))
+    protected = indices[:protected_prefix]
+    remaining = indices[protected_prefix:]
+
+    if len(protected) >= max_images:
+        reduced = protected[:max_images]
+        reduced[-1] = indices[-1]
+    else:
+        remaining_budget = max_images - len(protected)
+        if remaining_budget <= 0 or not remaining:
+            reduced = protected[:max_images]
+        else:
+            keep_positions = np.linspace(
+                0,
+                len(remaining) - 1,
+                num=remaining_budget,
+                dtype=int,
+            )
+            reduced = protected + [remaining[pos] for pos in keep_positions]
+
+    deduped: list[int] = []
+    for idx in reduced:
+        if not deduped or idx != deduped[-1]:
+            deduped.append(idx)
+    reduced = deduped
     reduced[0] = indices[0]
     reduced[-1] = indices[-1]
     return reduced
@@ -441,10 +484,13 @@ def _build_prompt(
         "Task-specific interpretation notes:\n"
         "  - Use phase changes only for stable world-state milestones. Short pauses, hesitations, "
         "or repeated attempts inside the same milestone should stay in the same phase.\n"
-        "  - Phase 0 includes reaching, hovering, alignment, or failed contact attempts that do NOT yet create a "
-        "clear persistent object displacement or grouping result.\n"
-        "  - Phase 1 begins only after clear task progress is visible: at least one object has been meaningfully "
-        "moved, grasped, pushed, or intentionally grouped, but neither object is yet stably inside the basket.\n"
+        "  - Important: at the start of many episodes, the objects visibly fall, bounce, or slide onto the table "
+        "because of environment reset or gravity. This passive reset-settling motion is ALWAYS phase 0, not phase 1.\n"
+        "  - Phase 0 includes reset settling, reaching, hovering, alignment, or failed contact attempts that do NOT "
+        "yet create a clear robot-caused persistent object relocation under sustained control.\n"
+        "  - Phase 1 begins only after clear task progress is visible: the robot, not gravity, has established "
+        "sustained useful control over at least one object and has meaningfully moved, grasped, pushed, dragged, "
+        "or intentionally grouped it, but neither object is yet stably inside the basket.\n"
         "  - Phase 2 is reserved for late unfinished states: one object is already stably in the basket, or the "
         "robot is clearly in a final joint-transfer setup for both objects, but the task is not yet complete.\n"
         "  - Some episodes combine substeps: the robot may drop one object near the other, "
@@ -903,7 +949,14 @@ def _annotate_episode(
             wrist_frames, _ = _load_video(wrist_video_path)
 
     sampled_indices = _sample_frame_indices(episode_length, sample_fps, fps)
-    sampled_indices = _limit_sampled_indices(sampled_indices, MAX_IMAGES_PER_PROMPT)
+    protected_prefix = _protected_prefix_count(
+        sampled_indices, fps, EARLY_DENSE_SECONDS
+    )
+    sampled_indices = _limit_sampled_indices(
+        sampled_indices,
+        MAX_IMAGES_PER_PROMPT,
+        protected_prefix=protected_prefix,
+    )
     sampled_images = _build_sampled_images(frames, wrist_frames, sampled_indices, fps)
     effective_sample_fps = _effective_sample_fps(sampled_indices, fps, episode_length)
 
