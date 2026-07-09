@@ -113,12 +113,19 @@ def _strip_thinking(text: str) -> str:
 def _parse_json_phase(text: str, num_phases: int) -> dict[str, Any]:
     """Parse a phase number from model output text.
 
-    First strips inline thinking tags, then tries whole-text JSON, then the
-    first JSON object, and finally regex search for a phase number.
+    First strips inline thinking tags, then tries a single phase number,
+    then JSON formats for backward compatibility.
     """
     text = _strip_thinking(text)
 
-    # Try whole-text JSON.
+    # Primary: the model was asked to output ONLY a single number.
+    stripped = text.strip()
+    if re.fullmatch(r"\d+", stripped):
+        phase = int(stripped)
+        if 0 <= phase < num_phases:
+            return {"phase": phase}
+
+    # Backward compatibility: try whole-text JSON.
     try:
         parsed = json.loads(text)
         if isinstance(parsed, dict) and "phase" in parsed:
@@ -126,7 +133,7 @@ def _parse_json_phase(text: str, num_phases: int) -> dict[str, Any]:
     except json.JSONDecodeError:
         pass
 
-    # Try extracting the first JSON object from the text.
+    # Backward compatibility: try extracting the first JSON object.
     match = re.search(r"\{.*?\}", text, re.DOTALL)
     if match:
         try:

@@ -128,8 +128,9 @@ def _build_prompt(
         lines.append("Do not include any thinking process. Output the final answer directly.")
         lines.append("")
 
-    lines.append("Output ONLY a valid JSON object in this exact format:")
-    lines.append('{"phase": <int>, "confidence": "high" or "medium" or "low"}')
+    lines.append("Output ONLY the phase number (0-5).")
+    lines.append("Do not output JSON, explanations, confidence scores, or any extra text.")
+    lines.append("Example: 2")
     return "\n".join(lines)
 
 
