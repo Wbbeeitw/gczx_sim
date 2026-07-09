@@ -141,4 +141,4 @@ def test_call_qwen_vl_does_not_sleep_after_final_failed_attempt(monkeypatch):
 def test_task1_vlm_imports_without_pyav_installed():
     module = importlib.import_module("phase_split_script.task1_vlm")
 
-    assert module.NUM_PHASES == 6
+    assert module.NUM_PHASES == 4

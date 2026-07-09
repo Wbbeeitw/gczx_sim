@@ -27,7 +27,7 @@ def test_build_prompt_mentions_combined_manipulation_and_optional_skips():
         requested_sample_fps=0.5,
         effective_sample_fps=0.5,
         sampled_frame_count=26,
-        is_success=None,
+        is_success=True,
         enable_reasoning=False,
     )
 
@@ -36,6 +36,7 @@ def test_build_prompt_mentions_combined_manipulation_and_optional_skips():
     assert "stable world-state milestones" in prompt
     assert "Do not use phase 0 for later stalls" in prompt
     assert "Frames actually provided to you: 26" in prompt
+    assert f"end with phase {task1_vlm.SUCCESS_PHASE}" in prompt
 
 
 def test_compose_multiview_frame_adds_header_and_wrist_panel():
@@ -107,6 +108,14 @@ def test_compute_task1_progress_freezes_failed_terminal_segment():
     assert phase_progress[:4].tolist() == [0.0, 1.0, 0.0, 1.0]
     assert phase_progress[4:].tolist() == [0.0, 0.0, 0.0]
     assert global_progress[4:].tolist() == [3 / task1_vlm.NUM_PHASES] * 3
+
+
+def test_map_rule_task1_phase_to_milestone_collapses_legacy_6_phase_labels():
+    old_phase = np.array([0, 1, 2, 3, 4, 5], dtype=int)
+    new_phase = task1_vlm._map_rule_task1_phase_to_milestone(old_phase)
+
+    assert task1_vlm.NUM_PHASES == 4
+    assert new_phase.tolist() == [0, 1, 2, 2, 2, 3]
 
 
 def test_validate_milestone_sequence_rejects_regression():

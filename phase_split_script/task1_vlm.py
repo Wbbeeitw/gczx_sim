@@ -43,19 +43,17 @@ except ModuleNotFoundError:
 # Task-specific definitions
 # --------------------------------------------------------------------------- #
 TASK_DESCRIPTION = "Put both the cream cheese box and the butter in the basket"
-PROMPT_VERSION = "task1_v4_monotonic_milestones"
+PROMPT_VERSION = "task1_v5_four_phase_milestones"
 MAX_IMAGES_PER_PROMPT = 32
 
-NUM_PHASES = 6
+NUM_PHASES = 4
 SUCCESS_PHASE = NUM_PHASES - 1
 
 PHASE_DEFINITIONS: dict[int, str] = {
     0: "no stable task progress yet; both target objects remain outside the basket",
-    1: "early progress milestone; at least one target object is clearly grasped, displaced, or actively arranged",
-    2: "mid-task setup milestone; the targets are intentionally grouped, staged, or otherwise prepared for transfer, still with no stable in-basket result",
-    3: "late partial-completion milestone; one stable subgoal is achieved, such as one target stably in the basket or an equivalent consolidated setup for the final transfer",
-    4: "final placement attempt is underway at the basket, but both targets are not yet stably settled inside",
-    5: "both target objects are stably inside the basket / task completion",
+    1: "clear early task progress; at least one target object is grasped, moved, or intentionally arranged",
+    2: "late partial-completion milestone; one stable subgoal is achieved or the final joint transfer setup is clearly established, but the task is not complete",
+    3: "both target objects are stably inside the basket / task completion",
 }
 
 PHASE_NAME_TO_ID = {name.lower(): phase_id for phase_id, name in PHASE_DEFINITIONS.items()}
@@ -395,7 +393,7 @@ def _build_prompt(
     if is_success is True:
         outcome_hint = (
             "Environment outcome hint: this episode SUCCEEDED. "
-            "The robot should complete all phases and end with phase 5."
+            f"The robot should complete all phases and end with phase {SUCCESS_PHASE}."
         )
     elif is_success is False:
         outcome_hint = (
@@ -443,8 +441,8 @@ def _build_prompt(
         "  - Once a milestone is reached, later segments must not go back to a smaller phase id.\n"
         "  - Do not use phase 0 for later stalls after clear task progress already happened; "
         "stalled failed episodes should remain at their highest achieved milestone.\n"
-        "  - Phase 5 should be used only when both target objects are visibly and stably "
-        "inside the basket.\n\n"
+        f"  - Phase {SUCCESS_PHASE} should be used only when both target objects are visibly "
+        "and stably inside the basket.\n\n"
         "Important rules:\n"
         "  1. Every frame must belong to exactly one contiguous phase segment.\n"
         "  2. Segments must be contiguous in time: the end of one segment equals "
@@ -569,7 +567,7 @@ def _validate_milestone_sequence(
         )
     if is_success is False and final_phase == SUCCESS_PHASE:
         raise ValueError(
-            "Failed episode cannot end in the task-complete phase 5"
+            f"Failed episode cannot end in the task-complete phase {SUCCESS_PHASE}"
         )
 
 
@@ -595,6 +593,13 @@ def _compute_task1_progress(
         global_progress[segment_start:] = phase[-1] / NUM_PHASES
 
     return phase_progress, global_progress, overall_progress
+
+
+def _map_rule_task1_phase_to_milestone(old_phase: np.ndarray) -> np.ndarray:
+    """Map the legacy 6-phase rule annotator output to 4 milestone phases."""
+    mapping = np.array([0, 1, 2, 2, 2, 3], dtype=np.int64)
+    clipped = np.clip(old_phase.astype(np.int64), 0, len(mapping) - 1)
+    return mapping[clipped]
 
 
 # --------------------------------------------------------------------------- #
@@ -704,7 +709,7 @@ def _rule_based_annotation(ep_file: Path, episode_length: int) -> np.ndarray:
         else np.empty((len(df), 0))
     )
     phase, _ = annotate_task1(actions, state, len(df))
-    return phase
+    return _map_rule_task1_phase_to_milestone(phase)
 
 
 # --------------------------------------------------------------------------- #
