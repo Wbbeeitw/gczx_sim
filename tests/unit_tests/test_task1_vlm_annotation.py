@@ -32,9 +32,9 @@ def test_build_prompt_mentions_combined_manipulation_and_optional_skips():
     )
 
     assert "combine substeps" in prompt
-    assert "drop one object near the other" in prompt
-    assert "Not every phase must appear" in prompt
-    assert "Phase 2 should be used only when a first stable single-object basket deposit" in prompt
+    assert "monotonic non-decreasing" in prompt
+    assert "stable world-state milestones" in prompt
+    assert "Do not use phase 0 for later stalls" in prompt
     assert "Frames actually provided to you: 26" in prompt
 
 
@@ -95,3 +95,42 @@ def test_build_episode_df_keeps_nullable_success_flag():
     assert "is_success" in df.columns
     assert df["is_success"].dtype.name == "boolean"
     assert df["is_success"].tolist() == [False, False, False, False]
+
+
+def test_compute_task1_progress_freezes_failed_terminal_segment():
+    phase = np.array([0, 0, 1, 1, 3, 3, 3], dtype=int)
+    phase_progress, global_progress, _ = task1_vlm._compute_task1_progress(
+        phase,
+        is_success=False,
+    )
+
+    assert phase_progress[:4].tolist() == [0.0, 1.0, 0.0, 1.0]
+    assert phase_progress[4:].tolist() == [0.0, 0.0, 0.0]
+    assert global_progress[4:].tolist() == [3 / task1_vlm.NUM_PHASES] * 3
+
+
+def test_validate_milestone_sequence_rejects_regression():
+    segments = [
+        task1_vlm.PhaseSegment(
+            name=task1_vlm.PHASE_DEFINITIONS[0],
+            start_seconds=0.0,
+            end_seconds=1.0,
+        ),
+        task1_vlm.PhaseSegment(
+            name=task1_vlm.PHASE_DEFINITIONS[2],
+            start_seconds=1.0,
+            end_seconds=2.0,
+        ),
+        task1_vlm.PhaseSegment(
+            name=task1_vlm.PHASE_DEFINITIONS[0],
+            start_seconds=2.0,
+            end_seconds=3.0,
+        ),
+    ]
+
+    try:
+        task1_vlm._validate_milestone_sequence(segments, is_success=None)
+    except ValueError as exc:
+        assert "regressed" in str(exc)
+    else:
+        raise AssertionError("phase regression should be rejected")

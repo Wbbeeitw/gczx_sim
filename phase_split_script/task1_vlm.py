@@ -2,9 +2,10 @@
 
 Unlike the frame-by-frame ``qwen_annotator.py``, this script sends a sampled
 sequence of frames from an entire episode to a Qwen-VL model served via vLLM
-(or DashScope) and asks for a contiguous phase timeline.  It explicitly
-supports failed episodes and phase regressions/repetitions (e.g. the robot
-drops an object and retries the same phase).
+(or DashScope) and asks for a contiguous phase timeline. The phases here are
+task-state milestones rather than fine-grained action atoms, so the resulting
+sequence is expected to be monotonic non-decreasing and robust to retries or
+stalls inside the same milestone.
 
 The output is a standard ``meta/<output_name>.parquet`` sidecar compatible
 with ``RevaluePhaseDataset``.
@@ -42,17 +43,18 @@ except ModuleNotFoundError:
 # Task-specific definitions
 # --------------------------------------------------------------------------- #
 TASK_DESCRIPTION = "Put both the cream cheese box and the butter in the basket"
-PROMPT_VERSION = "task1_v3_multiview_temporal_capped32"
+PROMPT_VERSION = "task1_v4_monotonic_milestones"
 MAX_IMAGES_PER_PROMPT = 32
 
 NUM_PHASES = 6
+SUCCESS_PHASE = NUM_PHASES - 1
 
 PHASE_DEFINITIONS: dict[int, str] = {
-    0: "initially approaching and establishing control of a target object",
-    1: "moving or repositioning the currently controlled target object before a stable basket deposit",
-    2: "first stable single-object basket deposit milestone is visually completed",
-    3: "securing the remaining target object or regrouping both targets for the completion attempt",
-    4: "transporting the final payload toward the basket, including carrying both targets together",
+    0: "no stable task progress yet; both target objects remain outside the basket",
+    1: "early progress milestone; at least one target object is clearly grasped, displaced, or actively arranged",
+    2: "mid-task setup milestone; the targets are intentionally grouped, staged, or otherwise prepared for transfer, still with no stable in-basket result",
+    3: "late partial-completion milestone; one stable subgoal is achieved, such as one target stably in the basket or an equivalent consolidated setup for the final transfer",
+    4: "final placement attempt is underway at the basket, but both targets are not yet stably settled inside",
     5: "both target objects are stably inside the basket / task completion",
 }
 
@@ -427,19 +429,20 @@ def _build_prompt(
         "Each image has a header with frame index and timestamp. If two views are shown, "
         "the left panel is the main view and the right panel is the wrist view.\n\n"
         "Annotate the video with the following closed phase vocabulary. "
-        "You may repeat phases if the robot retries an action (e.g. drops an object "
-        "and re-grasps it). The phase sequence must reflect what actually happens visually, "
-        "not what ideally should happen.\n\n"
+        "These phases represent achieved task-state milestones, not instantaneous arm motions. "
+        "The phase sequence must reflect what actually happens visually, not what ideally should happen.\n\n"
         "Phase vocabulary (use these exact names):\n"
         f"{phase_lines}\n\n"
         "Task-specific interpretation notes:\n"
-        "  - These phase names are semantic anchors, not a mandatory per-object checklist.\n"
+        "  - Use phase changes only for stable world-state milestones. Short pauses, hesitations, "
+        "or repeated attempts inside the same milestone should stay in the same phase.\n"
         "  - Some episodes combine substeps: the robot may drop one object near the other, "
         "then grasp both together, or finish multiple subgoals in one continuous motion.\n"
-        "  - If an intermediate phase is not visually distinct, it is valid to skip it "
-        "instead of hallucinating it.\n"
-        "  - Phase 2 should be used only when a first stable single-object basket deposit "
-        "is clearly visible as its own milestone.\n"
+        "  - Skipping a phase is allowed only when the skipped milestone never appears as a stable "
+        "visual state of its own. Otherwise prefer adjacent transitions.\n"
+        "  - Once a milestone is reached, later segments must not go back to a smaller phase id.\n"
+        "  - Do not use phase 0 for later stalls after clear task progress already happened; "
+        "stalled failed episodes should remain at their highest achieved milestone.\n"
         "  - Phase 5 should be used only when both target objects are visibly and stably "
         "inside the basket.\n\n"
         "Important rules:\n"
@@ -448,9 +451,10 @@ def _build_prompt(
         "     the start of the next.\n"
         "  3. The first segment must start at 00:00.000 and the last segment must "
         "     end at the video duration.\n"
-        "  4. If the robot retries a phase, output the same phase name again.\n"
+        "  4. The phase ids must be monotonic non-decreasing over time.\n"
         "  5. Not every phase must appear; only output phases that are visually justified.\n"
-        "  6. Use only names from the vocabulary above.\n\n"
+        "  6. Failed episodes may stay in one unfinished phase until the video ends.\n"
+        "  7. Use only names from the vocabulary above.\n\n"
         "Output format:\n"
         "First, briefly describe what you observe (1-3 sentences). Then output ONLY "
         "a JSON object in this exact format (no markdown code fences):\n\n"
@@ -521,12 +525,85 @@ def _resolve_phase_id(name: str) -> int:
     raise ValueError(f"Unknown phase name: {name!r}")
 
 
+def _merge_adjacent_same_phase(
+    segments: list[PhaseSegment],
+) -> list[PhaseSegment]:
+    """Merge adjacent segments that share the same resolved phase id."""
+    if not segments:
+        return []
+
+    merged = [segments[0].model_copy(deep=True)]
+    for seg in segments[1:]:
+        prev = merged[-1]
+        if _resolve_phase_id(seg.name) == _resolve_phase_id(prev.name):
+            prev.end_seconds = seg.end_seconds
+        else:
+            merged.append(seg.model_copy(deep=True))
+    return merged
+
+
+def _validate_milestone_sequence(
+    segments: list[PhaseSegment],
+    is_success: bool | None,
+) -> None:
+    """Validate monotonic milestone semantics for one episode."""
+    phase_ids = [_resolve_phase_id(seg.name) for seg in segments]
+    if not phase_ids:
+        raise ValueError("No validated segments remain.")
+
+    if phase_ids[0] > 1:
+        raise ValueError(
+            f"Episode starts too late in the milestone chain: phase {phase_ids[0]}"
+        )
+
+    for prev, cur in zip(phase_ids, phase_ids[1:]):
+        if cur < prev:
+            raise ValueError(
+                f"Milestone phase regressed from {prev} to {cur}; sequence must be monotonic"
+            )
+
+    final_phase = phase_ids[-1]
+    if is_success is True and final_phase != SUCCESS_PHASE:
+        raise ValueError(
+            f"Successful episode must end at phase {SUCCESS_PHASE}, got {final_phase}"
+        )
+    if is_success is False and final_phase == SUCCESS_PHASE:
+        raise ValueError(
+            "Failed episode cannot end in the task-complete phase 5"
+        )
+
+
+def _compute_task1_progress(
+    phase: np.ndarray,
+    is_success: bool | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Compute progress with failed terminal segments treated as unfinished."""
+    phase_progress, global_progress, overall_progress = compute_progress_per_segment(
+        phase, NUM_PHASES
+    )
+    if len(phase) == 0:
+        return phase_progress, global_progress, overall_progress
+
+    terminal_incomplete = is_success is False or (
+        is_success is not True and phase[-1] != SUCCESS_PHASE
+    )
+    if terminal_incomplete:
+        segment_start = len(phase) - 1
+        while segment_start > 0 and phase[segment_start - 1] == phase[-1]:
+            segment_start -= 1
+        phase_progress[segment_start:] = 0.0
+        global_progress[segment_start:] = phase[-1] / NUM_PHASES
+
+    return phase_progress, global_progress, overall_progress
+
+
 # --------------------------------------------------------------------------- #
 # Validation and conversion
 # --------------------------------------------------------------------------- #
 def _validate_and_fix_segments(
     annotation: EpisodeAnnotation,
     duration_seconds: float,
+    is_success: bool | None,
     tolerance: float = 1.0,
 ) -> list[PhaseSegment]:
     """Validate segment contiguity/coverage and apply small snapping fixes."""
@@ -591,8 +668,10 @@ def _validate_and_fix_segments(
     if not fixed:
         raise ValueError("All segments became degenerate after validation.")
 
-    # Ensure the last segment still reaches the end.
+    # Ensure the last segment still reaches the end and merge trivial duplicates.
     fixed[-1].end_seconds = duration_seconds
+    fixed = _merge_adjacent_same_phase(fixed)
+    _validate_milestone_sequence(fixed, is_success)
     return fixed
 
 
@@ -648,8 +727,8 @@ def _build_episode_df(
 ) -> pd.DataFrame:
     """Build the standard frame-level annotation dataframe for one episode."""
     episode_length = len(phase)
-    phase_progress, global_progress, overall_progress = compute_progress_per_segment(
-        phase, NUM_PHASES
+    phase_progress, global_progress, overall_progress = _compute_task1_progress(
+        phase, is_success
     )
     out = pd.DataFrame({
         "episode_index": np.full(episode_length, episode_index, dtype=np.int64),
@@ -708,7 +787,11 @@ def _annotate_episode(
             video_path = _infer_video_path(dataset_path, episode_index, video_key=video_key)
             _, fps = _load_video(video_path) if video_path else ([], DEFAULT_VIDEO_FPS)
             duration = episode_length / fps
-            segments = _validate_and_fix_segments(annotation, duration)
+            segments = _validate_and_fix_segments(
+                annotation,
+                duration,
+                cached.get("is_success"),
+            )
             phase = _segments_to_frame_phase(segments, episode_length, fps)
             return AnnotateEpisodeResult(
                 episode_index=episode_index,
@@ -780,7 +863,7 @@ def _annotate_episode(
                 response_parser=_parse_episode_annotation,
             )
             annotation = EpisodeAnnotation.model_validate(parsed)
-            segments = _validate_and_fix_segments(annotation, duration)
+            segments = _validate_and_fix_segments(annotation, duration, is_success)
             phase = _segments_to_frame_phase(segments, episode_length, fps)
             entry = {
                 "episode_index": episode_index,
@@ -811,9 +894,10 @@ def _annotate_episode(
             # On second attempt, strengthen task-specific guidance.
             if attempt == 0:
                 prompt += (
-                    "\n\nReminder: combined manipulations are allowed. If the robot groups both "
-                    "objects together, do not force a fake separate phase-2 milestone unless a "
-                    "stable single-object basket deposit is clearly visible."
+                    "\n\nReminder: output milestone states, not motion snippets. Combined "
+                    "manipulations are allowed. If a retry or stall does not create a new stable "
+                    "world state, keep the current phase instead of going backward or inventing a "
+                    "new phase transition."
                 )
             if attempt == 0 and is_success is False:
                 prompt += (
