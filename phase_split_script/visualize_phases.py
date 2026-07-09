@@ -113,38 +113,46 @@ def overlay_phase_info(
     episode_index: int,
     task: str | None = None,
 ) -> np.ndarray:
-    """Draw phase text, progress bar, and frame info on the frame."""
+    """Draw compact phase text, progress bar, and frame info on the frame.
+
+    The overlay is tuned for 256x256 LIBERO videos so that all text fits
+    within the frame width.
+    """
     h, w = frame.shape[:2]
     color = PHASE_COLORS.get(phase, (255, 255, 255))
 
-    # Black translucent top bar.
+    # Black translucent top bar (compact for small resolution).
     overlay = frame.copy()
-    cv2.rectangle(overlay, (0, 0), (w, 70), (0, 0, 0), -1)
+    cv2.rectangle(overlay, (0, 0), (w, 52), (0, 0, 0), -1)
     frame = cv2.addWeighted(overlay, 0.6, frame, 0.4, 0)
 
-    # Text info.
-    task_text = f"task: {task}" if task else ""
-    info_text = (
-        f"ep={episode_index}  frame={frame_index}  "
-        f"phase={phase}  phase_progress={phase_progress:.2f}  global_progress={global_progress:.2f}"
-    )
-    cv2.putText(frame, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-    if task_text:
-        cv2.putText(frame, task_text, (10, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+    # Compact two-line info.
+    line1 = f"ep={episode_index} frame={frame_index} phase={phase}"
+    line2 = f"p_phase={phase_progress:.2f} p_global={global_progress:.2f}"
+    cv2.putText(frame, line1, (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+    cv2.putText(frame, line2, (8, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+
+    # Optional task text (very small, truncated to frame width).
+    if task:
+        task_text = str(task)
+        max_chars = max(20, w // 6)
+        if len(task_text) > max_chars:
+            task_text = task_text[: max_chars - 3] + "..."
+        cv2.putText(frame, task_text, (8, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (200, 200, 200), 1)
 
     # Progress bar at the bottom.
-    bar_h = 20
-    bar_y = h - bar_h - 10
-    bar_w = w - 40
-    cv2.rectangle(frame, (20, bar_y), (20 + bar_w, bar_y + bar_h), (50, 50, 50), -1)
+    bar_h = 14
+    bar_y = h - bar_h - 8
+    bar_w = w - 30
+    cv2.rectangle(frame, (15, bar_y), (15 + bar_w, bar_y + bar_h), (50, 50, 50), -1)
     filled_w = int(bar_w * global_progress)
-    cv2.rectangle(frame, (20, bar_y), (20 + filled_w, bar_y + bar_h), color, -1)
-    cv2.rectangle(frame, (20, bar_y), (20 + bar_w, bar_y + bar_h), (255, 255, 255), 2)
+    cv2.rectangle(frame, (15, bar_y), (15 + filled_w, bar_y + bar_h), color, -1)
+    cv2.rectangle(frame, (15, bar_y), (15 + bar_w, bar_y + bar_h), (255, 255, 255), 1)
 
     # Current phase marker on the bar.
-    marker_x = 20 + filled_w
-    cv2.circle(frame, (marker_x, bar_y + bar_h // 2), 8, (255, 255, 255), -1)
-    cv2.circle(frame, (marker_x, bar_y + bar_h // 2), 8, color, 2)
+    marker_x = 15 + filled_w
+    cv2.circle(frame, (marker_x, bar_y + bar_h // 2), 5, (255, 255, 255), -1)
+    cv2.circle(frame, (marker_x, bar_y + bar_h // 2), 5, color, 1)
 
     return frame
 
