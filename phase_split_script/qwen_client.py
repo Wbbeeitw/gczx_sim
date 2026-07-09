@@ -19,7 +19,7 @@ from PIL import Image
 
 
 DASHSCOPE_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
-DEFAULT_MODEL = "qwen-vl-plus"
+DEFAULT_MODEL = "qwen3.6-plus"
 MAX_RETRIES = 3
 
 
