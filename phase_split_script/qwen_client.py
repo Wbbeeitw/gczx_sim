@@ -17,7 +17,7 @@ import json
 import os
 import re
 import time
-from typing import Any
+from typing import Any, Callable
 
 import requests
 from PIL import Image
@@ -159,6 +159,7 @@ def call_qwen_vl(
     model: str = DEFAULT_MODEL,
     max_retries: int = MAX_RETRIES,
     enable_reasoning: bool = True,
+    response_parser: Callable[[str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Call Qwen-VL with a list of PIL images and a text prompt.
 
@@ -170,6 +171,8 @@ def call_qwen_vl(
         enable_reasoning: Whether to request reasoning/thinking from the model.
             For local Qwen3 models this is passed via ``extra_body`` and
             reinforced in the prompt.
+        response_parser: Optional callable that parses raw model text into a dict.
+            If None, the default per-frame phase parser is used.
 
     Returns:
         Parsed response dict, e.g. {"phase": 2, "confidence": "high"}.
@@ -225,7 +228,9 @@ def call_qwen_vl(
                 raise RuntimeError(f"DashScope API error: {response_json}")
 
             text = _extract_text(response_json)
-            return _parse_json_phase(text, num_phases=10)
+            if response_parser is None:
+                return _parse_json_phase(text, num_phases=10)
+            return response_parser(text)
         except Exception as e:
             last_error = e
             wait = 2 ** attempt

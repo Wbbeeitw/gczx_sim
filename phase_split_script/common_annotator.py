@@ -73,6 +73,39 @@ def compute_progress(
     return phase_progress, global_progress, overall_progress
 
 
+def compute_progress_per_segment(
+    phase: np.ndarray, num_phases: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Compute phase_progress, global_progress, and overall_progress per segment.
+
+    Unlike :func:`compute_progress`, this treats each contiguous run of the same
+    phase as its own segment. This allows phases to repeat (e.g. ``0,1,0,1`` on a
+    failed/retry episode) without the second occurrence inheriting progress from
+    the first.
+    """
+    phase_progress = np.zeros(len(phase), dtype=np.float32)
+    if len(phase) == 0:
+        return phase_progress, phase_progress.copy(), phase_progress.copy()
+
+    segment_start = 0
+    for i in range(1, len(phase) + 1):
+        if i == len(phase) or phase[i] != phase[segment_start]:
+            segment_end = i - 1
+            length = segment_end - segment_start
+            if length > 0:
+                segment_indices = np.arange(segment_start, segment_end + 1, dtype=np.float32)
+                phase_progress[segment_start : segment_end + 1] = (
+                    segment_indices - segment_start
+                ) / length
+            else:
+                phase_progress[segment_start] = 0.0
+            segment_start = i
+
+    global_progress = (phase.astype(np.float32) + phase_progress) / num_phases
+    overall_progress = np.arange(len(phase), dtype=np.float32) / max(len(phase) - 1, 1)
+    return phase_progress, global_progress, overall_progress
+
+
 def annotate_episode(
     ep_file: Path,
     annotator: Callable[[np.ndarray, np.ndarray, int], tuple[np.ndarray, int]],

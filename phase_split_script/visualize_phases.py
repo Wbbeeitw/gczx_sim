@@ -270,8 +270,28 @@ def render_episode(
             print(f"[warn] gif encoding also failed: {e2}")
 
 
-def select_demo_episodes(dataset_path: Path, annotations: pd.DataFrame, num_total: int) -> list[int]:
-    """Select a mix of successful and failed episodes if summary is available."""
+def select_demo_episodes(
+    dataset_path: Path,
+    annotations: pd.DataFrame,
+    num_success: int | None,
+    num_failure: int | None,
+    seed: int | None,
+) -> list[int]:
+    """Select demo episodes, optionally stratified by success/failure.
+
+    Args:
+        dataset_path: Path to LeRobot dataset root.
+        annotations: Phase annotation dataframe.
+        num_success: Number of successful episodes to render, or None to disable
+            stratification.
+        num_failure: Number of failed episodes to render, or None to disable
+            stratification.
+        seed: Random seed for episode selection. If None, selection is
+            deterministic (sorted order).
+
+    Returns:
+        List of selected episode indices.
+    """
     summary = load_collection_summary(dataset_path)
     all_eps = sorted(annotations["episode_index"].unique())
 
@@ -283,18 +303,55 @@ def select_demo_episodes(dataset_path: Path, annotations: pd.DataFrame, num_tota
         success_eps = []
         failure_eps = []
 
-    selected: list[int] = []
-    selected.extend(success_eps[: num_total // 2])
-    selected.extend(failure_eps[: num_total - len(selected)])
+    # Fall back to collection_summary.json if available.
+    if not success_eps and not failure_eps and summary and isinstance(summary, dict):
+        parsed: dict[int, bool] | None = None
+        if "episodes" in summary and isinstance(summary["episodes"], list):
+            parsed = {
+                int(e["episode_index"]): bool(e.get("is_success", False))
+                for e in summary["episodes"]
+                if isinstance(e, dict) and "episode_index" in e
+            }
+        elif "is_success" in summary and isinstance(summary["is_success"], list):
+            parsed = {i: bool(v) for i, v in enumerate(summary["is_success"])}
+        if parsed:
+            success_eps = sorted([ep for ep, ok in parsed.items() if ok and ep in all_eps])
+            failure_eps = sorted([ep for ep, ok in parsed.items() if not ok and ep in all_eps])
 
-    # Fill remaining slots.
+    if num_success is None and num_failure is None:
+        # Backward-compatible behavior: first success/failure mix.
+        num_total = 4
+        selected: list[int] = []
+        selected.extend(success_eps[: num_total // 2])
+        selected.extend(failure_eps[: num_total - len(selected)])
+        for ep in all_eps:
+            if ep not in selected:
+                selected.append(ep)
+            if len(selected) >= num_total:
+                break
+        return selected[:num_total]
+
+    if seed is not None:
+        rng = np.random.default_rng(seed)
+        success_eps = list(rng.permutation(success_eps))
+        failure_eps = list(rng.permutation(failure_eps))
+        all_eps = list(rng.permutation(all_eps))
+
+    selected = []
+    if num_success is not None:
+        selected.extend(success_eps[:num_success])
+    if num_failure is not None:
+        selected.extend(failure_eps[:num_failure])
+
+    # Fill remaining slots from all episodes without duplication.
+    requested_total = (num_success or 0) + (num_failure or 0)
     for ep in all_eps:
         if ep not in selected:
             selected.append(ep)
-        if len(selected) >= num_total:
+        if len(selected) >= requested_total:
             break
 
-    return selected[:num_total]
+    return selected[:requested_total]
 
 
 def main() -> None:
@@ -305,13 +362,36 @@ def main() -> None:
         default=None,
         help="Output directory for demo videos. Defaults to <repo_root>/phase_split_script/output_demo.",
     )
-    parser.add_argument("--num_episodes", type=int, default=4, help="Number of demo episodes to render.")
+    parser.add_argument(
+        "--annotation_name",
+        type=str,
+        default="phase_progress_semantic",
+        help="Name of the annotation parquet under meta/ (without .parquet extension).",
+    )
+    parser.add_argument(
+        "--num_success",
+        type=int,
+        default=None,
+        help="Number of successful episodes to render. Enables stratified selection.",
+    )
+    parser.add_argument(
+        "--num_failure",
+        type=int,
+        default=None,
+        help="Number of failed episodes to render. Enables stratified selection.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for episode selection. If not set, selection is deterministic.",
+    )
     parser.add_argument("--video_key", default="image", help="Video key to render (image or wrist_image).")
     parser.add_argument("--task", default=None, help="Optional task description to overlay.")
     args = parser.parse_args()
 
     dataset_path = Path(args.dataset_path)
-    annotations_path = dataset_path / "meta" / "phase_progress_semantic.parquet"
+    annotations_path = dataset_path / "meta" / f"{args.annotation_name}.parquet"
     if not annotations_path.exists():
         raise FileNotFoundError(f"Annotations not found: {annotations_path}")
 
@@ -319,7 +399,7 @@ def main() -> None:
 
     if args.output_dir is None:
         repo_root = Path(__file__).resolve().parent
-        output_dir = repo_root / "output_demo"
+        output_dir = repo_root / "output_demo" / args.annotation_name
     else:
         output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -328,7 +408,9 @@ def main() -> None:
     for old_mp4 in output_dir.glob("*.mp4"):
         old_mp4.unlink()
 
-    episodes = select_demo_episodes(dataset_path, annotations, args.num_episodes)
+    episodes = select_demo_episodes(
+        dataset_path, annotations, args.num_success, args.num_failure, args.seed
+    )
 
     task = args.task
     if task is None:
@@ -336,7 +418,7 @@ def main() -> None:
         task = summary.get("task_suite_name", "")
 
     for ep_idx in episodes:
-        output_path = output_dir / f"task1_episode_{ep_idx:03d}_phases.mp4"
+        output_path = output_dir / f"{args.annotation_name}_episode_{ep_idx:03d}_phases.mp4"
         render_episode(
             dataset_path=dataset_path,
             annotations=annotations,
