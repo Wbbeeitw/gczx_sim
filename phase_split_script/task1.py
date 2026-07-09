@@ -138,7 +138,9 @@ def _estimate_zones(
 
     # Object B: mean eef pose during the second stable grasp.
     if len(closed_segments) >= 2:
-        s, e = closed_segments[_OBJ_B]
+        # _OBJ_B is the semantic index in centers/radii (2); the second
+        # closed segment is at list index 1.
+        s, e = closed_segments[1]
         pos = eef_pos[s:e]
         centers[_OBJ_B] = pos.mean(axis=0)
         radii[_OBJ_B] = _zone_radius(pos, global_range)
