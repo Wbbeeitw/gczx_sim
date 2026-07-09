@@ -160,6 +160,7 @@ def call_qwen_vl(
     max_retries: int = MAX_RETRIES,
     enable_reasoning: bool = True,
     response_parser: Callable[[str], dict[str, Any]] | None = None,
+    max_tokens: int = 2048,
 ) -> dict[str, Any]:
     """Call Qwen-VL with a list of PIL images and a text prompt.
 
@@ -173,6 +174,8 @@ def call_qwen_vl(
             reinforced in the prompt.
         response_parser: Optional callable that parses raw model text into a dict.
             If None, the default per-frame phase parser is used.
+        max_tokens: Maximum number of output tokens. Increase this when the model
+            needs to emit long reasoning plus a structured JSON answer.
 
     Returns:
         Parsed response dict, e.g. {"phase": 2, "confidence": "high"}.
@@ -190,6 +193,7 @@ def call_qwen_vl(
         payload: dict[str, Any] = {
             "model": model,
             "messages": _build_local_messages(images, prompt),
+            "max_tokens": max_tokens,
         }
         # NOTE: Some local models (e.g. Qwen3-VL-8B) do not accept the
         # enable_thinking extra_body field. Reasoning is controlled via prompt.
@@ -199,6 +203,7 @@ def call_qwen_vl(
         url = api_base
         payload = {
             "model": model,
+            "max_tokens": max_tokens,
             "input": {
                 "messages": [
                     {
