@@ -249,7 +249,7 @@ def annotate_task1(
         phase[cursor:] = 3
         return phase, num_phases
 
-    grasp_b_end = closed_segments[_OBJ_B][1]
+    grasp_b_end = closed_segments[1][1]
     enter_basket_b = _first_entry_frame(
         eef_pos, centers[_BASKET], radii[_BASKET], start=grasp_b_end
     )
