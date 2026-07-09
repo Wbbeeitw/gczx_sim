@@ -513,6 +513,25 @@ class AnnotateEpisodeResult:
     error: str | None = None
 
 
+def _build_episode_df(
+    episode_index: int,
+    phase: np.ndarray,
+) -> pd.DataFrame:
+    """Build the standard frame-level annotation dataframe for one episode."""
+    episode_length = len(phase)
+    phase_progress, global_progress, overall_progress = compute_progress_per_segment(
+        phase, NUM_PHASES
+    )
+    return pd.DataFrame({
+        "episode_index": np.full(episode_length, episode_index, dtype=np.int64),
+        "frame_index": np.arange(episode_length, dtype=np.int64),
+        "phase": phase.astype(np.int64),
+        "phase_progress": phase_progress,
+        "global_progress": global_progress,
+        "progress": overall_progress,
+    })
+
+
 def _annotate_episode(
     dataset_path: Path,
     ep_file: Path,
@@ -552,19 +571,9 @@ def _annotate_episode(
             duration = episode_length / fps
             segments = _validate_and_fix_segments(annotation, duration)
             phase = _segments_to_frame_phase(segments, episode_length, fps)
-            phase_progress, global_progress, overall_progress = compute_progress_per_segment(
-                phase, NUM_PHASES
-            )
             return AnnotateEpisodeResult(
                 episode_index=episode_index,
-                df=pd.DataFrame({
-                    "episode_index": np.full(episode_length, episode_index, dtype=np.int64),
-                    "frame_index": np.arange(episode_length, dtype=np.int64),
-                    "phase": phase.astype(np.int64),
-                    "phase_progress": phase_progress,
-                    "global_progress": global_progress,
-                    "progress": overall_progress,
-                }),
+                df=_build_episode_df(episode_index, phase),
                 source="vlm",
             )
         except Exception as e:
@@ -577,19 +586,9 @@ def _annotate_episode(
         if fallback_on_failure:
             print(f"[warn] video not found for episode {episode_index}; using rule fallback")
             phase = _rule_based_annotation(ep_file, episode_length)
-            phase_progress, global_progress, overall_progress = compute_progress_per_segment(
-                phase, NUM_PHASES
-            )
             return AnnotateEpisodeResult(
                 episode_index=episode_index,
-                df=pd.DataFrame({
-                    "episode_index": np.full(episode_length, episode_index, dtype=np.int64),
-                    "frame_index": np.arange(episode_length, dtype=np.int64),
-                    "phase": phase.astype(np.int64),
-                    "phase_progress": phase_progress,
-                    "global_progress": global_progress,
-                    "progress": overall_progress,
-                }),
+                df=_build_episode_df(episode_index, phase),
                 source="rule_fallback",
                 error="video not found",
             )
@@ -628,10 +627,6 @@ def _annotate_episode(
             annotation = EpisodeAnnotation.model_validate(parsed)
             segments = _validate_and_fix_segments(annotation, duration)
             phase = _segments_to_frame_phase(segments, episode_length, fps)
-            phase_progress, global_progress, overall_progress = compute_progress_per_segment(
-                phase, NUM_PHASES
-            )
-
             entry = {
                 "episode_index": episode_index,
                 "task_description": TASK_DESCRIPTION,
@@ -646,14 +641,7 @@ def _annotate_episode(
 
             return AnnotateEpisodeResult(
                 episode_index=episode_index,
-                df=pd.DataFrame({
-                    "episode_index": np.full(episode_length, episode_index, dtype=np.int64),
-                    "frame_index": np.arange(episode_length, dtype=np.int64),
-                    "phase": phase.astype(np.int64),
-                    "phase_progress": phase_progress,
-                    "global_progress": global_progress,
-                    "progress": overall_progress,
-                }),
+                df=_build_episode_df(episode_index, phase),
                 source="vlm",
             )
         except Exception as e:
@@ -669,19 +657,9 @@ def _annotate_episode(
     if fallback_on_failure:
         print(f"[warn] falling back to rule-based annotation for episode {episode_index}")
         phase = _rule_based_annotation(ep_file, episode_length)
-        phase_progress, global_progress, overall_progress = compute_progress_per_segment(
-            phase, NUM_PHASES
-        )
         return AnnotateEpisodeResult(
             episode_index=episode_index,
-            df=pd.DataFrame({
-                "episode_index": np.full(episode_length, episode_index, dtype=np.int64),
-                "frame_index": np.arange(episode_length, dtype=np.int64),
-                "phase": phase.astype(np.int64),
-                "phase_progress": phase_progress,
-                "global_progress": global_progress,
-                "progress": overall_progress,
-            }),
+            df=_build_episode_df(episode_index, phase),
             source="rule_fallback",
             error=str(last_error),
         )
