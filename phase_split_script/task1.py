@@ -1,15 +1,18 @@
 """Phase/progress annotation for LIBERO-10 Task 1.
 
 Task instruction: "Put both the cream cheese box and the butter in the basket"
-Semantic structure (5 phases):
-    phase 0: approaching / pre-first-grasp
-    phase 1: grasping/holding the first object
-    phase 2: between first release and second grasp
-    phase 3: grasping/holding the second object
-    phase 4: after second release / task completion
+Semantic structure (7 phases):
+    phase 0: approaching the first object
+    phase 1: stably grasping the first object
+    phase 2: transporting the first object to the basket
+    phase 3: placing/releasing the first object into the basket
+    phase 4: approaching the second object
+    phase 5: stably grasping the second object
+    phase 6: transporting and placing the second object / task completion
 
-The annotation is based on detecting two sustained gripper-close segments from
- the action vector's last dimension (gripper).
+The annotation uses the actual gripper width from the state vector rather than
+ the commanded gripper action, so that unstable grasps and slips are not
+ incorrectly treated as successful phase transitions.
 """
 
 from __future__ import annotations
@@ -19,55 +22,124 @@ from pathlib import Path
 
 import numpy as np
 
-from common_annotator import annotate_dataset, detect_grasp_segments
+from common_annotator import (
+    annotate_dataset,
+    detect_segments,
+    smooth_1d,
+)
 
 
-def annotate_task1(actions: np.ndarray, episode_length: int) -> tuple[np.ndarray, int]:
+# Number of dimensions before gripper qpos in the state vector.
+# State layout: [eef_pos(3), axis_angle(3), gripper_qpos(...)]
+_GRIPPER_QPOS_START = 6
+
+# Minimum duration (frames) for a stable grasp or a release.
+_MIN_GRASP_FRAMES = 10
+_MIN_OPEN_FRAMES = 5
+
+
+def _gripper_width(state: np.ndarray) -> np.ndarray:
+    """Extract actual gripper width from the state vector."""
+    if state.shape[1] > _GRIPPER_QPOS_START:
+        return state[:, _GRIPPER_QPOS_START:].sum(axis=-1)
+    # Fallback if state is not available.
+    return np.zeros(len(state), dtype=np.float32)
+
+
+def _adaptive_gripper_thresholds(
+    width_smooth: np.ndarray,
+    gripper_action: np.ndarray,
+) -> tuple[float, float]:
+    """Compute closed/open width thresholds from data statistics.
+
+    Uses the commanded gripper action to find frames where the policy intended
+    to close or open the gripper, then takes percentiles of the actual width
+    during those intervals.
+    """
+    # In LIBERO/OpenPI action space, positive gripper action means close.
+    close_intent = gripper_action > 0.0
+    open_intent = gripper_action <= 0.0
+
+    if close_intent.any():
+        close_thr = float(np.percentile(width_smooth[close_intent], 25))
+    else:
+        close_thr = float(np.percentile(width_smooth, 25))
+
+    if open_intent.any():
+        open_thr = float(np.percentile(width_smooth[open_intent], 75))
+    else:
+        open_thr = float(np.percentile(width_smooth, 75))
+
+    # Safety clamps so that close_thr and open_thr do not cross.
+    close_thr = min(close_thr, float(np.percentile(width_smooth, 40)))
+    open_thr = max(open_thr, float(np.percentile(width_smooth, 60)))
+
+    return close_thr, open_thr
+
+
+def annotate_task1(
+    actions: np.ndarray,
+    state: np.ndarray,
+    episode_length: int,
+) -> tuple[np.ndarray, int]:
     """Annotate one episode for task1.
 
     Args:
         actions: episode actions, shape (T, action_dim). Last dim is gripper.
+        state: episode state, shape (T, state_dim). Contains actual gripper qpos.
         episode_length: T (redundant, kept for interface consistency).
 
     Returns:
-        phase array of shape (T,) and total number of phases (5).
+        phase array of shape (T,) and total number of phases (7).
     """
     _ = episode_length
-    gripper = actions[:, -1]
+    gripper_action = actions[:, -1]
+    width = _gripper_width(state)
 
-    # Detect all sustained gripper-close segments.
-    segments = detect_grasp_segments(
-        gripper,
-        threshold=0.0,
-        smooth_window=11,
-        min_len=15,
-    )
+    # Smooth the actual gripper width to reduce single-frame noise.
+    width_smooth = smooth_1d(width.astype(np.float32), window=11)
 
-    # Keep the two longest segments (the two grasps), then sort by time.
-    segments = sorted(segments, key=lambda s: s[1] - s[0], reverse=True)[:2]
-    segments = sorted(segments, key=lambda s: s[0])
+    close_thr, open_thr = _adaptive_gripper_thresholds(width_smooth, gripper_action)
 
-    num_phases = 5
+    closed = width_smooth < close_thr
+    opened = width_smooth > open_thr
+
+    closed_segments = detect_segments(closed, min_len=_MIN_GRASP_FRAMES)
+    open_segments = detect_segments(opened, min_len=_MIN_OPEN_FRAMES)
+
+    num_phases = 7
     phase = np.zeros(len(actions), dtype=int)
-    if not segments:
+
+    if not closed_segments:
+        # No stable grasp detected; entire episode stays in phase 0.
         return phase, num_phases
 
-    # Build boundaries: start, seg1_start, seg1_end, seg2_start, seg2_end, end.
-    boundaries = [0]
-    labels = [0]
-    for seg in segments:
-        boundaries.append(seg[0])
-        labels.append(labels[-1] + 1)
-        boundaries.append(seg[1])
-        labels.append(labels[-1] + 1)
-    boundaries.append(len(actions))
-    labels = labels[: len(boundaries) - 1]
+    # First object: approach -> grasp -> transport -> place
+    s0, e0 = closed_segments[0]
+    phase[:s0] = 0          # approach A
+    phase[s0:e0] = 1        # grasp A
 
-    for li in range(len(boundaries) - 1):
-        phase[boundaries[li] : boundaries[li + 1]] = labels[li]
+    first_open = next((seg for seg in open_segments if seg[0] >= e0), None)
+    if first_open is None:
+        # Grasped A but never released it (episode will be a failure).
+        phase[e0:] = 2      # transport A (incomplete)
+        return phase, num_phases
 
-    # Clip phase labels to valid range in case of unexpected segments.
-    phase = np.clip(phase, 0, num_phases - 1)
+    os0, oe0 = first_open
+    phase[e0:os0] = 2       # transport A
+    phase[os0:oe0] = 3      # place A
+
+    # Second object: approach -> grasp -> transport/place
+    if len(closed_segments) < 2:
+        # Placed A but never stably grasped B.
+        phase[oe0:] = 4     # approach B (incomplete)
+        return phase, num_phases
+
+    s1, e1 = closed_segments[1]
+    phase[oe0:s1] = 4       # approach B
+    phase[s1:e1] = 5        # grasp B
+    phase[e1:] = 6          # transport & place B / completion
+
     return phase, num_phases
 
 

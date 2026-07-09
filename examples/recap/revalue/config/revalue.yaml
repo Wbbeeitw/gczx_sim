@@ -33,6 +33,7 @@ manifest:
   val_episode_ratio: 0.2
   test_episode_ratio: 0.0
   success_phase: 4
+  num_phases: 5
   overwrite: false
 
 value:

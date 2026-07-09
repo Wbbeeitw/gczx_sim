@@ -22,6 +22,9 @@ PKG-INFO
 *.egg-info/
 .claude/settings.json
 
+# Generated demo outputs
+phase_split_script/output_demo/
+
 # Model weights and checkpoints
 *.pt
 *.pth

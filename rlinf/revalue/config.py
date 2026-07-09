@@ -47,6 +47,7 @@ class RevalueManifestConfig:
     val_episode_ratio: float = 0.2
     test_episode_ratio: float = 0.0
     success_phase: int = 4
+    num_phases: int = 5
     overwrite: bool = False
 
 

@@ -487,7 +487,7 @@ def run_revalue(cfg: RevalueConfig) -> None:
                 ZPTrainingConfig(
                     features_dir=str(paths["features"]),
                     output_dir=str(paths["zp"]),
-                    num_phases=5,
+                    num_phases=cfg.manifest.num_phases,
                     head_type=cfg.zp.head_type,
                     hidden_dim=cfg.zp.hidden_dim,
                     dropout=cfg.zp.dropout,
@@ -534,7 +534,7 @@ def run_revalue(cfg: RevalueConfig) -> None:
                     value_min=cfg.value.v_min,
                     value_max=cfg.value.v_max,
                     num_bins=cfg.value.num_bins,
-                    num_phases=5,
+                    num_phases=cfg.manifest.num_phases,
                     fusion_hidden_dim=cfg.fusion.hidden_dim,
                     fusion_depth=cfg.fusion.depth,
                     fusion_dropout=cfg.fusion.dropout,

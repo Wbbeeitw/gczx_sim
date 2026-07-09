@@ -34,13 +34,18 @@ def detect_grasp_segments(
     """Detect sustained gripper-close segments, sorted by time."""
     g = smooth_1d(gripper_action.astype(np.float32), window=smooth_window)
     close = g > threshold
-    n = len(close)
+    return detect_segments(close, min_len=min_len)
+
+
+def detect_segments(mask: np.ndarray, min_len: int = 10) -> list[tuple[int, int]]:
+    """Detect sustained True segments in a boolean array, sorted by time."""
+    n = len(mask)
     segments: list[tuple[int, int]] = []
     i = 0
     while i < n:
-        if close[i]:
+        if mask[i]:
             j = i
-            while j < n and close[j]:
+            while j < n and mask[j]:
                 j += 1
             if j - i >= min_len:
                 segments.append((int(i), int(j)))
@@ -70,7 +75,7 @@ def compute_progress(
 
 def annotate_episode(
     ep_file: Path,
-    annotator: Callable[[np.ndarray, int], tuple[np.ndarray, int]],
+    annotator: Callable[[np.ndarray, np.ndarray, int], tuple[np.ndarray, int]],
 ) -> pd.DataFrame | None:
     """Apply a task-specific annotator to one episode parquet file."""
     df = pd.read_parquet(ep_file)
@@ -79,8 +84,9 @@ def annotate_episode(
 
     episode_index = int(df["episode_index"].iloc[0])
     actions = np.stack(df["actions"].values)
+    state = np.stack(df["state"].values) if "state" in df.columns else np.empty((len(df), 0))
 
-    phase, num_phases = annotator(actions, len(df))
+    phase, num_phases = annotator(actions, state, len(df))
     phase_progress, global_progress, overall_progress = compute_progress(phase, num_phases)
 
     return pd.DataFrame({
@@ -95,7 +101,7 @@ def annotate_episode(
 
 def annotate_dataset(
     dataset_path: str | Path,
-    annotator: Callable[[np.ndarray, int], tuple[np.ndarray, int]],
+    annotator: Callable[[np.ndarray, np.ndarray, int], tuple[np.ndarray, int]],
     output_name: str = "phase_progress_semantic",
 ) -> Path:
     """Run annotation over all episodes in a LeRobot dataset."""

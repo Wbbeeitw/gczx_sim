@@ -25,6 +25,8 @@ PHASE_COLORS = {
     2: (255, 0, 0),      # blue
     3: (255, 0, 255),    # magenta
     4: (0, 255, 255),    # yellow
+    5: (128, 0, 128),    # purple
+    6: (0, 128, 255),    # light red
 }
 
 
