@@ -113,7 +113,7 @@ def call_qwen_vl(
 
     content: list[dict[str, Any]] = []
     for img in images:
-        content.append({"image": _pil_to_base64(img)})
+        content.append({"image": f"data:image/jpeg;base64,{_pil_to_base64(img)}"})
     content.append({"text": prompt})
 
     payload = {

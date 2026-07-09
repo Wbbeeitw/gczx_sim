@@ -1,6 +1,6 @@
 from PIL import Image
 
-from phase_split_script.qwen_client import call_qwen_vl
+from qwen_client import call_qwen_vl
 
 # 创建一张空白测试图
 img = Image.new("RGB", (256, 256), color=(128, 128, 128))
