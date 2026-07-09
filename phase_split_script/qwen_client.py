@@ -188,8 +188,8 @@ def call_qwen_vl(
             "model": model,
             "messages": _build_local_messages(images, prompt),
         }
-        # Qwen3 models support an enable_thinking flag; pass it through vLLM.
-        payload["extra_body"] = {"enable_thinking": enable_reasoning}
+        # NOTE: Some local models (e.g. Qwen3-VL-8B) do not accept the
+        # enable_thinking extra_body field. Reasoning is controlled via prompt.
     else:
         api_key = _get_api_key()
         headers["Authorization"] = f"Bearer {api_key}"
