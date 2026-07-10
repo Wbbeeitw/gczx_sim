@@ -26,8 +26,8 @@ def _trace_row(
         "object_b_controlled": object_b_controlled,
         "object_a_basket_contact": object_a_in_basket,
         "object_b_basket_contact": object_b_in_basket,
-        "object_a_near_basket": object_a_near or object_a_in_basket,
-        "object_b_near_basket": object_b_near or object_b_in_basket,
+        "object_a_near_basket": object_a_near,
+        "object_b_near_basket": object_b_near,
     }
 
 

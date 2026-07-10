@@ -28,9 +28,9 @@ class Task1SemanticTraceConfig:
     object_a_alias: str = "cream_cheese"
     object_b_alias: str = "butter"
     basket_alias: str = "basket"
-    gripper_width_threshold: float = 0.035
+    gripper_width_threshold: float = 0.05
     controlled_motion_threshold: float = 0.001
-    basket_near_threshold: float = 0.12
+    basket_near_threshold: float = 0.18
     stable_frames: int = 5
 
 
@@ -359,14 +359,8 @@ def build_task1_phase_labels(
         is_success = bool(episode_trace["is_success"].iloc[-1])
         controlled_a = episode_trace["object_a_controlled"].to_numpy(dtype=bool)
         controlled_b = episode_trace["object_b_controlled"].to_numpy(dtype=bool)
-        in_basket_a = (
-            episode_trace["object_a_basket_contact"].to_numpy(dtype=bool)
-            & episode_trace["object_a_near_basket"].to_numpy(dtype=bool)
-        )
-        in_basket_b = (
-            episode_trace["object_b_basket_contact"].to_numpy(dtype=bool)
-            & episode_trace["object_b_near_basket"].to_numpy(dtype=bool)
-        )
+        in_basket_a = episode_trace["object_a_basket_contact"].to_numpy(dtype=bool)
+        in_basket_b = episode_trace["object_b_basket_contact"].to_numpy(dtype=bool)
         b1 = _first_stable_frame(controlled_a | controlled_b, stable_frames)
         one_in_basket = in_basket_a | in_basket_b
         joint_transfer = controlled_a & controlled_b & (
