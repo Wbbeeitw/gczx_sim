@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import pandas as pd
 
-from rlinf.revalue.semantic_trace import build_task1_phase_labels
+from rlinf.revalue.semantic_trace import (
+    build_task1_phase_labels,
+    build_task2_phase_labels,
+)
 
 
 def _trace_row(
@@ -30,6 +33,30 @@ def _trace_row(
         "object_b_basket_contact": object_b_in_basket,
         "object_a_near_basket": object_a_near,
         "object_b_near_basket": object_b_near,
+    }
+
+
+def _task2_trace_row(
+    frame_index: int,
+    *,
+    success: bool,
+    env_success: bool = False,
+    moka_pot_controlled: bool = False,
+    stove_button_interacted: bool = False,
+    stove_turn_on: bool = False,
+    moka_pot_on_cook_region: bool = False,
+    frypan_gripper_contact: bool = False,
+) -> dict[str, object]:
+    return {
+        "episode_index": 0,
+        "frame_index": frame_index,
+        "is_success": success,
+        "env_success": env_success,
+        "moka_pot_controlled": moka_pot_controlled,
+        "stove_button_interacted": stove_button_interacted,
+        "stove_turn_on": stove_turn_on,
+        "moka_pot_on_cook_region": moka_pot_on_cook_region,
+        "frypan_gripper_contact": frypan_gripper_contact,
     }
 
 
@@ -152,4 +179,119 @@ def test_task1_env_success_resolves_same_frame_b2_and_b3() -> None:
     assert audit.loc[0, "b2_frame"] == 10
     assert audit.loc[0, "b3_frame"] == 19
     assert audit.loc[0, "b3_source"] == "env_success_terminal"
+    assert labels.loc[labels["frame_index"] == 19, "phase"].item() == 3
+
+
+def test_task2_stove_first_creates_b2_before_moka_completion() -> None:
+    rows = []
+    for frame_index in range(20):
+        rows.append(
+            _task2_trace_row(
+                frame_index,
+                success=True,
+                stove_button_interacted=frame_index == 2,
+                stove_turn_on=4 <= frame_index,
+                moka_pot_controlled=6 <= frame_index < 11,
+                moka_pot_on_cook_region=12 <= frame_index,
+            )
+        )
+
+    labels, audit = build_task2_phase_labels(pd.DataFrame(rows), stable_frames=3)
+
+    assert audit.loc[0, "b1_frame"] == 2
+    assert audit.loc[0, "b1_source"] == "stove_button_interaction"
+    assert audit.loc[0, "b2_frame"] == 4
+    assert audit.loc[0, "b2_source"] == "stove_turn_on"
+    assert audit.loc[0, "b3_frame"] == 12
+    assert audit.loc[0, "b3_source"] == "state_stable"
+    assert audit.loc[0, "subgoal_order"] == "stove_then_moka_pot"
+    assert labels.loc[labels["frame_index"] == 11, "phase"].item() == 2
+    assert labels.loc[labels["frame_index"] == 14, "phase"].item() == 3
+
+
+def test_task2_moka_first_is_a_supported_subgoal_order() -> None:
+    rows = []
+    for frame_index in range(20):
+        rows.append(
+            _task2_trace_row(
+                frame_index,
+                success=True,
+                moka_pot_controlled=2 <= frame_index < 8,
+                moka_pot_on_cook_region=8 <= frame_index,
+                stove_button_interacted=13 == frame_index,
+                stove_turn_on=15 <= frame_index,
+            )
+        )
+
+    labels, audit = build_task2_phase_labels(pd.DataFrame(rows), stable_frames=3)
+
+    assert audit.loc[0, "b1_frame"] == 2
+    assert audit.loc[0, "b2_frame"] == 8
+    assert audit.loc[0, "b2_source"] == "moka_pot_on_cook_region"
+    assert audit.loc[0, "b3_frame"] == 15
+    assert audit.loc[0, "subgoal_order"] == "moka_pot_then_stove"
+    assert labels.loc[labels["frame_index"] == 14, "phase"].item() == 2
+    assert labels.loc[labels["frame_index"] == 17, "phase"].item() == 3
+
+
+def test_task2_frypan_contact_does_not_start_a_phase() -> None:
+    rows = [
+        _task2_trace_row(
+            frame_index,
+            success=False,
+            frypan_gripper_contact=2 <= frame_index < 12,
+        )
+        for frame_index in range(20)
+    ]
+
+    labels, audit = build_task2_phase_labels(pd.DataFrame(rows), stable_frames=3)
+
+    assert pd.isna(audit.loc[0, "b1_frame"])
+    assert bool(audit.loc[0, "frypan_gripper_contact_observed"])
+    assert not bool(audit.loc[0, "trainable"])
+    assert labels["phase"].eq(0).all()
+
+
+def test_task2_drop_does_not_reset_phase_one() -> None:
+    rows = []
+    for frame_index in range(20):
+        rows.append(
+            _task2_trace_row(
+                frame_index,
+                success=False,
+                moka_pot_controlled=2 <= frame_index < 6,
+            )
+        )
+
+    labels, audit = build_task2_phase_labels(pd.DataFrame(rows), stable_frames=3)
+
+    assert audit.loc[0, "b1_frame"] == 2
+    assert pd.isna(audit.loc[0, "b2_frame"])
+    assert pd.isna(audit.loc[0, "b3_frame"])
+    assert bool(audit.loc[0, "trainable"])
+    assert labels.loc[labels["frame_index"] == 10, "phase"].item() == 1
+    assert labels["phase"].max() == 1
+
+
+def test_task2_env_success_terminal_completes_short_final_state() -> None:
+    rows = []
+    for frame_index in range(20):
+        rows.append(
+            _task2_trace_row(
+                frame_index,
+                success=True,
+                env_success=frame_index == 19,
+                stove_button_interacted=frame_index == 2,
+                stove_turn_on=4 <= frame_index,
+                moka_pot_controlled=12 <= frame_index < 19,
+            )
+        )
+
+    labels, audit = build_task2_phase_labels(pd.DataFrame(rows), stable_frames=3)
+
+    assert audit.loc[0, "b1_frame"] == 2
+    assert audit.loc[0, "b2_frame"] == 4
+    assert audit.loc[0, "b3_frame"] == 19
+    assert audit.loc[0, "b3_source"] == "env_success_terminal"
+    assert bool(audit.loc[0, "b3_consistent_with_success"])
     assert labels.loc[labels["frame_index"] == 19, "phase"].item() == 3

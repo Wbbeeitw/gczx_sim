@@ -53,7 +53,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--failure_reward", type=float, default=None)
     parser.add_argument("--semantic_trace", action="store_true")
-    parser.add_argument("--semantic_trace_task", default="task1")
+    parser.add_argument(
+        "--semantic_trace_task",
+        choices=("task1", "task2"),
+        default="task1",
+        help="Task-specific privileged semantic trace to record.",
+    )
     parser.add_argument(
         "--semantic_trace_output_name", default="semantic_trace_task1"
     )

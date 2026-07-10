@@ -19,6 +19,8 @@ import pandas as pd
 
 NUM_TASK1_PHASES = 4
 TASK1_SUCCESS_PHASE = 3
+NUM_TASK2_PHASES = 4
+TASK2_SUCCESS_PHASE = 3
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,32 @@ class Task1SemanticBodies:
     object_a: str
     object_b: str
     basket: str
+
+
+@dataclass(frozen=True)
+class Task2SemanticTraceConfig:
+    """Task2 simulator-state extraction settings."""
+
+    moka_pot_alias: str = "moka_pot"
+    stove_button_alias: str = "flat_stove_1_button"
+    frypan_alias: str = "chefmate_8_frypan"
+    moka_pot_state_name: str = "moka_pot_1"
+    stove_state_name: str = "flat_stove_1"
+    cook_region_state_name: str = "flat_stove_1_cook_region"
+    stove_button_joint_name: str = "flat_stove_1_button"
+    gripper_width_threshold: float = 0.05
+    controlled_motion_threshold: float = 0.001
+    button_motion_threshold: float = 0.001
+    stable_frames: int = 3
+
+
+@dataclass(frozen=True)
+class Task2SemanticBodies:
+    """Resolved MuJoCo body names used by a task2 trace."""
+
+    moka_pot: str
+    stove_button: str
+    frypan: str
 
 
 def _normalize_name(value: str) -> str:
@@ -153,6 +181,21 @@ def _has_contact(sim: Any, left_geom_ids: set[int], right_geom_ids: set[int]) ->
         ):
             return True
     return False
+
+
+def _joint_qpos(sim: Any, joint_name: str) -> float:
+    """Read the scalar qpos of a named MuJoCo joint."""
+    model = sim.model
+    legacy_getter = getattr(model, "joint_name2id", None)
+    if callable(legacy_getter):
+        joint_id = int(legacy_getter(joint_name))
+    else:
+        accessor = getattr(model, "joint", None)
+        if not callable(accessor):
+            raise AttributeError("MuJoCo model does not expose a joint-name lookup API.")
+        joint_id = int(accessor(joint_name).id)
+    qpos_address = int(np.asarray(model.jnt_qposadr)[joint_id])
+    return float(sim.data.qpos[qpos_address])
 
 
 def _check_success(env: Any) -> bool:
@@ -307,6 +350,164 @@ class Task1SemanticTraceRecorder:
         return float("inf")
 
 
+class Task2SemanticTraceRecorder:
+    """Extract task2 privileged state from a live LIBERO simulator."""
+
+    def __init__(self, env: Any, config: Task2SemanticTraceConfig | None = None):
+        self.config = config or Task2SemanticTraceConfig()
+        sim = getattr(env, "sim", None)
+        if sim is None:
+            raise AttributeError("LIBERO environment does not expose env.sim.")
+        self._sim = sim
+        model = sim.model
+        self.bodies = Task2SemanticBodies(
+            moka_pot=_resolve_body_name(model, self.config.moka_pot_alias),
+            stove_button=_resolve_body_name(model, self.config.stove_button_alias),
+            frypan=_resolve_body_name(model, self.config.frypan_alias),
+        )
+        self._moka_pot_geoms = _geom_ids_for_body(
+            model, self.bodies.moka_pot, self.config.moka_pot_alias
+        )
+        self._stove_button_geoms = _geom_ids_for_body(
+            model, self.bodies.stove_button, self.config.stove_button_alias
+        )
+        self._frypan_geoms = _geom_ids_for_body(
+            model, self.bodies.frypan, self.config.frypan_alias
+        )
+        self._gripper_geoms = _gripper_geom_ids(model)
+        self._state_objects: Any | None = None
+        self._previous_moka_pot_position: np.ndarray | None = None
+        self._previous_button_qpos: float | None = None
+        self._current_episode_index: int | None = None
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        """Return the resolved task2 trace schema for reproducibility."""
+        return {
+            "version": "task2_semantic_trace_v1",
+            "config": asdict(self.config),
+            "bodies": asdict(self.bodies),
+            "state_names": {
+                "moka_pot": self.config.moka_pot_state_name,
+                "stove": self.config.stove_state_name,
+                "cook_region": self.config.cook_region_state_name,
+            },
+        }
+
+    def capture(
+        self,
+        env: Any,
+        episode_index: int,
+        frame_index: int,
+        observation: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Capture one simulator-aligned task2 semantic trace record."""
+        sim = getattr(env, "sim", None)
+        if sim is None:
+            raise AttributeError("LIBERO environment does not expose env.sim.")
+        self._start_episode(int(episode_index))
+        moka_pot_position, moka_pot_quaternion = _body_pose(
+            sim, self.bodies.moka_pot
+        )
+        moka_pot_motion = self._moka_pot_motion(moka_pot_position)
+        button_qpos = _joint_qpos(sim, self.config.stove_button_joint_name)
+        button_motion = self._button_motion(button_qpos)
+        gripper_width = Task1SemanticTraceRecorder._gripper_width(observation, env)
+        gripper_closed = gripper_width <= self.config.gripper_width_threshold
+        moka_pot_gripper_contact = _has_contact(
+            sim, self._moka_pot_geoms, self._gripper_geoms
+        )
+        stove_button_gripper_contact = _has_contact(
+            sim, self._stove_button_geoms, self._gripper_geoms
+        )
+        frypan_gripper_contact = _has_contact(
+            sim, self._frypan_geoms, self._gripper_geoms
+        )
+        moka_pot_controlled = (
+            gripper_closed
+            and moka_pot_gripper_contact
+            and moka_pot_motion >= self.config.controlled_motion_threshold
+        )
+        stove_button_interacted = (
+            button_motion >= self.config.button_motion_threshold
+        )
+        state_objects = self._state_objects_for_env(env)
+        moka_pot_state = state_objects[self.config.moka_pot_state_name]
+        stove_state = state_objects[self.config.stove_state_name]
+        cook_region_state = state_objects[self.config.cook_region_state_name]
+        stove_turn_on = bool(stove_state.turn_on())
+        moka_pot_on_cook_region = bool(cook_region_state.check_ontop(moka_pot_state))
+
+        return {
+            "episode_index": int(episode_index),
+            "frame_index": int(frame_index),
+            "env_success": _check_success(env),
+            "gripper_width": gripper_width,
+            "gripper_closed": gripper_closed,
+            "moka_pot_x": float(moka_pot_position[0]),
+            "moka_pot_y": float(moka_pot_position[1]),
+            "moka_pot_z": float(moka_pot_position[2]),
+            "moka_pot_qw": float(moka_pot_quaternion[0]),
+            "moka_pot_qx": float(moka_pot_quaternion[1]),
+            "moka_pot_qy": float(moka_pot_quaternion[2]),
+            "moka_pot_qz": float(moka_pot_quaternion[3]),
+            "moka_pot_motion": moka_pot_motion,
+            "moka_pot_gripper_contact": moka_pot_gripper_contact,
+            "moka_pot_controlled": moka_pot_controlled,
+            "stove_button_qpos": button_qpos,
+            "stove_button_motion": button_motion,
+            "stove_button_gripper_contact": stove_button_gripper_contact,
+            "stove_button_interacted": stove_button_interacted,
+            "stove_turn_on": stove_turn_on,
+            "moka_pot_on_cook_region": moka_pot_on_cook_region,
+            "frypan_gripper_contact": frypan_gripper_contact,
+        }
+
+    def _moka_pot_motion(self, position: np.ndarray) -> float:
+        previous = self._previous_moka_pot_position
+        self._previous_moka_pot_position = position.copy()
+        if previous is None:
+            return 0.0
+        return float(np.linalg.norm(position - previous))
+
+    def _start_episode(self, episode_index: int) -> None:
+        if self._current_episode_index == episode_index:
+            return
+        self._current_episode_index = episode_index
+        self._previous_moka_pot_position = None
+        self._previous_button_qpos = None
+
+    def _button_motion(self, qpos: float) -> float:
+        previous = self._previous_button_qpos
+        self._previous_button_qpos = qpos
+        if previous is None:
+            return 0.0
+        return abs(qpos - previous)
+
+    def _state_objects_for_env(self, env: Any) -> Any:
+        if self._state_objects is not None:
+            return self._state_objects
+        base_env = getattr(env, "env", env)
+        state_objects = getattr(base_env, "object_states_dict", None)
+        if state_objects is None:
+            raise AttributeError(
+                "LIBERO task2 environment does not expose object_states_dict after reset."
+            )
+        required_state_names = {
+            self.config.moka_pot_state_name,
+            self.config.stove_state_name,
+            self.config.cook_region_state_name,
+        }
+        missing_state_names = required_state_names - set(state_objects)
+        if missing_state_names:
+            raise ValueError(
+                "LIBERO task2 semantic states are unavailable: "
+                f"{sorted(missing_state_names)}"
+            )
+        self._state_objects = state_objects
+        return state_objects
+
+
 def _first_stable_frame(mask: np.ndarray, stable_frames: int, start: int = 0) -> int | None:
     run_start: int | None = None
     for frame_index in range(start, len(mask)):
@@ -320,13 +521,17 @@ def _first_stable_frame(mask: np.ndarray, stable_frames: int, start: int = 0) ->
     return None
 
 
-def _phase_progress(phase: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _phase_progress(
+    phase: np.ndarray,
+    *,
+    num_phases: int = NUM_TASK1_PHASES,
+) -> tuple[np.ndarray, np.ndarray]:
     phase_progress = np.zeros(len(phase), dtype=np.float32)
     for phase_id in np.unique(phase):
         indices = np.flatnonzero(phase == phase_id)
         if len(indices) > 1:
             phase_progress[indices] = np.linspace(0.0, 1.0, len(indices), dtype=np.float32)
-    global_progress = (phase.astype(np.float32) + phase_progress) / NUM_TASK1_PHASES
+    global_progress = (phase.astype(np.float32) + phase_progress) / num_phases
     return phase_progress, global_progress
 
 
@@ -474,6 +679,225 @@ def write_task1_semantic_artifacts(
     metadata_path = meta_dir / f"{output_name}_metadata.json"
     trace = pd.DataFrame(records).sort_values(["episode_index", "frame_index"])
     labels, audit = build_task1_phase_labels(trace, stable_frames=stable_frames)
+    trace.to_parquet(raw_path, index=False)
+    labels.to_parquet(labels_path, index=False)
+    audit.to_csv(audit_path, index=False)
+    with open(metadata_path, "w", encoding="utf-8") as file:
+        json.dump(metadata, file, indent=2, ensure_ascii=False)
+    return {
+        "raw_trace": str(raw_path),
+        "phase_labels": str(labels_path),
+        "audit": str(audit_path),
+        "metadata": str(metadata_path),
+    }
+
+
+def _first_true_frame(mask: np.ndarray, start: int = 0) -> int | None:
+    true_frames = np.flatnonzero(mask[start:])
+    if not len(true_frames):
+        return None
+    return int(start + true_frames[0])
+
+
+def _first_boundary(
+    candidates: dict[str, int | None],
+) -> tuple[int | None, str]:
+    present = {source: frame for source, frame in candidates.items() if frame is not None}
+    if not present:
+        return None, "unresolved"
+    boundary = min(present.values())
+    sources = sorted(source for source, frame in present.items() if frame == boundary)
+    return boundary, "+".join(sources)
+
+
+def build_task2_phase_labels(
+    trace: pd.DataFrame,
+    *,
+    stable_frames: int = 3,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build four monotonic phases for turning on a stove and placing moka pot."""
+    required = {
+        "episode_index",
+        "frame_index",
+        "is_success",
+        "env_success",
+        "moka_pot_controlled",
+        "stove_button_interacted",
+        "stove_turn_on",
+        "moka_pot_on_cook_region",
+        "frypan_gripper_contact",
+    }
+    missing = required - set(trace.columns)
+    if missing:
+        raise ValueError(f"Semantic trace missing columns: {sorted(missing)}")
+
+    label_frames: list[pd.DataFrame] = []
+    audit_rows: list[dict[str, Any]] = []
+    for episode_index, episode_trace in trace.groupby("episode_index", sort=True):
+        episode_trace = episode_trace.sort_values("frame_index").reset_index(drop=True)
+        length = len(episode_trace)
+        is_success = bool(episode_trace["is_success"].iloc[-1])
+        moka_pot_controlled = episode_trace["moka_pot_controlled"].to_numpy(dtype=bool)
+        stove_button_interacted = episode_trace[
+            "stove_button_interacted"
+        ].to_numpy(dtype=bool)
+        stove_turn_on = episode_trace["stove_turn_on"].to_numpy(dtype=bool)
+        moka_pot_on_cook_region = episode_trace[
+            "moka_pot_on_cook_region"
+        ].to_numpy(dtype=bool)
+        env_success = episode_trace["env_success"].to_numpy(dtype=bool)
+
+        b1, b1_source = _first_boundary(
+            {
+                "moka_pot_controlled": _first_stable_frame(
+                    moka_pot_controlled, stable_frames
+                ),
+                "stove_button_interaction": _first_true_frame(
+                    stove_button_interacted
+                ),
+            }
+        )
+        b2_start = b1 + 1 if b1 is not None else 0
+        b2, b2_source = _first_boundary(
+            {
+                "stove_turn_on": _first_stable_frame(
+                    stove_turn_on, stable_frames, b2_start
+                ),
+                "moka_pot_on_cook_region": _first_stable_frame(
+                    moka_pot_on_cook_region, stable_frames, b2_start
+                ),
+            }
+        )
+        if b2 is None and is_success:
+            b2, b2_source = _first_boundary(
+                {
+                    "stove_turn_on_terminal": _first_true_frame(
+                        stove_turn_on, b2_start
+                    ),
+                    "moka_pot_on_cook_region_terminal": _first_true_frame(
+                        moka_pot_on_cook_region, b2_start
+                    ),
+                }
+            )
+
+        b3 = _first_stable_frame(
+            stove_turn_on & moka_pot_on_cook_region,
+            stable_frames,
+            b2 + 1 if b2 is not None else 0,
+        )
+        b3_source = "state_stable" if b3 is not None else "unresolved"
+        if b3 is None and is_success:
+            b3 = _first_true_frame(env_success, b2 + 1 if b2 is not None else 0)
+            if b3 is not None:
+                b3_source = "env_success_terminal"
+        if not is_success:
+            b3 = None
+            b3_source = "failed_episode"
+
+        phase = np.zeros(length, dtype=np.int64)
+        if b1 is not None:
+            phase[b1:] = 1
+        if b2 is not None and b1 is not None and b2 > b1:
+            phase[b2:] = 2
+        else:
+            b2 = None
+            b2_source = "unresolved"
+        if b3 is not None and b2 is not None and b3 > b2:
+            phase[b3:] = TASK2_SUCCESS_PHASE
+        else:
+            b3 = None
+            if is_success:
+                b3_source = "unresolved"
+
+        phase_progress, global_progress = _phase_progress(
+            phase, num_phases=NUM_TASK2_PHASES
+        )
+        terminal_incomplete = not is_success or b3 is None
+        if terminal_incomplete and length:
+            terminal_phase = int(phase[-1])
+            terminal_start = int(np.flatnonzero(phase == terminal_phase)[-1])
+            while terminal_start > 0 and phase[terminal_start - 1] == terminal_phase:
+                terminal_start -= 1
+            phase_progress[terminal_start:] = 0.0
+            global_progress[terminal_start:] = terminal_phase / NUM_TASK2_PHASES
+
+        label_frames.append(
+            pd.DataFrame(
+                {
+                    "episode_index": int(episode_index),
+                    "frame_index": episode_trace["frame_index"].to_numpy(dtype=np.int64),
+                    "phase": phase,
+                    "phase_progress": phase_progress,
+                    "global_progress": global_progress,
+                    "semantic_source": "simulator_trace",
+                    "semantic_confidence": np.where(
+                        b1 is not None and (not is_success or b3 is not None),
+                        "state_verified",
+                        "unresolved",
+                    ),
+                    "is_success": is_success,
+                }
+            )
+        )
+        first_stove_turn_on = _first_true_frame(stove_turn_on)
+        first_moka_on_cook_region = _first_true_frame(moka_pot_on_cook_region)
+        if first_stove_turn_on is None and first_moka_on_cook_region is None:
+            subgoal_order = "none"
+        elif first_moka_on_cook_region is None or (
+            first_stove_turn_on is not None
+            and first_stove_turn_on < first_moka_on_cook_region
+        ):
+            subgoal_order = "stove_then_moka_pot"
+        elif first_stove_turn_on is None or (
+            first_moka_on_cook_region < first_stove_turn_on
+        ):
+            subgoal_order = "moka_pot_then_stove"
+        else:
+            subgoal_order = "simultaneous"
+        audit_rows.append(
+            {
+                "episode_index": int(episode_index),
+                "episode_length": length,
+                "is_success": is_success,
+                "b1_frame": b1,
+                "b1_source": b1_source,
+                "b2_frame": b2,
+                "b2_source": b2_source,
+                "b3_frame": b3,
+                "b3_source": b3_source,
+                "subgoal_order": subgoal_order,
+                "stove_turn_on_observed": bool(stove_turn_on.any()),
+                "moka_pot_on_cook_region_observed": bool(
+                    moka_pot_on_cook_region.any()
+                ),
+                "frypan_gripper_contact_observed": bool(
+                    episode_trace["frypan_gripper_contact"].to_numpy(dtype=bool).any()
+                ),
+                "b3_consistent_with_success": (b3 is not None) == is_success,
+                "trainable": b1 is not None and (not is_success or b3 is not None),
+            }
+        )
+    return pd.concat(label_frames, ignore_index=True), pd.DataFrame(audit_rows)
+
+
+def write_task2_semantic_artifacts(
+    dataset_path: str | Path,
+    records: list[dict[str, Any]],
+    metadata: dict[str, Any],
+    *,
+    output_name: str = "semantic_trace_task2",
+    stable_frames: int = 3,
+) -> dict[str, str]:
+    """Write raw task2 trace, phase labels, audit rows, and metadata."""
+    dataset_path = Path(dataset_path)
+    meta_dir = dataset_path / "meta"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = meta_dir / f"{output_name}.parquet"
+    labels_path = meta_dir / f"phase_progress_{output_name}.parquet"
+    audit_path = meta_dir / f"{output_name}_audit.csv"
+    metadata_path = meta_dir / f"{output_name}_metadata.json"
+    trace = pd.DataFrame(records).sort_values(["episode_index", "frame_index"])
+    labels, audit = build_task2_phase_labels(trace, stable_frames=stable_frames)
     trace.to_parquet(raw_path, index=False)
     labels.to_parquet(labels_path, index=False)
     audit.to_csv(audit_path, index=False)

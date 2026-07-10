@@ -608,16 +608,52 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
     writer = LeRobotDatasetWriter()
 
     semantic_trace_recorder = None
+    semantic_trace_writer = None
     semantic_trace_records: list[dict[str, Any]] = []
     if cfg.semantic_trace:
-        if cfg.semantic_trace_task != "task1":
+        from rlinf.revalue.semantic_trace import (
+            Task1SemanticTraceRecorder,
+            Task2SemanticTraceRecorder,
+            write_task1_semantic_artifacts,
+            write_task2_semantic_artifacts,
+        )
+
+        semantic_trace_specs = {
+            "task1": (
+                1,
+                Task1SemanticTraceRecorder,
+                write_task1_semantic_artifacts,
+            ),
+            "task2": (
+                2,
+                Task2SemanticTraceRecorder,
+                write_task2_semantic_artifacts,
+            ),
+        }
+        trace_spec = semantic_trace_specs.get(cfg.semantic_trace_task)
+        if trace_spec is None:
             raise ValueError(
-                "Only semantic_trace_task='task1' is currently supported, got "
+                "Supported semantic_trace_task values are "
+                f"{sorted(semantic_trace_specs)}, got "
                 f"{cfg.semantic_trace_task!r}."
             )
-        from rlinf.revalue.semantic_trace import Task1SemanticTraceRecorder
+        expected_task_id, recorder_type, semantic_trace_writer = trace_spec
+        if cfg.task_suite_name != "libero_10" or cfg.task_id != expected_task_id:
+            raise ValueError(
+                f"semantic_trace_task={cfg.semantic_trace_task!r} requires "
+                f"task_suite_name='libero_10' and task_id={expected_task_id}, got "
+                f"task_suite_name={cfg.task_suite_name!r}, task_id={cfg.task_id}."
+            )
+        if (
+            cfg.semantic_trace_task == "task2"
+            and cfg.semantic_trace_output_name == "semantic_trace_task1"
+        ):
+            raise ValueError(
+                "semantic_trace_task='task2' requires a task2-specific output name, "
+                "such as 'semantic_trace_task2'."
+            )
 
-        semantic_trace_recorder = Task1SemanticTraceRecorder(env)
+        semantic_trace_recorder = recorder_type(env)
 
     successes = 0
     all_returns = []
@@ -760,10 +796,8 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
     writer.finalize()
     env.close()
     semantic_trace_artifacts = None
-    if semantic_trace_recorder is not None:
-        from rlinf.revalue.semantic_trace import write_task1_semantic_artifacts
-
-        semantic_trace_artifacts = write_task1_semantic_artifacts(
+    if semantic_trace_recorder is not None and semantic_trace_writer is not None:
+        semantic_trace_artifacts = semantic_trace_writer(
             output_path,
             semantic_trace_records,
             semantic_trace_recorder.metadata,
