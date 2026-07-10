@@ -11,6 +11,7 @@ def _trace_row(
     frame_index: int,
     *,
     success: bool,
+    env_success: bool = False,
     object_a_controlled: bool = False,
     object_b_controlled: bool = False,
     object_a_in_basket: bool = False,
@@ -22,6 +23,7 @@ def _trace_row(
         "episode_index": 0,
         "frame_index": frame_index,
         "is_success": success,
+        "env_success": env_success,
         "object_a_controlled": object_a_controlled,
         "object_b_controlled": object_b_controlled,
         "object_a_basket_contact": object_a_in_basket,
@@ -105,3 +107,26 @@ def test_task1_terminal_success_accepts_short_verified_completion() -> None:
     assert audit.loc[0, "b3_source"] == "state_terminal_success"
     assert bool(audit.loc[0, "b3_consistent_with_success"])
     assert labels.loc[labels["frame_index"] == 17, "phase"].item() == 3
+
+
+def test_task1_env_success_completes_without_basket_contact() -> None:
+    rows = []
+    for frame_index in range(20):
+        rows.append(
+            _trace_row(
+                frame_index,
+                success=True,
+                env_success=frame_index == 19,
+                object_a_controlled=2 <= frame_index < 8,
+                object_a_in_basket=8 <= frame_index,
+                object_b_controlled=12 <= frame_index < 19,
+                object_b_near=17 <= frame_index,
+            )
+        )
+
+    labels, audit = build_task1_phase_labels(pd.DataFrame(rows), stable_frames=5)
+
+    assert audit.loc[0, "b3_frame"] == 19
+    assert audit.loc[0, "b3_source"] == "env_success_terminal"
+    assert bool(audit.loc[0, "b3_consistent_with_success"])
+    assert labels.loc[labels["frame_index"] == 19, "phase"].item() == 3

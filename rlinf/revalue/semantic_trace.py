@@ -375,6 +375,13 @@ def build_task1_phase_labels(
             while b3 > 0 and both_in_basket[b3 - 1]:
                 b3 -= 1
             b3_source = "state_terminal_success"
+        if b3 is None and is_success and "env_success" in episode_trace:
+            success_frames = np.flatnonzero(
+                episode_trace["env_success"].to_numpy(dtype=bool)
+            )
+            if len(success_frames):
+                b3 = int(success_frames[-1])
+                b3_source = "env_success_terminal"
         if not is_success:
             b3 = None
             b3_source = "failed_episode"
@@ -390,6 +397,8 @@ def build_task1_phase_labels(
             phase[b3:] = 3
         else:
             b3 = None
+            if is_success:
+                b3_source = "unresolved"
 
         phase_progress, global_progress = _phase_progress(phase)
         terminal_incomplete = not is_success or b3 is None
