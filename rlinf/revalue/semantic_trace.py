@@ -367,9 +367,17 @@ def build_task1_phase_labels(
             episode_trace["object_a_near_basket"].to_numpy(dtype=bool)
         ) & (episode_trace["object_b_near_basket"].to_numpy(dtype=bool))
         b2 = _first_stable_frame(one_in_basket | joint_transfer, stable_frames, b1 or 0)
-        b3 = _first_stable_frame(in_basket_a & in_basket_b, stable_frames, b2 or 0)
+        both_in_basket = in_basket_a & in_basket_b
+        b3 = _first_stable_frame(both_in_basket, stable_frames, b2 or 0)
+        b3_source = "state_stable" if b3 is not None else "unresolved"
+        if b3 is None and is_success and len(both_in_basket) and both_in_basket[-1]:
+            b3 = len(both_in_basket) - 1
+            while b3 > 0 and both_in_basket[b3 - 1]:
+                b3 -= 1
+            b3_source = "state_terminal_success"
         if not is_success:
             b3 = None
+            b3_source = "failed_episode"
 
         phase = np.zeros(length, dtype=np.int64)
         if b1 is not None:
@@ -419,6 +427,7 @@ def build_task1_phase_labels(
                 "b1_frame": b1,
                 "b2_frame": b2,
                 "b3_frame": b3,
+                "b3_source": b3_source,
                 "b2_joint_transfer_detected": bool(joint_transfer.any()),
                 "b3_consistent_with_success": (b3 is not None) == is_success,
                 "trainable": b1 is not None and (not is_success or b3 is not None),

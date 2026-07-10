@@ -81,3 +81,27 @@ def test_task1_drop_does_not_reset_phase_one() -> None:
     assert labels.loc[labels["frame_index"] == 8, "phase"].item() == 1
     assert labels.loc[labels["frame_index"] == 17, "phase"].item() == 2
     assert labels["phase"].max() == 2
+
+
+def test_task1_terminal_success_accepts_short_verified_completion() -> None:
+    rows = []
+    for frame_index in range(20):
+        rows.append(
+            _trace_row(
+                frame_index,
+                success=True,
+                object_a_controlled=2 <= frame_index < 8,
+                object_a_in_basket=8 <= frame_index,
+                object_b_controlled=12 <= frame_index < 17,
+                object_b_in_basket=17 <= frame_index,
+            )
+        )
+
+    labels, audit = build_task1_phase_labels(pd.DataFrame(rows), stable_frames=5)
+
+    assert audit.loc[0, "b1_frame"] == 2
+    assert audit.loc[0, "b2_frame"] == 8
+    assert audit.loc[0, "b3_frame"] == 17
+    assert audit.loc[0, "b3_source"] == "state_terminal_success"
+    assert bool(audit.loc[0, "b3_consistent_with_success"])
+    assert labels.loc[labels["frame_index"] == 17, "phase"].item() == 3
