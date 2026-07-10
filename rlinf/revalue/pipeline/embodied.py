@@ -614,8 +614,10 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
         from rlinf.revalue.semantic_trace import (
             Task1SemanticTraceRecorder,
             Task2SemanticTraceRecorder,
+            Task3SemanticTraceRecorder,
             write_task1_semantic_artifacts,
             write_task2_semantic_artifacts,
+            write_task3_semantic_artifacts,
         )
 
         semantic_trace_specs = {
@@ -628,6 +630,11 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
                 2,
                 Task2SemanticTraceRecorder,
                 write_task2_semantic_artifacts,
+            ),
+            "task3": (
+                3,
+                Task3SemanticTraceRecorder,
+                write_task3_semantic_artifacts,
             ),
         }
         trace_spec = semantic_trace_specs.get(cfg.semantic_trace_task)
@@ -644,13 +651,13 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
                 f"task_suite_name='libero_10' and task_id={expected_task_id}, got "
                 f"task_suite_name={cfg.task_suite_name!r}, task_id={cfg.task_id}."
             )
-        if (
-            cfg.semantic_trace_task == "task2"
-            and cfg.semantic_trace_output_name == "semantic_trace_task1"
+        if cfg.semantic_trace_task != "task1" and (
+            cfg.semantic_trace_output_name == "semantic_trace_task1"
         ):
             raise ValueError(
-                "semantic_trace_task='task2' requires a task2-specific output name, "
-                "such as 'semantic_trace_task2'."
+                f"semantic_trace_task={cfg.semantic_trace_task!r} requires a "
+                f"task-specific output name, such as "
+                f"'semantic_trace_{cfg.semantic_trace_task}'."
             )
 
         semantic_trace_recorder = recorder_type(env)

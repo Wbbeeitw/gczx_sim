@@ -21,6 +21,8 @@ NUM_TASK1_PHASES = 4
 TASK1_SUCCESS_PHASE = 3
 NUM_TASK2_PHASES = 4
 TASK2_SUCCESS_PHASE = 3
+NUM_TASK3_PHASES = 4
+TASK3_SUCCESS_PHASE = 3
 
 
 @dataclass(frozen=True)
@@ -69,6 +71,33 @@ class Task2SemanticBodies:
     moka_pot: str
     stove_button: str
     frypan: str
+
+
+@dataclass(frozen=True)
+class Task3SemanticTraceConfig:
+    """Task3 simulator-state extraction settings."""
+
+    black_bowl_alias: str = "akita_black_bowl"
+    bottom_drawer_alias: str = "white_cabinet_1_cabinet_bottom"
+    wine_bottle_alias: str = "wine_bottle"
+    wine_rack_alias: str = "wine_rack"
+    black_bowl_state_name: str = "akita_black_bowl_1"
+    bottom_drawer_state_name: str = "white_cabinet_1_bottom_region"
+    bottom_drawer_joint_name: str = "white_cabinet_1_bottom_level"
+    gripper_width_threshold: float = 0.05
+    controlled_motion_threshold: float = 0.001
+    drawer_motion_threshold: float = 0.001
+    stable_frames: int = 3
+
+
+@dataclass(frozen=True)
+class Task3SemanticBodies:
+    """Resolved MuJoCo body names used by a task3 trace."""
+
+    black_bowl: str
+    bottom_drawer: str
+    wine_bottle: str
+    wine_rack: str
 
 
 def _normalize_name(value: str) -> str:
@@ -508,6 +537,173 @@ class Task2SemanticTraceRecorder:
         return state_objects
 
 
+class Task3SemanticTraceRecorder:
+    """Extract task3 privileged state from a live LIBERO simulator."""
+
+    def __init__(self, env: Any, config: Task3SemanticTraceConfig | None = None):
+        self.config = config or Task3SemanticTraceConfig()
+        sim = getattr(env, "sim", None)
+        if sim is None:
+            raise AttributeError("LIBERO environment does not expose env.sim.")
+        self._sim = sim
+        model = sim.model
+        self.bodies = Task3SemanticBodies(
+            black_bowl=_resolve_body_name(model, self.config.black_bowl_alias),
+            bottom_drawer=_resolve_body_name(model, self.config.bottom_drawer_alias),
+            wine_bottle=_resolve_body_name(model, self.config.wine_bottle_alias),
+            wine_rack=_resolve_body_name(model, self.config.wine_rack_alias),
+        )
+        self._black_bowl_geoms = _geom_ids_for_body(
+            model, self.bodies.black_bowl, self.config.black_bowl_alias
+        )
+        self._bottom_drawer_geoms = _geom_ids_for_body(
+            model, self.bodies.bottom_drawer, self.config.bottom_drawer_alias
+        )
+        self._wine_bottle_geoms = _geom_ids_for_body(
+            model, self.bodies.wine_bottle, self.config.wine_bottle_alias
+        )
+        self._wine_rack_geoms = _geom_ids_for_body(
+            model, self.bodies.wine_rack, self.config.wine_rack_alias
+        )
+        self._gripper_geoms = _gripper_geom_ids(model)
+        self._state_objects: Any | None = None
+        self._previous_black_bowl_position: np.ndarray | None = None
+        self._previous_drawer_qpos: float | None = None
+        self._current_episode_index: int | None = None
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        """Return the resolved task3 trace schema for reproducibility."""
+        return {
+            "version": "task3_semantic_trace_v1",
+            "config": asdict(self.config),
+            "bodies": asdict(self.bodies),
+            "state_names": {
+                "black_bowl": self.config.black_bowl_state_name,
+                "bottom_drawer": self.config.bottom_drawer_state_name,
+            },
+        }
+
+    def capture(
+        self,
+        env: Any,
+        episode_index: int,
+        frame_index: int,
+        observation: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Capture one simulator-aligned task3 semantic trace record."""
+        sim = getattr(env, "sim", None)
+        if sim is None:
+            raise AttributeError("LIBERO environment does not expose env.sim.")
+        self._start_episode(int(episode_index))
+        black_bowl_position, black_bowl_quaternion = _body_pose(
+            sim, self.bodies.black_bowl
+        )
+        black_bowl_motion = self._black_bowl_motion(black_bowl_position)
+        drawer_qpos = _joint_qpos(sim, self.config.bottom_drawer_joint_name)
+        drawer_motion = self._drawer_motion(drawer_qpos)
+        gripper_width = Task1SemanticTraceRecorder._gripper_width(observation, env)
+        gripper_closed = gripper_width <= self.config.gripper_width_threshold
+        black_bowl_gripper_contact = _has_contact(
+            sim, self._black_bowl_geoms, self._gripper_geoms
+        )
+        bottom_drawer_gripper_contact = _has_contact(
+            sim, self._bottom_drawer_geoms, self._gripper_geoms
+        )
+        wine_bottle_gripper_contact = _has_contact(
+            sim, self._wine_bottle_geoms, self._gripper_geoms
+        )
+        wine_rack_gripper_contact = _has_contact(
+            sim, self._wine_rack_geoms, self._gripper_geoms
+        )
+        black_bowl_controlled = (
+            gripper_closed
+            and black_bowl_gripper_contact
+            and black_bowl_motion >= self.config.controlled_motion_threshold
+        )
+        bottom_drawer_interacted = (
+            drawer_motion >= self.config.drawer_motion_threshold
+        )
+        state_objects = self._state_objects_for_env(env)
+        black_bowl_state = state_objects[self.config.black_bowl_state_name]
+        bottom_drawer_state = state_objects[self.config.bottom_drawer_state_name]
+        black_bowl_in_bottom_drawer = bool(
+            bottom_drawer_state.check_contain(black_bowl_state)
+        )
+        bottom_drawer_is_open = bool(bottom_drawer_state.is_open())
+        bottom_drawer_is_close = bool(bottom_drawer_state.is_close())
+
+        return {
+            "episode_index": int(episode_index),
+            "frame_index": int(frame_index),
+            "env_success": _check_success(env),
+            "gripper_width": gripper_width,
+            "gripper_closed": gripper_closed,
+            "black_bowl_x": float(black_bowl_position[0]),
+            "black_bowl_y": float(black_bowl_position[1]),
+            "black_bowl_z": float(black_bowl_position[2]),
+            "black_bowl_qw": float(black_bowl_quaternion[0]),
+            "black_bowl_qx": float(black_bowl_quaternion[1]),
+            "black_bowl_qy": float(black_bowl_quaternion[2]),
+            "black_bowl_qz": float(black_bowl_quaternion[3]),
+            "black_bowl_motion": black_bowl_motion,
+            "black_bowl_gripper_contact": black_bowl_gripper_contact,
+            "black_bowl_controlled": black_bowl_controlled,
+            "bottom_drawer_qpos": drawer_qpos,
+            "bottom_drawer_motion": drawer_motion,
+            "bottom_drawer_gripper_contact": bottom_drawer_gripper_contact,
+            "bottom_drawer_interacted": bottom_drawer_interacted,
+            "bottom_drawer_is_open": bottom_drawer_is_open,
+            "bottom_drawer_is_close": bottom_drawer_is_close,
+            "black_bowl_in_bottom_drawer": black_bowl_in_bottom_drawer,
+            "wine_bottle_gripper_contact": wine_bottle_gripper_contact,
+            "wine_rack_gripper_contact": wine_rack_gripper_contact,
+        }
+
+    def _black_bowl_motion(self, position: np.ndarray) -> float:
+        previous = self._previous_black_bowl_position
+        self._previous_black_bowl_position = position.copy()
+        if previous is None:
+            return 0.0
+        return float(np.linalg.norm(position - previous))
+
+    def _start_episode(self, episode_index: int) -> None:
+        if self._current_episode_index == episode_index:
+            return
+        self._current_episode_index = episode_index
+        self._previous_black_bowl_position = None
+        self._previous_drawer_qpos = None
+
+    def _drawer_motion(self, qpos: float) -> float:
+        previous = self._previous_drawer_qpos
+        self._previous_drawer_qpos = qpos
+        if previous is None:
+            return 0.0
+        return abs(qpos - previous)
+
+    def _state_objects_for_env(self, env: Any) -> Any:
+        if self._state_objects is not None:
+            return self._state_objects
+        base_env = getattr(env, "env", env)
+        state_objects = getattr(base_env, "object_states_dict", None)
+        if state_objects is None:
+            raise AttributeError(
+                "LIBERO task3 environment does not expose object_states_dict after reset."
+            )
+        required_state_names = {
+            self.config.black_bowl_state_name,
+            self.config.bottom_drawer_state_name,
+        }
+        missing_state_names = required_state_names - set(state_objects)
+        if missing_state_names:
+            raise ValueError(
+                "LIBERO task3 semantic states are unavailable: "
+                f"{sorted(missing_state_names)}"
+            )
+        self._state_objects = state_objects
+        return state_objects
+
+
 def _first_stable_frame(mask: np.ndarray, stable_frames: int, start: int = 0) -> int | None:
     run_start: int | None = None
     for frame_index in range(start, len(mask)):
@@ -898,6 +1094,185 @@ def write_task2_semantic_artifacts(
     metadata_path = meta_dir / f"{output_name}_metadata.json"
     trace = pd.DataFrame(records).sort_values(["episode_index", "frame_index"])
     labels, audit = build_task2_phase_labels(trace, stable_frames=stable_frames)
+    trace.to_parquet(raw_path, index=False)
+    labels.to_parquet(labels_path, index=False)
+    audit.to_csv(audit_path, index=False)
+    with open(metadata_path, "w", encoding="utf-8") as file:
+        json.dump(metadata, file, indent=2, ensure_ascii=False)
+    return {
+        "raw_trace": str(raw_path),
+        "phase_labels": str(labels_path),
+        "audit": str(audit_path),
+        "metadata": str(metadata_path),
+    }
+
+
+def build_task3_phase_labels(
+    trace: pd.DataFrame,
+    *,
+    stable_frames: int = 3,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build four monotonic phases for placing a bowl and closing its drawer."""
+    required = {
+        "episode_index",
+        "frame_index",
+        "is_success",
+        "env_success",
+        "black_bowl_controlled",
+        "bottom_drawer_interacted",
+        "bottom_drawer_is_close",
+        "black_bowl_in_bottom_drawer",
+        "wine_bottle_gripper_contact",
+        "wine_rack_gripper_contact",
+    }
+    missing = required - set(trace.columns)
+    if missing:
+        raise ValueError(f"Semantic trace missing columns: {sorted(missing)}")
+
+    label_frames: list[pd.DataFrame] = []
+    audit_rows: list[dict[str, Any]] = []
+    for episode_index, episode_trace in trace.groupby("episode_index", sort=True):
+        episode_trace = episode_trace.sort_values("frame_index").reset_index(drop=True)
+        length = len(episode_trace)
+        is_success = bool(episode_trace["is_success"].iloc[-1])
+        black_bowl_controlled = episode_trace[
+            "black_bowl_controlled"
+        ].to_numpy(dtype=bool)
+        bottom_drawer_interacted = episode_trace[
+            "bottom_drawer_interacted"
+        ].to_numpy(dtype=bool)
+        bottom_drawer_is_close = episode_trace[
+            "bottom_drawer_is_close"
+        ].to_numpy(dtype=bool)
+        black_bowl_in_bottom_drawer = episode_trace[
+            "black_bowl_in_bottom_drawer"
+        ].to_numpy(dtype=bool)
+        env_success = episode_trace["env_success"].to_numpy(dtype=bool)
+
+        b1, b1_source = _first_boundary(
+            {
+                "black_bowl_controlled": _first_stable_frame(
+                    black_bowl_controlled, stable_frames
+                ),
+                "bottom_drawer_interaction": _first_true_frame(
+                    bottom_drawer_interacted
+                ),
+            }
+        )
+        b2_start = b1 + 1 if b1 is not None else 0
+        b2 = _first_stable_frame(
+            black_bowl_in_bottom_drawer, stable_frames, b2_start
+        )
+        b2_source = "black_bowl_in_bottom_drawer" if b2 is not None else "unresolved"
+        if b2 is None and is_success:
+            b2 = _first_true_frame(black_bowl_in_bottom_drawer, b2_start)
+            if b2 is not None:
+                b2_source = "black_bowl_in_bottom_drawer_terminal"
+
+        b3 = _first_stable_frame(
+            black_bowl_in_bottom_drawer & bottom_drawer_is_close,
+            stable_frames,
+            b2 + 1 if b2 is not None else 0,
+        )
+        b3_source = "state_stable" if b3 is not None else "unresolved"
+        if b3 is None and is_success:
+            b3 = _first_true_frame(env_success, b2 + 1 if b2 is not None else 0)
+            if b3 is not None:
+                b3_source = "env_success_terminal"
+        if not is_success:
+            b3 = None
+            b3_source = "failed_episode"
+
+        phase = np.zeros(length, dtype=np.int64)
+        if b1 is not None:
+            phase[b1:] = 1
+        if b2 is not None and b1 is not None and b2 > b1:
+            phase[b2:] = 2
+        else:
+            b2 = None
+            b2_source = "unresolved"
+        if b3 is not None and b2 is not None and b3 > b2:
+            phase[b3:] = TASK3_SUCCESS_PHASE
+        else:
+            b3 = None
+            if is_success:
+                b3_source = "unresolved"
+
+        phase_progress, global_progress = _phase_progress(
+            phase, num_phases=NUM_TASK3_PHASES
+        )
+        terminal_incomplete = not is_success or b3 is None
+        if terminal_incomplete and length:
+            terminal_phase = int(phase[-1])
+            terminal_start = int(np.flatnonzero(phase == terminal_phase)[-1])
+            while terminal_start > 0 and phase[terminal_start - 1] == terminal_phase:
+                terminal_start -= 1
+            phase_progress[terminal_start:] = 0.0
+            global_progress[terminal_start:] = terminal_phase / NUM_TASK3_PHASES
+
+        label_frames.append(
+            pd.DataFrame(
+                {
+                    "episode_index": int(episode_index),
+                    "frame_index": episode_trace["frame_index"].to_numpy(dtype=np.int64),
+                    "phase": phase,
+                    "phase_progress": phase_progress,
+                    "global_progress": global_progress,
+                    "semantic_source": "simulator_trace",
+                    "semantic_confidence": np.where(
+                        b1 is not None and (not is_success or b3 is not None),
+                        "state_verified",
+                        "unresolved",
+                    ),
+                    "is_success": is_success,
+                }
+            )
+        )
+        audit_rows.append(
+            {
+                "episode_index": int(episode_index),
+                "episode_length": length,
+                "is_success": is_success,
+                "b1_frame": b1,
+                "b1_source": b1_source,
+                "b2_frame": b2,
+                "b2_source": b2_source,
+                "b3_frame": b3,
+                "b3_source": b3_source,
+                "drawer_closed_before_bowl_observed": bool(
+                    (bottom_drawer_is_close & ~black_bowl_in_bottom_drawer).any()
+                ),
+                "wine_bottle_gripper_contact_observed": bool(
+                    episode_trace["wine_bottle_gripper_contact"].to_numpy(dtype=bool).any()
+                ),
+                "wine_rack_gripper_contact_observed": bool(
+                    episode_trace["wine_rack_gripper_contact"].to_numpy(dtype=bool).any()
+                ),
+                "b3_consistent_with_success": (b3 is not None) == is_success,
+                "trainable": b1 is not None and (not is_success or b3 is not None),
+            }
+        )
+    return pd.concat(label_frames, ignore_index=True), pd.DataFrame(audit_rows)
+
+
+def write_task3_semantic_artifacts(
+    dataset_path: str | Path,
+    records: list[dict[str, Any]],
+    metadata: dict[str, Any],
+    *,
+    output_name: str = "semantic_trace_task3",
+    stable_frames: int = 3,
+) -> dict[str, str]:
+    """Write raw task3 trace, phase labels, audit rows, and metadata."""
+    dataset_path = Path(dataset_path)
+    meta_dir = dataset_path / "meta"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = meta_dir / f"{output_name}.parquet"
+    labels_path = meta_dir / f"phase_progress_{output_name}.parquet"
+    audit_path = meta_dir / f"{output_name}_audit.csv"
+    metadata_path = meta_dir / f"{output_name}_metadata.json"
+    trace = pd.DataFrame(records).sort_values(["episode_index", "frame_index"])
+    labels, audit = build_task3_phase_labels(trace, stable_frames=stable_frames)
     trace.to_parquet(raw_path, index=False)
     labels.to_parquet(labels_path, index=False)
     audit.to_csv(audit_path, index=False)

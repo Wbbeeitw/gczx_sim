@@ -7,6 +7,7 @@ import pandas as pd
 from rlinf.revalue.semantic_trace import (
     build_task1_phase_labels,
     build_task2_phase_labels,
+    build_task3_phase_labels,
 )
 
 
@@ -57,6 +58,32 @@ def _task2_trace_row(
         "stove_turn_on": stove_turn_on,
         "moka_pot_on_cook_region": moka_pot_on_cook_region,
         "frypan_gripper_contact": frypan_gripper_contact,
+    }
+
+
+def _task3_trace_row(
+    frame_index: int,
+    *,
+    success: bool,
+    env_success: bool = False,
+    black_bowl_controlled: bool = False,
+    bottom_drawer_interacted: bool = False,
+    bottom_drawer_is_close: bool = False,
+    black_bowl_in_bottom_drawer: bool = False,
+    wine_bottle_gripper_contact: bool = False,
+    wine_rack_gripper_contact: bool = False,
+) -> dict[str, object]:
+    return {
+        "episode_index": 0,
+        "frame_index": frame_index,
+        "is_success": success,
+        "env_success": env_success,
+        "black_bowl_controlled": black_bowl_controlled,
+        "bottom_drawer_interacted": bottom_drawer_interacted,
+        "bottom_drawer_is_close": bottom_drawer_is_close,
+        "black_bowl_in_bottom_drawer": black_bowl_in_bottom_drawer,
+        "wine_bottle_gripper_contact": wine_bottle_gripper_contact,
+        "wine_rack_gripper_contact": wine_rack_gripper_contact,
     }
 
 
@@ -291,6 +318,121 @@ def test_task2_env_success_terminal_completes_short_final_state() -> None:
 
     assert audit.loc[0, "b1_frame"] == 2
     assert audit.loc[0, "b2_frame"] == 4
+    assert audit.loc[0, "b3_frame"] == 19
+    assert audit.loc[0, "b3_source"] == "env_success_terminal"
+    assert bool(audit.loc[0, "b3_consistent_with_success"])
+    assert labels.loc[labels["frame_index"] == 19, "phase"].item() == 3
+
+
+def test_task3_bowl_then_close_creates_all_boundaries() -> None:
+    rows = []
+    for frame_index in range(20):
+        rows.append(
+            _task3_trace_row(
+                frame_index,
+                success=True,
+                black_bowl_controlled=2 <= frame_index < 9,
+                black_bowl_in_bottom_drawer=9 <= frame_index,
+                bottom_drawer_interacted=13 == frame_index,
+                bottom_drawer_is_close=15 <= frame_index,
+            )
+        )
+
+    labels, audit = build_task3_phase_labels(pd.DataFrame(rows), stable_frames=3)
+
+    assert audit.loc[0, "b1_frame"] == 2
+    assert audit.loc[0, "b1_source"] == "black_bowl_controlled"
+    assert audit.loc[0, "b2_frame"] == 9
+    assert audit.loc[0, "b2_source"] == "black_bowl_in_bottom_drawer"
+    assert audit.loc[0, "b3_frame"] == 15
+    assert audit.loc[0, "b3_source"] == "state_stable"
+    assert not bool(audit.loc[0, "drawer_closed_before_bowl_observed"])
+    assert labels.loc[labels["frame_index"] == 14, "phase"].item() == 2
+    assert labels.loc[labels["frame_index"] == 17, "phase"].item() == 3
+
+
+def test_task3_early_drawer_close_does_not_create_b2() -> None:
+    rows = []
+    for frame_index in range(22):
+        rows.append(
+            _task3_trace_row(
+                frame_index,
+                success=True,
+                bottom_drawer_interacted=frame_index == 2,
+                bottom_drawer_is_close=4 <= frame_index < 7 or 16 <= frame_index,
+                black_bowl_controlled=8 <= frame_index < 11,
+                black_bowl_in_bottom_drawer=11 <= frame_index,
+            )
+        )
+
+    labels, audit = build_task3_phase_labels(pd.DataFrame(rows), stable_frames=3)
+
+    assert audit.loc[0, "b1_frame"] == 2
+    assert audit.loc[0, "b2_frame"] == 11
+    assert audit.loc[0, "b3_frame"] == 16
+    assert bool(audit.loc[0, "drawer_closed_before_bowl_observed"])
+    assert labels.loc[labels["frame_index"] == 6, "phase"].item() == 1
+    assert labels.loc[labels["frame_index"] == 13, "phase"].item() == 2
+
+
+def test_task3_distractor_contact_does_not_start_a_phase() -> None:
+    rows = [
+        _task3_trace_row(
+            frame_index,
+            success=False,
+            wine_bottle_gripper_contact=2 <= frame_index < 8,
+            wine_rack_gripper_contact=10 <= frame_index < 16,
+        )
+        for frame_index in range(20)
+    ]
+
+    labels, audit = build_task3_phase_labels(pd.DataFrame(rows), stable_frames=3)
+
+    assert pd.isna(audit.loc[0, "b1_frame"])
+    assert bool(audit.loc[0, "wine_bottle_gripper_contact_observed"])
+    assert bool(audit.loc[0, "wine_rack_gripper_contact_observed"])
+    assert not bool(audit.loc[0, "trainable"])
+    assert labels["phase"].eq(0).all()
+
+
+def test_task3_bowl_drop_does_not_reset_phase_one() -> None:
+    rows = []
+    for frame_index in range(20):
+        rows.append(
+            _task3_trace_row(
+                frame_index,
+                success=False,
+                black_bowl_controlled=2 <= frame_index < 6,
+            )
+        )
+
+    labels, audit = build_task3_phase_labels(pd.DataFrame(rows), stable_frames=3)
+
+    assert audit.loc[0, "b1_frame"] == 2
+    assert pd.isna(audit.loc[0, "b2_frame"])
+    assert pd.isna(audit.loc[0, "b3_frame"])
+    assert bool(audit.loc[0, "trainable"])
+    assert labels.loc[labels["frame_index"] == 10, "phase"].item() == 1
+    assert labels["phase"].max() == 1
+
+
+def test_task3_env_success_terminal_completes_short_final_state() -> None:
+    rows = []
+    for frame_index in range(20):
+        rows.append(
+            _task3_trace_row(
+                frame_index,
+                success=True,
+                env_success=frame_index == 19,
+                black_bowl_controlled=2 <= frame_index < 8,
+                black_bowl_in_bottom_drawer=8 <= frame_index,
+            )
+        )
+
+    labels, audit = build_task3_phase_labels(pd.DataFrame(rows), stable_frames=3)
+
+    assert audit.loc[0, "b1_frame"] == 2
+    assert audit.loc[0, "b2_frame"] == 8
     assert audit.loc[0, "b3_frame"] == 19
     assert audit.loc[0, "b3_source"] == "env_success_terminal"
     assert bool(audit.loc[0, "b3_consistent_with_success"])

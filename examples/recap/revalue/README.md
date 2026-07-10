@@ -185,8 +185,9 @@ python examples/recap/revalue/revalue.py \
   rollout_collect.output_dir=/workspace/datasets/libero_task0_cfg_rollouts
 ```
 
-For LIBERO-10 task1 or task2 collection, add `rollout_collect.semantic_trace=true`
-and set `rollout_collect.semantic_trace_task` to the matching task. This keeps
+For LIBERO-10 task1, task2, or task3 collection, add
+`rollout_collect.semantic_trace=true` and set
+`rollout_collect.semantic_trace_task` to the matching task. This keeps
 privileged simulator state out of policy observations and writes task-specific
 artifacts under the collected dataset's `meta/` directory:
 
@@ -203,6 +204,13 @@ the cook region; the frypan is an audit-only distractor. Use
 `data.label_name=phase_progress_semantic_trace_task2`,
 `manifest.success_phase=3`, and `manifest.num_phases=4` when training ReValue
 from task2 labels.
+
+For task3, use `semantic_trace_task3` as the output name. Its trace records
+the native LIBERO predicates for black bowl containment in the bottom drawer
+and drawer closure; wine bottle and wine rack contacts are audit-only
+distractors. Use `data.label_name=phase_progress_semantic_trace_task3`,
+`manifest.success_phase=3`, and `manifest.num_phases=4` when training ReValue
+from task3 labels.
 
 The semantic trace supports the four task1 stages, including a B2 transition
 when either one object is stably in the basket or both objects are jointly
