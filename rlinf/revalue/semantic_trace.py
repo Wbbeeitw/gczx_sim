@@ -398,7 +398,18 @@ def build_task1_phase_labels(
         else:
             b3 = None
             if is_success:
-                b3_source = "unresolved"
+                success_frames = np.flatnonzero(
+                    episode_trace.get(
+                        "env_success",
+                        pd.Series(False, index=episode_trace.index),
+                    ).to_numpy(dtype=bool)
+                )
+                if len(success_frames) and b2 is not None and success_frames[-1] > b2:
+                    b3 = int(success_frames[-1])
+                    phase[b3:] = 3
+                    b3_source = "env_success_terminal"
+                else:
+                    b3_source = "unresolved"
 
         phase_progress, global_progress = _phase_progress(phase)
         terminal_incomplete = not is_success or b3 is None

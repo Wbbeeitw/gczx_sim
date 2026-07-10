@@ -130,3 +130,26 @@ def test_task1_env_success_completes_without_basket_contact() -> None:
     assert audit.loc[0, "b3_source"] == "env_success_terminal"
     assert bool(audit.loc[0, "b3_consistent_with_success"])
     assert labels.loc[labels["frame_index"] == 19, "phase"].item() == 3
+
+
+def test_task1_env_success_resolves_same_frame_b2_and_b3() -> None:
+    rows = []
+    for frame_index in range(20):
+        rows.append(
+            _trace_row(
+                frame_index,
+                success=True,
+                env_success=frame_index == 19,
+                object_a_controlled=2 <= frame_index < 10,
+                object_b_controlled=2 <= frame_index < 10,
+                object_a_in_basket=10 <= frame_index,
+                object_b_in_basket=10 <= frame_index,
+            )
+        )
+
+    labels, audit = build_task1_phase_labels(pd.DataFrame(rows), stable_frames=5)
+
+    assert audit.loc[0, "b2_frame"] == 10
+    assert audit.loc[0, "b3_frame"] == 19
+    assert audit.loc[0, "b3_source"] == "env_success_terminal"
+    assert labels.loc[labels["frame_index"] == 19, "phase"].item() == 3
