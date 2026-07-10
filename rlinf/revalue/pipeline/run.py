@@ -692,6 +692,11 @@ def run_revalue(cfg: RevalueConfig) -> None:
                     fps=cfg.rollout_collect.fps,
                     overwrite=cfg.rollout_collect.overwrite,
                     failure_reward=cfg.rollout_collect.failure_reward,
+                    semantic_trace=cfg.rollout_collect.semantic_trace,
+                    semantic_trace_task=cfg.rollout_collect.semantic_trace_task,
+                    semantic_trace_output_name=(
+                        cfg.rollout_collect.semantic_trace_output_name
+                    ),
                 )
             )
             logger.info(

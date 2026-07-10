@@ -197,6 +197,9 @@ rollout_collect:
   task_suite_name: libero_10
   task_id: 0
   num_episodes: 64
+  semantic_trace: false
+  semantic_trace_task: task1
+  semantic_trace_output_name: semantic_trace_task1
   noise_scale: 0.0
   noise_clip: 0.3
   action_chunk: 5

@@ -126,6 +126,9 @@ class LiberoRolloutCollectionConfig:
     fps: int = 10
     overwrite: bool = False
     failure_reward: float | None = None
+    semantic_trace: bool = False
+    semantic_trace_task: str = "task1"
+    semantic_trace_output_name: str = "semantic_trace_task1"
 
 
 def _python_bin(explicit_python: str | None) -> str:
@@ -604,6 +607,18 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
     )
     writer = LeRobotDatasetWriter()
 
+    semantic_trace_recorder = None
+    semantic_trace_records: list[dict[str, Any]] = []
+    if cfg.semantic_trace:
+        if cfg.semantic_trace_task != "task1":
+            raise ValueError(
+                "Only semantic_trace_task='task1' is currently supported, got "
+                f"{cfg.semantic_trace_task!r}."
+            )
+        from rlinf.revalue.semantic_trace import Task1SemanticTraceRecorder
+
+        semantic_trace_recorder = Task1SemanticTraceRecorder(env)
+
     successes = 0
     all_returns = []
     episode_lengths = []
@@ -618,6 +633,7 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
             obs, _, _, _ = env.step(LIBERO_DUMMY_ACTION)
 
         frames = []
+        episode_trace_records: list[dict[str, Any]] = []
         rewards = []
         done = False
         action_plan = []
@@ -666,6 +682,15 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
                 action = action + noise
 
             obs, reward, done, _ = env.step(action.tolist())
+            if semantic_trace_recorder is not None:
+                episode_trace_records.append(
+                    semantic_trace_recorder.capture(
+                        env,
+                        ep_idx,
+                        len(frames),
+                        observation=obs,
+                    )
+                )
             reward_value = float(reward)
             if cfg.failure_reward is not None and done is False:
                 reward_value = reward_value
@@ -695,6 +720,9 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
         for frame_idx, frame in enumerate(frames):
             frame["is_success"] = np.array([is_success], dtype=bool)
             frame["return"] = np.array([returns[frame_idx]], dtype=np.float32)
+        for trace_record in episode_trace_records:
+            trace_record["is_success"] = is_success
+        semantic_trace_records.extend(episode_trace_records)
         frames[-1]["done"] = np.array([True], dtype=bool)
 
         if writer.dataset is None:
@@ -731,6 +759,17 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
 
     writer.finalize()
     env.close()
+    semantic_trace_artifacts = None
+    if semantic_trace_recorder is not None:
+        from rlinf.revalue.semantic_trace import write_task1_semantic_artifacts
+
+        semantic_trace_artifacts = write_task1_semantic_artifacts(
+            output_path,
+            semantic_trace_records,
+            semantic_trace_recorder.metadata,
+            output_name=cfg.semantic_trace_output_name,
+            stable_frames=semantic_trace_recorder.config.stable_frames,
+        )
     summary = {
         "output_dir": str(output_path),
         "model_path": cfg.model_path,
@@ -743,6 +782,7 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
         "success_rate": float(successes / cfg.num_episodes) if cfg.num_episodes else 0.0,
         "mean_episode_length": float(np.mean(episode_lengths)) if episode_lengths else 0.0,
         "mean_initial_return": float(np.mean(all_returns)) if all_returns else 0.0,
+        "semantic_trace": semantic_trace_artifacts,
     }
     save_json(summary, output_path / "collection_summary.json")
     return summary

@@ -52,6 +52,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint_path", default=None)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--failure_reward", type=float, default=None)
+    parser.add_argument("--semantic_trace", action="store_true")
+    parser.add_argument("--semantic_trace_task", default="task1")
+    parser.add_argument(
+        "--semantic_trace_output_name", default="semantic_trace_task1"
+    )
     return parser.parse_args()
 
 
@@ -81,6 +86,9 @@ def main() -> None:
             fps=args.fps,
             overwrite=args.overwrite,
             failure_reward=args.failure_reward,
+            semantic_trace=args.semantic_trace,
+            semantic_trace_task=args.semantic_trace_task,
+            semantic_trace_output_name=args.semantic_trace_output_name,
         )
     )
     logging.getLogger(__name__).info("rollout collection summary: %s", summary)

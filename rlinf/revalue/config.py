@@ -264,6 +264,9 @@ class RevalueRolloutCollectConfig:
     fps: int = 10
     overwrite: bool = False
     failure_reward: float | None = None
+    semantic_trace: bool = False
+    semantic_trace_task: str = "task1"
+    semantic_trace_output_name: str = "semantic_trace_task1"
     python_bin: str | None = None
 
 
