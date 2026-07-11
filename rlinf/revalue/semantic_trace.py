@@ -23,6 +23,8 @@ NUM_TASK2_PHASES = 4
 TASK2_SUCCESS_PHASE = 3
 NUM_TASK3_PHASES = 4
 TASK3_SUCCESS_PHASE = 3
+NUM_TASK4_PHASES = 4
+TASK4_SUCCESS_PHASE = 3
 
 
 @dataclass(frozen=True)
@@ -98,6 +100,35 @@ class Task3SemanticBodies:
     bottom_drawer: str
     wine_bottle: str
     wine_rack: str
+
+
+@dataclass(frozen=True)
+class Task4SemanticTraceConfig:
+    """Task4 simulator-state extraction settings."""
+
+    porcelain_mug_alias: str = "porcelain_mug"
+    white_yellow_mug_alias: str = "white_yellow_mug"
+    left_plate_alias: str = "plate_1"
+    right_plate_alias: str = "plate_2"
+    red_coffee_mug_alias: str = "red_coffee_mug"
+    porcelain_mug_state_name: str = "porcelain_mug_1"
+    white_yellow_mug_state_name: str = "white_yellow_mug_1"
+    left_plate_state_name: str = "plate_1"
+    right_plate_state_name: str = "plate_2"
+    gripper_width_threshold: float = 0.05
+    controlled_motion_threshold: float = 0.001
+    stable_frames: int = 3
+
+
+@dataclass(frozen=True)
+class Task4SemanticBodies:
+    """Resolved MuJoCo body names used by a task4 trace."""
+
+    porcelain_mug: str
+    white_yellow_mug: str
+    left_plate: str
+    right_plate: str
+    red_coffee_mug: str
 
 
 def _normalize_name(value: str) -> str:
@@ -704,6 +735,188 @@ class Task3SemanticTraceRecorder:
         return state_objects
 
 
+class Task4SemanticTraceRecorder:
+    """Extract task4 privileged state from a live LIBERO simulator."""
+
+    def __init__(self, env: Any, config: Task4SemanticTraceConfig | None = None):
+        self.config = config or Task4SemanticTraceConfig()
+        sim = getattr(env, "sim", None)
+        if sim is None:
+            raise AttributeError("LIBERO environment does not expose env.sim.")
+        self._sim = sim
+        model = sim.model
+        self.bodies = Task4SemanticBodies(
+            porcelain_mug=_resolve_body_name(model, self.config.porcelain_mug_alias),
+            white_yellow_mug=_resolve_body_name(
+                model, self.config.white_yellow_mug_alias
+            ),
+            left_plate=_resolve_body_name(model, self.config.left_plate_alias),
+            right_plate=_resolve_body_name(model, self.config.right_plate_alias),
+            red_coffee_mug=_resolve_body_name(
+                model, self.config.red_coffee_mug_alias
+            ),
+        )
+        self._porcelain_mug_geoms = _geom_ids_for_body(
+            model, self.bodies.porcelain_mug, self.config.porcelain_mug_alias
+        )
+        self._white_yellow_mug_geoms = _geom_ids_for_body(
+            model, self.bodies.white_yellow_mug, self.config.white_yellow_mug_alias
+        )
+        self._red_coffee_mug_geoms = _geom_ids_for_body(
+            model, self.bodies.red_coffee_mug, self.config.red_coffee_mug_alias
+        )
+        self._gripper_geoms = _gripper_geom_ids(model)
+        self._state_objects: Any | None = None
+        self._previous_positions: dict[str, np.ndarray] = {}
+        self._current_episode_index: int | None = None
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        """Return the resolved task4 trace schema for reproducibility."""
+        return {
+            "version": "task4_semantic_trace_v1",
+            "config": asdict(self.config),
+            "bodies": asdict(self.bodies),
+            "state_names": {
+                "porcelain_mug": self.config.porcelain_mug_state_name,
+                "white_yellow_mug": self.config.white_yellow_mug_state_name,
+                "left_plate": self.config.left_plate_state_name,
+                "right_plate": self.config.right_plate_state_name,
+            },
+        }
+
+    def capture(
+        self,
+        env: Any,
+        episode_index: int,
+        frame_index: int,
+        observation: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Capture one simulator-aligned task4 semantic trace record."""
+        sim = getattr(env, "sim", None)
+        if sim is None:
+            raise AttributeError("LIBERO environment does not expose env.sim.")
+        self._start_episode(int(episode_index))
+        porcelain_mug_position, porcelain_mug_quaternion = _body_pose(
+            sim, self.bodies.porcelain_mug
+        )
+        white_yellow_mug_position, white_yellow_mug_quaternion = _body_pose(
+            sim, self.bodies.white_yellow_mug
+        )
+        porcelain_mug_motion = self._motion("porcelain_mug", porcelain_mug_position)
+        white_yellow_mug_motion = self._motion(
+            "white_yellow_mug", white_yellow_mug_position
+        )
+        gripper_width = Task1SemanticTraceRecorder._gripper_width(observation, env)
+        gripper_closed = gripper_width <= self.config.gripper_width_threshold
+        porcelain_mug_gripper_contact = _has_contact(
+            sim, self._porcelain_mug_geoms, self._gripper_geoms
+        )
+        white_yellow_mug_gripper_contact = _has_contact(
+            sim, self._white_yellow_mug_geoms, self._gripper_geoms
+        )
+        red_coffee_mug_gripper_contact = _has_contact(
+            sim, self._red_coffee_mug_geoms, self._gripper_geoms
+        )
+        porcelain_mug_controlled = (
+            gripper_closed
+            and porcelain_mug_gripper_contact
+            and porcelain_mug_motion >= self.config.controlled_motion_threshold
+        )
+        white_yellow_mug_controlled = (
+            gripper_closed
+            and white_yellow_mug_gripper_contact
+            and white_yellow_mug_motion >= self.config.controlled_motion_threshold
+        )
+        state_objects = self._state_objects_for_env(env)
+        porcelain_mug_state = state_objects[self.config.porcelain_mug_state_name]
+        white_yellow_mug_state = state_objects[self.config.white_yellow_mug_state_name]
+        left_plate_state = state_objects[self.config.left_plate_state_name]
+        right_plate_state = state_objects[self.config.right_plate_state_name]
+        porcelain_mug_on_left_plate = bool(
+            left_plate_state.check_ontop(porcelain_mug_state)
+        )
+        white_yellow_mug_on_right_plate = bool(
+            right_plate_state.check_ontop(white_yellow_mug_state)
+        )
+        porcelain_mug_on_right_plate = bool(
+            right_plate_state.check_ontop(porcelain_mug_state)
+        )
+        white_yellow_mug_on_left_plate = bool(
+            left_plate_state.check_ontop(white_yellow_mug_state)
+        )
+
+        return {
+            "episode_index": int(episode_index),
+            "frame_index": int(frame_index),
+            "env_success": _check_success(env),
+            "gripper_width": gripper_width,
+            "gripper_closed": gripper_closed,
+            "porcelain_mug_x": float(porcelain_mug_position[0]),
+            "porcelain_mug_y": float(porcelain_mug_position[1]),
+            "porcelain_mug_z": float(porcelain_mug_position[2]),
+            "porcelain_mug_qw": float(porcelain_mug_quaternion[0]),
+            "porcelain_mug_qx": float(porcelain_mug_quaternion[1]),
+            "porcelain_mug_qy": float(porcelain_mug_quaternion[2]),
+            "porcelain_mug_qz": float(porcelain_mug_quaternion[3]),
+            "porcelain_mug_motion": porcelain_mug_motion,
+            "porcelain_mug_gripper_contact": porcelain_mug_gripper_contact,
+            "porcelain_mug_controlled": porcelain_mug_controlled,
+            "white_yellow_mug_x": float(white_yellow_mug_position[0]),
+            "white_yellow_mug_y": float(white_yellow_mug_position[1]),
+            "white_yellow_mug_z": float(white_yellow_mug_position[2]),
+            "white_yellow_mug_qw": float(white_yellow_mug_quaternion[0]),
+            "white_yellow_mug_qx": float(white_yellow_mug_quaternion[1]),
+            "white_yellow_mug_qy": float(white_yellow_mug_quaternion[2]),
+            "white_yellow_mug_qz": float(white_yellow_mug_quaternion[3]),
+            "white_yellow_mug_motion": white_yellow_mug_motion,
+            "white_yellow_mug_gripper_contact": white_yellow_mug_gripper_contact,
+            "white_yellow_mug_controlled": white_yellow_mug_controlled,
+            "porcelain_mug_on_left_plate": porcelain_mug_on_left_plate,
+            "white_yellow_mug_on_right_plate": white_yellow_mug_on_right_plate,
+            "porcelain_mug_on_right_plate": porcelain_mug_on_right_plate,
+            "white_yellow_mug_on_left_plate": white_yellow_mug_on_left_plate,
+            "red_coffee_mug_gripper_contact": red_coffee_mug_gripper_contact,
+        }
+
+    def _motion(self, key: str, position: np.ndarray) -> float:
+        previous = self._previous_positions.get(key)
+        self._previous_positions[key] = position.copy()
+        if previous is None:
+            return 0.0
+        return float(np.linalg.norm(position - previous))
+
+    def _start_episode(self, episode_index: int) -> None:
+        if self._current_episode_index == episode_index:
+            return
+        self._current_episode_index = episode_index
+        self._previous_positions.clear()
+
+    def _state_objects_for_env(self, env: Any) -> Any:
+        if self._state_objects is not None:
+            return self._state_objects
+        base_env = getattr(env, "env", env)
+        state_objects = getattr(base_env, "object_states_dict", None)
+        if state_objects is None:
+            raise AttributeError(
+                "LIBERO task4 environment does not expose object_states_dict after reset."
+            )
+        required_state_names = {
+            self.config.porcelain_mug_state_name,
+            self.config.white_yellow_mug_state_name,
+            self.config.left_plate_state_name,
+            self.config.right_plate_state_name,
+        }
+        missing_state_names = required_state_names - set(state_objects)
+        if missing_state_names:
+            raise ValueError(
+                "LIBERO task4 semantic states are unavailable: "
+                f"{sorted(missing_state_names)}"
+            )
+        self._state_objects = state_objects
+        return state_objects
+
+
 def _first_stable_frame(mask: np.ndarray, stable_frames: int, start: int = 0) -> int | None:
     run_start: int | None = None
     for frame_index in range(start, len(mask)):
@@ -1273,6 +1486,211 @@ def write_task3_semantic_artifacts(
     metadata_path = meta_dir / f"{output_name}_metadata.json"
     trace = pd.DataFrame(records).sort_values(["episode_index", "frame_index"])
     labels, audit = build_task3_phase_labels(trace, stable_frames=stable_frames)
+    trace.to_parquet(raw_path, index=False)
+    labels.to_parquet(labels_path, index=False)
+    audit.to_csv(audit_path, index=False)
+    with open(metadata_path, "w", encoding="utf-8") as file:
+        json.dump(metadata, file, indent=2, ensure_ascii=False)
+    return {
+        "raw_trace": str(raw_path),
+        "phase_labels": str(labels_path),
+        "audit": str(audit_path),
+        "metadata": str(metadata_path),
+    }
+
+
+def build_task4_phase_labels(
+    trace: pd.DataFrame,
+    *,
+    stable_frames: int = 3,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build four monotonic phases for placing two mugs on correct plates."""
+    required = {
+        "episode_index",
+        "frame_index",
+        "is_success",
+        "env_success",
+        "porcelain_mug_controlled",
+        "white_yellow_mug_controlled",
+        "porcelain_mug_on_left_plate",
+        "white_yellow_mug_on_right_plate",
+        "porcelain_mug_on_right_plate",
+        "white_yellow_mug_on_left_plate",
+        "red_coffee_mug_gripper_contact",
+    }
+    missing = required - set(trace.columns)
+    if missing:
+        raise ValueError(f"Semantic trace missing columns: {sorted(missing)}")
+
+    label_frames: list[pd.DataFrame] = []
+    audit_rows: list[dict[str, Any]] = []
+    for episode_index, episode_trace in trace.groupby("episode_index", sort=True):
+        episode_trace = episode_trace.sort_values("frame_index").reset_index(drop=True)
+        length = len(episode_trace)
+        is_success = bool(episode_trace["is_success"].iloc[-1])
+        porcelain_mug_controlled = episode_trace[
+            "porcelain_mug_controlled"
+        ].to_numpy(dtype=bool)
+        white_yellow_mug_controlled = episode_trace[
+            "white_yellow_mug_controlled"
+        ].to_numpy(dtype=bool)
+        porcelain_mug_on_left_plate = episode_trace[
+            "porcelain_mug_on_left_plate"
+        ].to_numpy(dtype=bool)
+        white_yellow_mug_on_right_plate = episode_trace[
+            "white_yellow_mug_on_right_plate"
+        ].to_numpy(dtype=bool)
+        env_success = episode_trace["env_success"].to_numpy(dtype=bool)
+
+        b1, b1_source = _first_boundary(
+            {
+                "porcelain_mug_controlled": _first_stable_frame(
+                    porcelain_mug_controlled, stable_frames
+                ),
+                "white_yellow_mug_controlled": _first_stable_frame(
+                    white_yellow_mug_controlled, stable_frames
+                ),
+            }
+        )
+        b2_start = b1 + 1 if b1 is not None else 0
+        b2, b2_source = _first_boundary(
+            {
+                "porcelain_mug_on_left_plate": _first_stable_frame(
+                    porcelain_mug_on_left_plate, stable_frames, b2_start
+                ),
+                "white_yellow_mug_on_right_plate": _first_stable_frame(
+                    white_yellow_mug_on_right_plate, stable_frames, b2_start
+                ),
+            }
+        )
+        if b2 is None and is_success:
+            b2, b2_source = _first_boundary(
+                {
+                    "porcelain_mug_on_left_plate_terminal": _first_true_frame(
+                        porcelain_mug_on_left_plate, b2_start
+                    ),
+                    "white_yellow_mug_on_right_plate_terminal": _first_true_frame(
+                        white_yellow_mug_on_right_plate, b2_start
+                    ),
+                }
+            )
+
+        b3 = _first_stable_frame(
+            porcelain_mug_on_left_plate & white_yellow_mug_on_right_plate,
+            stable_frames,
+            b2 + 1 if b2 is not None else 0,
+        )
+        b3_source = "state_stable" if b3 is not None else "unresolved"
+        if b3 is None and is_success:
+            b3 = _first_true_frame(env_success, b2 + 1 if b2 is not None else 0)
+            if b3 is not None:
+                b3_source = "env_success_terminal"
+        if not is_success:
+            b3 = None
+            b3_source = "failed_episode"
+
+        phase = np.zeros(length, dtype=np.int64)
+        if b1 is not None:
+            phase[b1:] = 1
+        if b2 is not None and b1 is not None and b2 > b1:
+            phase[b2:] = 2
+        else:
+            b2 = None
+            b2_source = "unresolved"
+        if b3 is not None and b2 is not None and b3 > b2:
+            phase[b3:] = TASK4_SUCCESS_PHASE
+        else:
+            b3 = None
+            if is_success:
+                b3_source = "unresolved"
+
+        phase_progress, global_progress = _phase_progress(
+            phase, num_phases=NUM_TASK4_PHASES
+        )
+        terminal_incomplete = not is_success or b3 is None
+        if terminal_incomplete and length:
+            terminal_phase = int(phase[-1])
+            terminal_start = int(np.flatnonzero(phase == terminal_phase)[-1])
+            while terminal_start > 0 and phase[terminal_start - 1] == terminal_phase:
+                terminal_start -= 1
+            phase_progress[terminal_start:] = 0.0
+            global_progress[terminal_start:] = terminal_phase / NUM_TASK4_PHASES
+
+        porcelain_mug_on_right_plate = episode_trace[
+            "porcelain_mug_on_right_plate"
+        ].to_numpy(dtype=bool)
+        white_yellow_mug_on_left_plate = episode_trace[
+            "white_yellow_mug_on_left_plate"
+        ].to_numpy(dtype=bool)
+        label_frames.append(
+            pd.DataFrame(
+                {
+                    "episode_index": int(episode_index),
+                    "frame_index": episode_trace["frame_index"].to_numpy(dtype=np.int64),
+                    "phase": phase,
+                    "phase_progress": phase_progress,
+                    "global_progress": global_progress,
+                    "semantic_source": "simulator_trace",
+                    "semantic_confidence": np.where(
+                        b1 is not None and (not is_success or b3 is not None),
+                        "state_verified",
+                        "unresolved",
+                    ),
+                    "is_success": is_success,
+                }
+            )
+        )
+        audit_rows.append(
+            {
+                "episode_index": int(episode_index),
+                "episode_length": length,
+                "is_success": is_success,
+                "b1_frame": b1,
+                "b1_source": b1_source,
+                "b2_frame": b2,
+                "b2_source": b2_source,
+                "b3_frame": b3,
+                "b3_source": b3_source,
+                "porcelain_mug_on_left_plate_observed": bool(
+                    porcelain_mug_on_left_plate.any()
+                ),
+                "white_yellow_mug_on_right_plate_observed": bool(
+                    white_yellow_mug_on_right_plate.any()
+                ),
+                "incorrect_plate_placement_observed": bool(
+                    porcelain_mug_on_right_plate.any()
+                    or white_yellow_mug_on_left_plate.any()
+                ),
+                "red_coffee_mug_gripper_contact_observed": bool(
+                    episode_trace[
+                        "red_coffee_mug_gripper_contact"
+                    ].to_numpy(dtype=bool).any()
+                ),
+                "b3_consistent_with_success": (b3 is not None) == is_success,
+                "trainable": b1 is not None and (not is_success or b3 is not None),
+            }
+        )
+    return pd.concat(label_frames, ignore_index=True), pd.DataFrame(audit_rows)
+
+
+def write_task4_semantic_artifacts(
+    dataset_path: str | Path,
+    records: list[dict[str, Any]],
+    metadata: dict[str, Any],
+    *,
+    output_name: str = "semantic_trace_task4",
+    stable_frames: int = 3,
+) -> dict[str, str]:
+    """Write raw task4 trace, phase labels, audit rows, and metadata."""
+    dataset_path = Path(dataset_path)
+    meta_dir = dataset_path / "meta"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = meta_dir / f"{output_name}.parquet"
+    labels_path = meta_dir / f"phase_progress_{output_name}.parquet"
+    audit_path = meta_dir / f"{output_name}_audit.csv"
+    metadata_path = meta_dir / f"{output_name}_metadata.json"
+    trace = pd.DataFrame(records).sort_values(["episode_index", "frame_index"])
+    labels, audit = build_task4_phase_labels(trace, stable_frames=stable_frames)
     trace.to_parquet(raw_path, index=False)
     labels.to_parquet(labels_path, index=False)
     audit.to_csv(audit_path, index=False)

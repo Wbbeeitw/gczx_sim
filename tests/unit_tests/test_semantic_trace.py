@@ -8,6 +8,7 @@ from rlinf.revalue.semantic_trace import (
     build_task1_phase_labels,
     build_task2_phase_labels,
     build_task3_phase_labels,
+    build_task4_phase_labels,
 )
 
 
@@ -84,6 +85,34 @@ def _task3_trace_row(
         "black_bowl_in_bottom_drawer": black_bowl_in_bottom_drawer,
         "wine_bottle_gripper_contact": wine_bottle_gripper_contact,
         "wine_rack_gripper_contact": wine_rack_gripper_contact,
+    }
+
+
+def _task4_trace_row(
+    frame_index: int,
+    *,
+    success: bool,
+    env_success: bool = False,
+    porcelain_mug_controlled: bool = False,
+    white_yellow_mug_controlled: bool = False,
+    porcelain_mug_on_left_plate: bool = False,
+    white_yellow_mug_on_right_plate: bool = False,
+    porcelain_mug_on_right_plate: bool = False,
+    white_yellow_mug_on_left_plate: bool = False,
+    red_coffee_mug_gripper_contact: bool = False,
+) -> dict[str, object]:
+    return {
+        "episode_index": 0,
+        "frame_index": frame_index,
+        "is_success": success,
+        "env_success": env_success,
+        "porcelain_mug_controlled": porcelain_mug_controlled,
+        "white_yellow_mug_controlled": white_yellow_mug_controlled,
+        "porcelain_mug_on_left_plate": porcelain_mug_on_left_plate,
+        "white_yellow_mug_on_right_plate": white_yellow_mug_on_right_plate,
+        "porcelain_mug_on_right_plate": porcelain_mug_on_right_plate,
+        "white_yellow_mug_on_left_plate": white_yellow_mug_on_left_plate,
+        "red_coffee_mug_gripper_contact": red_coffee_mug_gripper_contact,
     }
 
 
@@ -430,6 +459,115 @@ def test_task3_env_success_terminal_completes_short_final_state() -> None:
         )
 
     labels, audit = build_task3_phase_labels(pd.DataFrame(rows), stable_frames=3)
+
+    assert audit.loc[0, "b1_frame"] == 2
+    assert audit.loc[0, "b2_frame"] == 8
+    assert audit.loc[0, "b3_frame"] == 19
+    assert audit.loc[0, "b3_source"] == "env_success_terminal"
+    assert bool(audit.loc[0, "b3_consistent_with_success"])
+    assert labels.loc[labels["frame_index"] == 19, "phase"].item() == 3
+
+
+def test_task4_porcelain_first_creates_b2_before_completion() -> None:
+    rows = []
+    for frame_index in range(22):
+        rows.append(
+            _task4_trace_row(
+                frame_index,
+                success=True,
+                porcelain_mug_controlled=2 <= frame_index < 9,
+                porcelain_mug_on_left_plate=9 <= frame_index,
+                white_yellow_mug_controlled=12 <= frame_index < 17,
+                white_yellow_mug_on_right_plate=17 <= frame_index,
+            )
+        )
+
+    labels, audit = build_task4_phase_labels(pd.DataFrame(rows), stable_frames=3)
+
+    assert audit.loc[0, "b1_frame"] == 2
+    assert audit.loc[0, "b2_frame"] == 9
+    assert audit.loc[0, "b2_source"] == "porcelain_mug_on_left_plate"
+    assert audit.loc[0, "b3_frame"] == 17
+    assert labels.loc[labels["frame_index"] == 15, "phase"].item() == 2
+    assert labels.loc[labels["frame_index"] == 19, "phase"].item() == 3
+
+
+def test_task4_white_yellow_first_is_a_supported_order() -> None:
+    rows = []
+    for frame_index in range(22):
+        rows.append(
+            _task4_trace_row(
+                frame_index,
+                success=True,
+                white_yellow_mug_controlled=2 <= frame_index < 8,
+                white_yellow_mug_on_right_plate=8 <= frame_index,
+                porcelain_mug_controlled=11 <= frame_index < 16,
+                porcelain_mug_on_left_plate=16 <= frame_index,
+            )
+        )
+
+    labels, audit = build_task4_phase_labels(pd.DataFrame(rows), stable_frames=3)
+
+    assert audit.loc[0, "b1_frame"] == 2
+    assert audit.loc[0, "b2_frame"] == 8
+    assert audit.loc[0, "b2_source"] == "white_yellow_mug_on_right_plate"
+    assert audit.loc[0, "b3_frame"] == 16
+    assert labels.loc[labels["frame_index"] == 14, "phase"].item() == 2
+
+
+def test_task4_wrong_plate_does_not_create_b2() -> None:
+    rows = []
+    for frame_index in range(20):
+        rows.append(
+            _task4_trace_row(
+                frame_index,
+                success=False,
+                porcelain_mug_controlled=2 <= frame_index < 7,
+                porcelain_mug_on_right_plate=7 <= frame_index,
+            )
+        )
+
+    labels, audit = build_task4_phase_labels(pd.DataFrame(rows), stable_frames=3)
+
+    assert audit.loc[0, "b1_frame"] == 2
+    assert pd.isna(audit.loc[0, "b2_frame"])
+    assert bool(audit.loc[0, "incorrect_plate_placement_observed"])
+    assert labels["phase"].max() == 1
+
+
+def test_task4_red_coffee_contact_does_not_start_a_phase() -> None:
+    rows = [
+        _task4_trace_row(
+            frame_index,
+            success=False,
+            red_coffee_mug_gripper_contact=2 <= frame_index < 12,
+        )
+        for frame_index in range(20)
+    ]
+
+    labels, audit = build_task4_phase_labels(pd.DataFrame(rows), stable_frames=3)
+
+    assert pd.isna(audit.loc[0, "b1_frame"])
+    assert bool(audit.loc[0, "red_coffee_mug_gripper_contact_observed"])
+    assert not bool(audit.loc[0, "trainable"])
+    assert labels["phase"].eq(0).all()
+
+
+def test_task4_env_success_terminal_completes_short_final_state() -> None:
+    rows = []
+    for frame_index in range(20):
+        rows.append(
+            _task4_trace_row(
+                frame_index,
+                success=True,
+                env_success=frame_index == 19,
+                porcelain_mug_controlled=2 <= frame_index < 8,
+                porcelain_mug_on_left_plate=8 <= frame_index,
+                white_yellow_mug_controlled=12 <= frame_index < 19,
+            )
+        )
+
+    labels, audit = build_task4_phase_labels(pd.DataFrame(rows), stable_frames=3)
 
     assert audit.loc[0, "b1_frame"] == 2
     assert audit.loc[0, "b2_frame"] == 8
