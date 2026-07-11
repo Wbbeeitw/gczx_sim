@@ -9,6 +9,7 @@ from rlinf.revalue.semantic_trace import (
     build_task2_phase_labels,
     build_task3_phase_labels,
     build_task4_phase_labels,
+    build_task5_phase_labels,
 )
 
 
@@ -113,6 +114,32 @@ def _task4_trace_row(
         "porcelain_mug_on_right_plate": porcelain_mug_on_right_plate,
         "white_yellow_mug_on_left_plate": white_yellow_mug_on_left_plate,
         "red_coffee_mug_gripper_contact": red_coffee_mug_gripper_contact,
+    }
+
+
+def _task5_trace_row(
+    frame_index: int,
+    *,
+    success: bool,
+    env_success: bool = False,
+    black_book_controlled: bool = False,
+    black_book_final_insertion_zone: bool = False,
+    black_book_in_back_compartment: bool = False,
+    black_book_back_distance: float = 0.30,
+    black_book_caddy_contact: bool = False,
+    white_yellow_mug_gripper_contact: bool = False,
+) -> dict[str, object]:
+    return {
+        "episode_index": 0,
+        "frame_index": frame_index,
+        "is_success": success,
+        "env_success": env_success,
+        "black_book_controlled": black_book_controlled,
+        "black_book_final_insertion_zone": black_book_final_insertion_zone,
+        "black_book_in_back_compartment": black_book_in_back_compartment,
+        "black_book_back_distance": black_book_back_distance,
+        "black_book_caddy_contact": black_book_caddy_contact,
+        "white_yellow_mug_gripper_contact": white_yellow_mug_gripper_contact,
     }
 
 
@@ -571,6 +598,77 @@ def test_task4_env_success_terminal_completes_short_final_state() -> None:
 
     assert audit.loc[0, "b1_frame"] == 2
     assert audit.loc[0, "b2_frame"] == 8
+    assert audit.loc[0, "b3_frame"] == 19
+    assert audit.loc[0, "b3_source"] == "env_success_terminal"
+    assert bool(audit.loc[0, "b3_consistent_with_success"])
+    assert labels.loc[labels["frame_index"] == 19, "phase"].item() == 3
+
+
+def test_task5_final_insertion_zone_creates_b2_before_completion() -> None:
+    rows = []
+    for frame_index in range(22):
+        rows.append(
+            _task5_trace_row(
+                frame_index,
+                success=True,
+                black_book_controlled=2 <= frame_index < 10,
+                black_book_final_insertion_zone=8 <= frame_index < 14,
+                black_book_in_back_compartment=14 <= frame_index,
+                black_book_back_distance=0.08 if frame_index >= 8 else 0.30,
+                black_book_caddy_contact=8 <= frame_index,
+            )
+        )
+
+    labels, audit = build_task5_phase_labels(pd.DataFrame(rows), stable_frames=3)
+
+    assert audit.loc[0, "b1_frame"] == 2
+    assert audit.loc[0, "b2_frame"] == 8
+    assert audit.loc[0, "b2_source"] == "black_book_final_insertion_zone"
+    assert audit.loc[0, "b3_frame"] == 14
+    assert audit.loc[0, "b3_source"] == "state_stable"
+    assert labels.loc[labels["frame_index"] == 12, "phase"].item() == 2
+    assert labels.loc[labels["frame_index"] == 16, "phase"].item() == 3
+
+
+def test_task5_book_drop_does_not_reset_phase_one() -> None:
+    rows = []
+    for frame_index in range(20):
+        rows.append(
+            _task5_trace_row(
+                frame_index,
+                success=False,
+                black_book_controlled=2 <= frame_index < 6,
+            )
+        )
+
+    labels, audit = build_task5_phase_labels(pd.DataFrame(rows), stable_frames=3)
+
+    assert audit.loc[0, "b1_frame"] == 2
+    assert pd.isna(audit.loc[0, "b2_frame"])
+    assert pd.isna(audit.loc[0, "b3_frame"])
+    assert bool(audit.loc[0, "trainable"])
+    assert labels.loc[labels["frame_index"] == 10, "phase"].item() == 1
+
+
+def test_task5_env_success_terminal_completes_short_final_state() -> None:
+    rows = []
+    for frame_index in range(20):
+        rows.append(
+            _task5_trace_row(
+                frame_index,
+                success=True,
+                env_success=frame_index == 19,
+                black_book_controlled=2 <= frame_index < 8,
+                black_book_final_insertion_zone=9 <= frame_index < 19,
+                black_book_back_distance=0.08 if frame_index >= 9 else 0.30,
+                black_book_caddy_contact=9 <= frame_index,
+            )
+        )
+
+    labels, audit = build_task5_phase_labels(pd.DataFrame(rows), stable_frames=3)
+
+    assert audit.loc[0, "b1_frame"] == 2
+    assert audit.loc[0, "b2_frame"] == 9
     assert audit.loc[0, "b3_frame"] == 19
     assert audit.loc[0, "b3_source"] == "env_success_terminal"
     assert bool(audit.loc[0, "b3_consistent_with_success"])

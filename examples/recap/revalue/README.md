@@ -185,7 +185,7 @@ python examples/recap/revalue/revalue.py \
   rollout_collect.output_dir=/workspace/datasets/libero_task0_cfg_rollouts
 ```
 
-For LIBERO-10 task1, task2, task3, or task4 collection, add
+For LIBERO-10 task1 through task5 collection, add
 `rollout_collect.semantic_trace=true` and set
 `rollout_collect.semantic_trace_task` to the matching task. This keeps
 privileged simulator state out of policy observations and writes task-specific
@@ -218,6 +218,13 @@ the opposite plate and red coffee mug contacts are audit-only conditions. Use
 `data.label_name=phase_progress_semantic_trace_task4`,
 `manifest.success_phase=3`, and `manifest.num_phases=4` when training ReValue
 from task4 labels.
+
+For task5, use `semantic_trace_task5` as the output name. Its trace records
+native book containment in the caddy's back compartment and an auditable
+pre-insertion boundary based on book-to-compartment distance and caddy contact.
+Use `data.label_name=phase_progress_semantic_trace_task5`,
+`manifest.success_phase=3`, and `manifest.num_phases=4` when training ReValue
+from task5 labels.
 
 The semantic trace supports the four task1 stages, including a B2 transition
 when either one object is stably in the basket or both objects are jointly

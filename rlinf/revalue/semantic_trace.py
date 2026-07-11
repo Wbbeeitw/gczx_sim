@@ -25,6 +25,8 @@ NUM_TASK3_PHASES = 4
 TASK3_SUCCESS_PHASE = 3
 NUM_TASK4_PHASES = 4
 TASK4_SUCCESS_PHASE = 3
+NUM_TASK5_PHASES = 4
+TASK5_SUCCESS_PHASE = 3
 
 
 @dataclass(frozen=True)
@@ -131,6 +133,31 @@ class Task4SemanticBodies:
     red_coffee_mug: str
 
 
+@dataclass(frozen=True)
+class Task5SemanticTraceConfig:
+    """Task5 simulator-state extraction settings."""
+
+    black_book_alias: str = "black_book_1_main"
+    caddy_alias: str = "desk_caddy"
+    white_yellow_mug_alias: str = "white_yellow_mug"
+    black_book_state_name: str = "black_book_1"
+    back_compartment_state_name: str = "desk_caddy_1_back_contain_region"
+    back_compartment_site_name: str = "desk_caddy_1_back_contain_region"
+    gripper_width_threshold: float = 0.05
+    controlled_motion_threshold: float = 0.001
+    final_insertion_distance_threshold: float = 0.10
+    stable_frames: int = 3
+
+
+@dataclass(frozen=True)
+class Task5SemanticBodies:
+    """Resolved MuJoCo body names used by a task5 trace."""
+
+    black_book: str
+    caddy: str
+    white_yellow_mug: str
+
+
 def _normalize_name(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", value.lower())
 
@@ -201,6 +228,23 @@ def _body_pose(sim: Any, body_name: str) -> tuple[np.ndarray, np.ndarray]:
         np.asarray(body.xpos, dtype=np.float32),
         np.asarray(body.xquat, dtype=np.float32),
     )
+
+
+def _site_position(sim: Any, site_name: str) -> np.ndarray:
+    """Read the world position of a named MuJoCo site."""
+    model = sim.model
+    legacy_getter = getattr(model, "site_name2id", None)
+    if callable(legacy_getter):
+        site_id = int(legacy_getter(site_name))
+    else:
+        accessor = getattr(model, "site", None)
+        if not callable(accessor):
+            raise AttributeError("MuJoCo model does not expose a site-name lookup API.")
+        site_id = int(accessor(site_name).id)
+    data = sim.data
+    if hasattr(data, "site_xpos"):
+        return np.asarray(data.site_xpos[site_id], dtype=np.float32)
+    return np.asarray(data.site(site_name).xpos, dtype=np.float32)
 
 
 def _geom_ids_for_body(model: Any, body_name: str, alias: str) -> set[int]:
@@ -911,6 +955,154 @@ class Task4SemanticTraceRecorder:
         if missing_state_names:
             raise ValueError(
                 "LIBERO task4 semantic states are unavailable: "
+                f"{sorted(missing_state_names)}"
+            )
+        self._state_objects = state_objects
+        return state_objects
+
+
+class Task5SemanticTraceRecorder:
+    """Extract task5 privileged state from a live LIBERO simulator."""
+
+    def __init__(self, env: Any, config: Task5SemanticTraceConfig | None = None):
+        self.config = config or Task5SemanticTraceConfig()
+        sim = getattr(env, "sim", None)
+        if sim is None:
+            raise AttributeError("LIBERO environment does not expose env.sim.")
+        self._sim = sim
+        model = sim.model
+        self.bodies = Task5SemanticBodies(
+            black_book=_resolve_body_name(model, self.config.black_book_alias),
+            caddy=_resolve_body_name(model, self.config.caddy_alias),
+            white_yellow_mug=_resolve_body_name(
+                model, self.config.white_yellow_mug_alias
+            ),
+        )
+        self._black_book_geoms = _geom_ids_for_body(
+            model, self.bodies.black_book, self.config.black_book_alias
+        )
+        self._caddy_geoms = _geom_ids_for_body(
+            model, self.bodies.caddy, self.config.caddy_alias
+        )
+        self._white_yellow_mug_geoms = _geom_ids_for_body(
+            model, self.bodies.white_yellow_mug, self.config.white_yellow_mug_alias
+        )
+        self._gripper_geoms = _gripper_geom_ids(model)
+        self._state_objects: Any | None = None
+        self._previous_book_position: np.ndarray | None = None
+        self._current_episode_index: int | None = None
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        """Return the resolved task5 trace schema for reproducibility."""
+        return {
+            "version": "task5_semantic_trace_v1",
+            "config": asdict(self.config),
+            "bodies": asdict(self.bodies),
+            "state_names": {
+                "black_book": self.config.black_book_state_name,
+                "back_compartment": self.config.back_compartment_state_name,
+            },
+        }
+
+    def capture(
+        self,
+        env: Any,
+        episode_index: int,
+        frame_index: int,
+        observation: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Capture one simulator-aligned task5 semantic trace record."""
+        sim = getattr(env, "sim", None)
+        if sim is None:
+            raise AttributeError("LIBERO environment does not expose env.sim.")
+        self._start_episode(int(episode_index))
+        book_position, book_quaternion = _body_pose(sim, self.bodies.black_book)
+        back_compartment_position = _site_position(
+            sim, self.config.back_compartment_site_name
+        )
+        book_motion = self._book_motion(book_position)
+        book_back_distance = float(
+            np.linalg.norm(book_position - back_compartment_position)
+        )
+        gripper_width = Task1SemanticTraceRecorder._gripper_width(observation, env)
+        gripper_closed = gripper_width <= self.config.gripper_width_threshold
+        book_gripper_contact = _has_contact(
+            sim, self._black_book_geoms, self._gripper_geoms
+        )
+        book_caddy_contact = _has_contact(sim, self._black_book_geoms, self._caddy_geoms)
+        white_yellow_mug_gripper_contact = _has_contact(
+            sim, self._white_yellow_mug_geoms, self._gripper_geoms
+        )
+        book_controlled = (
+            gripper_closed
+            and book_gripper_contact
+            and book_motion >= self.config.controlled_motion_threshold
+        )
+        book_final_insertion_zone = (
+            book_back_distance <= self.config.final_insertion_distance_threshold
+            and (book_controlled or book_caddy_contact)
+        )
+        state_objects = self._state_objects_for_env(env)
+        book_state = state_objects[self.config.black_book_state_name]
+        back_compartment_state = state_objects[
+            self.config.back_compartment_state_name
+        ]
+        book_in_back_compartment = bool(back_compartment_state.check_contain(book_state))
+
+        return {
+            "episode_index": int(episode_index),
+            "frame_index": int(frame_index),
+            "env_success": _check_success(env),
+            "gripper_width": gripper_width,
+            "gripper_closed": gripper_closed,
+            "black_book_x": float(book_position[0]),
+            "black_book_y": float(book_position[1]),
+            "black_book_z": float(book_position[2]),
+            "black_book_qw": float(book_quaternion[0]),
+            "black_book_qx": float(book_quaternion[1]),
+            "black_book_qy": float(book_quaternion[2]),
+            "black_book_qz": float(book_quaternion[3]),
+            "black_book_motion": book_motion,
+            "black_book_gripper_contact": book_gripper_contact,
+            "black_book_controlled": book_controlled,
+            "black_book_caddy_contact": book_caddy_contact,
+            "black_book_back_distance": book_back_distance,
+            "black_book_final_insertion_zone": book_final_insertion_zone,
+            "black_book_in_back_compartment": book_in_back_compartment,
+            "white_yellow_mug_gripper_contact": white_yellow_mug_gripper_contact,
+        }
+
+    def _book_motion(self, position: np.ndarray) -> float:
+        previous = self._previous_book_position
+        self._previous_book_position = position.copy()
+        if previous is None:
+            return 0.0
+        return float(np.linalg.norm(position - previous))
+
+    def _start_episode(self, episode_index: int) -> None:
+        if self._current_episode_index == episode_index:
+            return
+        self._current_episode_index = episode_index
+        self._previous_book_position = None
+
+    def _state_objects_for_env(self, env: Any) -> Any:
+        if self._state_objects is not None:
+            return self._state_objects
+        base_env = getattr(env, "env", env)
+        state_objects = getattr(base_env, "object_states_dict", None)
+        if state_objects is None:
+            raise AttributeError(
+                "LIBERO task5 environment does not expose object_states_dict after reset."
+            )
+        required_state_names = {
+            self.config.black_book_state_name,
+            self.config.back_compartment_state_name,
+        }
+        missing_state_names = required_state_names - set(state_objects)
+        if missing_state_names:
+            raise ValueError(
+                "LIBERO task5 semantic states are unavailable: "
                 f"{sorted(missing_state_names)}"
             )
         self._state_objects = state_objects
@@ -1691,6 +1883,179 @@ def write_task4_semantic_artifacts(
     metadata_path = meta_dir / f"{output_name}_metadata.json"
     trace = pd.DataFrame(records).sort_values(["episode_index", "frame_index"])
     labels, audit = build_task4_phase_labels(trace, stable_frames=stable_frames)
+    trace.to_parquet(raw_path, index=False)
+    labels.to_parquet(labels_path, index=False)
+    audit.to_csv(audit_path, index=False)
+    with open(metadata_path, "w", encoding="utf-8") as file:
+        json.dump(metadata, file, indent=2, ensure_ascii=False)
+    return {
+        "raw_trace": str(raw_path),
+        "phase_labels": str(labels_path),
+        "audit": str(audit_path),
+        "metadata": str(metadata_path),
+    }
+
+
+def build_task5_phase_labels(
+    trace: pd.DataFrame,
+    *,
+    stable_frames: int = 3,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build four monotonic phases for inserting a book into a caddy."""
+    required = {
+        "episode_index",
+        "frame_index",
+        "is_success",
+        "env_success",
+        "black_book_controlled",
+        "black_book_final_insertion_zone",
+        "black_book_in_back_compartment",
+        "black_book_back_distance",
+        "black_book_caddy_contact",
+        "white_yellow_mug_gripper_contact",
+    }
+    missing = required - set(trace.columns)
+    if missing:
+        raise ValueError(f"Semantic trace missing columns: {sorted(missing)}")
+
+    label_frames: list[pd.DataFrame] = []
+    audit_rows: list[dict[str, Any]] = []
+    for episode_index, episode_trace in trace.groupby("episode_index", sort=True):
+        episode_trace = episode_trace.sort_values("frame_index").reset_index(drop=True)
+        length = len(episode_trace)
+        is_success = bool(episode_trace["is_success"].iloc[-1])
+        black_book_controlled = episode_trace[
+            "black_book_controlled"
+        ].to_numpy(dtype=bool)
+        black_book_final_insertion_zone = episode_trace[
+            "black_book_final_insertion_zone"
+        ].to_numpy(dtype=bool)
+        black_book_in_back_compartment = episode_trace[
+            "black_book_in_back_compartment"
+        ].to_numpy(dtype=bool)
+        env_success = episode_trace["env_success"].to_numpy(dtype=bool)
+
+        b1 = _first_stable_frame(black_book_controlled, stable_frames)
+        b1_source = "black_book_controlled" if b1 is not None else "unresolved"
+        b2_start = b1 + 1 if b1 is not None else 0
+        b2 = _first_stable_frame(
+            black_book_final_insertion_zone, stable_frames, b2_start
+        )
+        b2_source = "black_book_final_insertion_zone" if b2 is not None else "unresolved"
+        if b2 is None and is_success:
+            b2 = _first_true_frame(black_book_in_back_compartment, b2_start)
+            if b2 is not None:
+                b2_source = "black_book_in_back_compartment_terminal"
+
+        b3 = _first_stable_frame(
+            black_book_in_back_compartment,
+            stable_frames,
+            b2 + 1 if b2 is not None else 0,
+        )
+        b3_source = "state_stable" if b3 is not None else "unresolved"
+        if b3 is None and is_success:
+            b3 = _first_true_frame(env_success, b2 + 1 if b2 is not None else 0)
+            if b3 is not None:
+                b3_source = "env_success_terminal"
+        if not is_success:
+            b3 = None
+            b3_source = "failed_episode"
+
+        phase = np.zeros(length, dtype=np.int64)
+        if b1 is not None:
+            phase[b1:] = 1
+        if b2 is not None and b1 is not None and b2 > b1:
+            phase[b2:] = 2
+        else:
+            b2 = None
+            b2_source = "unresolved"
+        if b3 is not None and b2 is not None and b3 > b2:
+            phase[b3:] = TASK5_SUCCESS_PHASE
+        else:
+            b3 = None
+            if is_success:
+                b3_source = "unresolved"
+
+        phase_progress, global_progress = _phase_progress(
+            phase, num_phases=NUM_TASK5_PHASES
+        )
+        terminal_incomplete = not is_success or b3 is None
+        if terminal_incomplete and length:
+            terminal_phase = int(phase[-1])
+            terminal_start = int(np.flatnonzero(phase == terminal_phase)[-1])
+            while terminal_start > 0 and phase[terminal_start - 1] == terminal_phase:
+                terminal_start -= 1
+            phase_progress[terminal_start:] = 0.0
+            global_progress[terminal_start:] = terminal_phase / NUM_TASK5_PHASES
+
+        label_frames.append(
+            pd.DataFrame(
+                {
+                    "episode_index": int(episode_index),
+                    "frame_index": episode_trace["frame_index"].to_numpy(dtype=np.int64),
+                    "phase": phase,
+                    "phase_progress": phase_progress,
+                    "global_progress": global_progress,
+                    "semantic_source": "simulator_trace",
+                    "semantic_confidence": np.where(
+                        b1 is not None and (not is_success or b3 is not None),
+                        "state_verified",
+                        "unresolved",
+                    ),
+                    "is_success": is_success,
+                }
+            )
+        )
+        audit_rows.append(
+            {
+                "episode_index": int(episode_index),
+                "episode_length": length,
+                "is_success": is_success,
+                "b1_frame": b1,
+                "b1_source": b1_source,
+                "b2_frame": b2,
+                "b2_source": b2_source,
+                "b3_frame": b3,
+                "b3_source": b3_source,
+                "minimum_black_book_back_distance": float(
+                    episode_trace["black_book_back_distance"].min()
+                ),
+                "black_book_caddy_contact_observed": bool(
+                    episode_trace["black_book_caddy_contact"].to_numpy(dtype=bool).any()
+                ),
+                "black_book_in_back_compartment_observed": bool(
+                    black_book_in_back_compartment.any()
+                ),
+                "white_yellow_mug_gripper_contact_observed": bool(
+                    episode_trace[
+                        "white_yellow_mug_gripper_contact"
+                    ].to_numpy(dtype=bool).any()
+                ),
+                "b3_consistent_with_success": (b3 is not None) == is_success,
+                "trainable": b1 is not None and (not is_success or b3 is not None),
+            }
+        )
+    return pd.concat(label_frames, ignore_index=True), pd.DataFrame(audit_rows)
+
+
+def write_task5_semantic_artifacts(
+    dataset_path: str | Path,
+    records: list[dict[str, Any]],
+    metadata: dict[str, Any],
+    *,
+    output_name: str = "semantic_trace_task5",
+    stable_frames: int = 3,
+) -> dict[str, str]:
+    """Write raw task5 trace, phase labels, audit rows, and metadata."""
+    dataset_path = Path(dataset_path)
+    meta_dir = dataset_path / "meta"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = meta_dir / f"{output_name}.parquet"
+    labels_path = meta_dir / f"phase_progress_{output_name}.parquet"
+    audit_path = meta_dir / f"{output_name}_audit.csv"
+    metadata_path = meta_dir / f"{output_name}_metadata.json"
+    trace = pd.DataFrame(records).sort_values(["episode_index", "frame_index"])
+    labels, audit = build_task5_phase_labels(trace, stable_frames=stable_frames)
     trace.to_parquet(raw_path, index=False)
     labels.to_parquet(labels_path, index=False)
     audit.to_csv(audit_path, index=False)
