@@ -27,6 +27,8 @@ NUM_TASK4_PHASES = 4
 TASK4_SUCCESS_PHASE = 3
 NUM_TASK5_PHASES = 4
 TASK5_SUCCESS_PHASE = 3
+NUM_TASK6_PHASES = 4
+TASK6_SUCCESS_PHASE = 3
 
 
 @dataclass(frozen=True)
@@ -156,6 +158,34 @@ class Task5SemanticBodies:
     black_book: str
     caddy: str
     white_yellow_mug: str
+
+
+@dataclass(frozen=True)
+class Task6SemanticTraceConfig:
+    """Task6 simulator-state extraction settings."""
+
+    porcelain_mug_alias: str = "porcelain_mug"
+    chocolate_pudding_alias: str = "chocolate_pudding"
+    plate_alias: str = "plate_1"
+    red_coffee_mug_alias: str = "red_coffee_mug"
+    porcelain_mug_state_name: str = "porcelain_mug_1"
+    chocolate_pudding_state_name: str = "chocolate_pudding_1"
+    plate_state_name: str = "plate_1"
+    plate_left_region_state_name: str = "living_room_table_plate_left_region"
+    plate_right_region_state_name: str = "living_room_table_plate_right_region"
+    gripper_width_threshold: float = 0.05
+    controlled_motion_threshold: float = 0.001
+    stable_frames: int = 3
+
+
+@dataclass(frozen=True)
+class Task6SemanticBodies:
+    """Resolved MuJoCo body names used by a task6 trace."""
+
+    porcelain_mug: str
+    chocolate_pudding: str
+    plate: str
+    red_coffee_mug: str
 
 
 def _normalize_name(value: str) -> str:
@@ -1109,6 +1139,200 @@ class Task5SemanticTraceRecorder:
         return state_objects
 
 
+class Task6SemanticTraceRecorder:
+    """Extract task6 privileged state from a live LIBERO simulator."""
+
+    def __init__(self, env: Any, config: Task6SemanticTraceConfig | None = None):
+        self.config = config or Task6SemanticTraceConfig()
+        sim = getattr(env, "sim", None)
+        if sim is None:
+            raise AttributeError("LIBERO environment does not expose env.sim.")
+        self._sim = sim
+        model = sim.model
+        self.bodies = Task6SemanticBodies(
+            porcelain_mug=_resolve_body_name(model, self.config.porcelain_mug_alias),
+            chocolate_pudding=_resolve_body_name(
+                model, self.config.chocolate_pudding_alias
+            ),
+            plate=_resolve_body_name(model, self.config.plate_alias),
+            red_coffee_mug=_resolve_body_name(
+                model, self.config.red_coffee_mug_alias
+            ),
+        )
+        self._porcelain_mug_geoms = _geom_ids_for_body(
+            model, self.bodies.porcelain_mug, self.config.porcelain_mug_alias
+        )
+        self._chocolate_pudding_geoms = _geom_ids_for_body(
+            model, self.bodies.chocolate_pudding, self.config.chocolate_pudding_alias
+        )
+        self._red_coffee_mug_geoms = _geom_ids_for_body(
+            model, self.bodies.red_coffee_mug, self.config.red_coffee_mug_alias
+        )
+        self._gripper_geoms = _gripper_geom_ids(model)
+        self._state_objects: Any | None = None
+        self._previous_positions: dict[str, np.ndarray] = {}
+        self._current_episode_index: int | None = None
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        """Return the resolved task6 trace schema for reproducibility."""
+        return {
+            "version": "task6_semantic_trace_v1",
+            "config": asdict(self.config),
+            "bodies": asdict(self.bodies),
+            "state_names": {
+                "porcelain_mug": self.config.porcelain_mug_state_name,
+                "chocolate_pudding": self.config.chocolate_pudding_state_name,
+                "plate": self.config.plate_state_name,
+                "plate_left_region": self.config.plate_left_region_state_name,
+                "plate_right_region": self.config.plate_right_region_state_name,
+            },
+        }
+
+    def capture(
+        self,
+        env: Any,
+        episode_index: int,
+        frame_index: int,
+        observation: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Capture one simulator-aligned task6 semantic trace record."""
+        sim = getattr(env, "sim", None)
+        if sim is None:
+            raise AttributeError("LIBERO environment does not expose env.sim.")
+        self._start_episode(int(episode_index))
+        porcelain_mug_position, porcelain_mug_quaternion = _body_pose(
+            sim, self.bodies.porcelain_mug
+        )
+        chocolate_pudding_position, chocolate_pudding_quaternion = _body_pose(
+            sim, self.bodies.chocolate_pudding
+        )
+        porcelain_mug_motion = self._motion(
+            "porcelain_mug", porcelain_mug_position
+        )
+        chocolate_pudding_motion = self._motion(
+            "chocolate_pudding", chocolate_pudding_position
+        )
+        gripper_width = Task1SemanticTraceRecorder._gripper_width(observation, env)
+        gripper_closed = gripper_width <= self.config.gripper_width_threshold
+        porcelain_mug_gripper_contact = _has_contact(
+            sim, self._porcelain_mug_geoms, self._gripper_geoms
+        )
+        chocolate_pudding_gripper_contact = _has_contact(
+            sim, self._chocolate_pudding_geoms, self._gripper_geoms
+        )
+        red_coffee_mug_gripper_contact = _has_contact(
+            sim, self._red_coffee_mug_geoms, self._gripper_geoms
+        )
+        porcelain_mug_controlled = (
+            gripper_closed
+            and porcelain_mug_gripper_contact
+            and porcelain_mug_motion >= self.config.controlled_motion_threshold
+        )
+        chocolate_pudding_controlled = (
+            gripper_closed
+            and chocolate_pudding_gripper_contact
+            and chocolate_pudding_motion >= self.config.controlled_motion_threshold
+        )
+        state_objects = self._state_objects_for_env(env)
+        porcelain_mug_state = state_objects[self.config.porcelain_mug_state_name]
+        chocolate_pudding_state = state_objects[
+            self.config.chocolate_pudding_state_name
+        ]
+        plate_state = state_objects[self.config.plate_state_name]
+        plate_left_region_state = state_objects[
+            self.config.plate_left_region_state_name
+        ]
+        plate_right_region_state = state_objects[
+            self.config.plate_right_region_state_name
+        ]
+        porcelain_mug_on_plate = bool(plate_state.check_ontop(porcelain_mug_state))
+        chocolate_pudding_on_plate = bool(
+            plate_state.check_ontop(chocolate_pudding_state)
+        )
+        chocolate_pudding_on_plate_left_region = bool(
+            plate_left_region_state.check_ontop(chocolate_pudding_state)
+        )
+        chocolate_pudding_on_plate_right_region = bool(
+            plate_right_region_state.check_ontop(chocolate_pudding_state)
+        )
+
+        return {
+            "episode_index": int(episode_index),
+            "frame_index": int(frame_index),
+            "env_success": _check_success(env),
+            "gripper_width": gripper_width,
+            "gripper_closed": gripper_closed,
+            "porcelain_mug_x": float(porcelain_mug_position[0]),
+            "porcelain_mug_y": float(porcelain_mug_position[1]),
+            "porcelain_mug_z": float(porcelain_mug_position[2]),
+            "porcelain_mug_qw": float(porcelain_mug_quaternion[0]),
+            "porcelain_mug_qx": float(porcelain_mug_quaternion[1]),
+            "porcelain_mug_qy": float(porcelain_mug_quaternion[2]),
+            "porcelain_mug_qz": float(porcelain_mug_quaternion[3]),
+            "porcelain_mug_motion": porcelain_mug_motion,
+            "porcelain_mug_gripper_contact": porcelain_mug_gripper_contact,
+            "porcelain_mug_controlled": porcelain_mug_controlled,
+            "chocolate_pudding_x": float(chocolate_pudding_position[0]),
+            "chocolate_pudding_y": float(chocolate_pudding_position[1]),
+            "chocolate_pudding_z": float(chocolate_pudding_position[2]),
+            "chocolate_pudding_qw": float(chocolate_pudding_quaternion[0]),
+            "chocolate_pudding_qx": float(chocolate_pudding_quaternion[1]),
+            "chocolate_pudding_qy": float(chocolate_pudding_quaternion[2]),
+            "chocolate_pudding_qz": float(chocolate_pudding_quaternion[3]),
+            "chocolate_pudding_motion": chocolate_pudding_motion,
+            "chocolate_pudding_gripper_contact": chocolate_pudding_gripper_contact,
+            "chocolate_pudding_controlled": chocolate_pudding_controlled,
+            "porcelain_mug_on_plate": porcelain_mug_on_plate,
+            "chocolate_pudding_on_plate": chocolate_pudding_on_plate,
+            "chocolate_pudding_on_plate_left_region": (
+                chocolate_pudding_on_plate_left_region
+            ),
+            "chocolate_pudding_on_plate_right_region": (
+                chocolate_pudding_on_plate_right_region
+            ),
+            "red_coffee_mug_gripper_contact": red_coffee_mug_gripper_contact,
+        }
+
+    def _motion(self, key: str, position: np.ndarray) -> float:
+        previous = self._previous_positions.get(key)
+        self._previous_positions[key] = position.copy()
+        if previous is None:
+            return 0.0
+        return float(np.linalg.norm(position - previous))
+
+    def _start_episode(self, episode_index: int) -> None:
+        if self._current_episode_index == episode_index:
+            return
+        self._current_episode_index = episode_index
+        self._previous_positions.clear()
+
+    def _state_objects_for_env(self, env: Any) -> Any:
+        if self._state_objects is not None:
+            return self._state_objects
+        base_env = getattr(env, "env", env)
+        state_objects = getattr(base_env, "object_states_dict", None)
+        if state_objects is None:
+            raise AttributeError(
+                "LIBERO task6 environment does not expose object_states_dict after reset."
+            )
+        required_state_names = {
+            self.config.porcelain_mug_state_name,
+            self.config.chocolate_pudding_state_name,
+            self.config.plate_state_name,
+            self.config.plate_left_region_state_name,
+            self.config.plate_right_region_state_name,
+        }
+        missing_state_names = required_state_names - set(state_objects)
+        if missing_state_names:
+            raise ValueError(
+                "LIBERO task6 semantic states are unavailable: "
+                f"{sorted(missing_state_names)}"
+            )
+        self._state_objects = state_objects
+        return state_objects
+
+
 def _first_stable_frame(mask: np.ndarray, stable_frames: int, start: int = 0) -> int | None:
     run_start: int | None = None
     for frame_index in range(start, len(mask)):
@@ -2056,6 +2280,216 @@ def write_task5_semantic_artifacts(
     metadata_path = meta_dir / f"{output_name}_metadata.json"
     trace = pd.DataFrame(records).sort_values(["episode_index", "frame_index"])
     labels, audit = build_task5_phase_labels(trace, stable_frames=stable_frames)
+    trace.to_parquet(raw_path, index=False)
+    labels.to_parquet(labels_path, index=False)
+    audit.to_csv(audit_path, index=False)
+    with open(metadata_path, "w", encoding="utf-8") as file:
+        json.dump(metadata, file, indent=2, ensure_ascii=False)
+    return {
+        "raw_trace": str(raw_path),
+        "phase_labels": str(labels_path),
+        "audit": str(audit_path),
+        "metadata": str(metadata_path),
+    }
+
+
+def build_task6_phase_labels(
+    trace: pd.DataFrame,
+    *,
+    stable_frames: int = 3,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build four monotonic phases for the task6 mug and pudding goals."""
+    required = {
+        "episode_index",
+        "frame_index",
+        "is_success",
+        "env_success",
+        "porcelain_mug_controlled",
+        "chocolate_pudding_controlled",
+        "porcelain_mug_on_plate",
+        "chocolate_pudding_on_plate",
+        "chocolate_pudding_on_plate_left_region",
+        "chocolate_pudding_on_plate_right_region",
+        "red_coffee_mug_gripper_contact",
+    }
+    missing = required - set(trace.columns)
+    if missing:
+        raise ValueError(f"Semantic trace missing columns: {sorted(missing)}")
+
+    label_frames: list[pd.DataFrame] = []
+    audit_rows: list[dict[str, Any]] = []
+    for episode_index, episode_trace in trace.groupby("episode_index", sort=True):
+        episode_trace = episode_trace.sort_values("frame_index").reset_index(drop=True)
+        length = len(episode_trace)
+        is_success = bool(episode_trace["is_success"].iloc[-1])
+        porcelain_mug_controlled = episode_trace[
+            "porcelain_mug_controlled"
+        ].to_numpy(dtype=bool)
+        chocolate_pudding_controlled = episode_trace[
+            "chocolate_pudding_controlled"
+        ].to_numpy(dtype=bool)
+        porcelain_mug_on_plate = episode_trace["porcelain_mug_on_plate"].to_numpy(
+            dtype=bool
+        )
+        chocolate_pudding_on_plate_right_region = episode_trace[
+            "chocolate_pudding_on_plate_right_region"
+        ].to_numpy(dtype=bool)
+        env_success = episode_trace["env_success"].to_numpy(dtype=bool)
+
+        b1, b1_source = _first_boundary(
+            {
+                "porcelain_mug_controlled": _first_stable_frame(
+                    porcelain_mug_controlled, stable_frames
+                ),
+                "chocolate_pudding_controlled": _first_stable_frame(
+                    chocolate_pudding_controlled, stable_frames
+                ),
+            }
+        )
+        b2_start = b1 + 1 if b1 is not None else 0
+        b2, b2_source = _first_boundary(
+            {
+                "porcelain_mug_on_plate": _first_stable_frame(
+                    porcelain_mug_on_plate, stable_frames, b2_start
+                ),
+                "chocolate_pudding_on_plate_right_region": _first_stable_frame(
+                    chocolate_pudding_on_plate_right_region,
+                    stable_frames,
+                    b2_start,
+                ),
+            }
+        )
+        if b2 is None and is_success:
+            b2, b2_source = _first_boundary(
+                {
+                    "porcelain_mug_on_plate_terminal": _first_true_frame(
+                        porcelain_mug_on_plate, b2_start
+                    ),
+                    "chocolate_pudding_on_plate_right_region_terminal": (
+                        _first_true_frame(
+                            chocolate_pudding_on_plate_right_region, b2_start
+                        )
+                    ),
+                }
+            )
+
+        final_goal = porcelain_mug_on_plate & chocolate_pudding_on_plate_right_region
+        b3 = _first_stable_frame(
+            final_goal,
+            stable_frames,
+            b2 + 1 if b2 is not None else 0,
+        )
+        b3_source = "state_stable" if b3 is not None else "unresolved"
+        if b3 is None and is_success:
+            b3 = _first_true_frame(env_success, b2 + 1 if b2 is not None else 0)
+            if b3 is not None:
+                b3_source = "env_success_terminal"
+        if not is_success:
+            b3 = None
+            b3_source = "failed_episode"
+
+        phase = np.zeros(length, dtype=np.int64)
+        if b1 is not None:
+            phase[b1:] = 1
+        if b2 is not None and b1 is not None and b2 > b1:
+            phase[b2:] = 2
+        else:
+            b2 = None
+            b2_source = "unresolved"
+        if b3 is not None and b2 is not None and b3 > b2:
+            phase[b3:] = TASK6_SUCCESS_PHASE
+        else:
+            b3 = None
+            if is_success:
+                b3_source = "unresolved"
+
+        phase_progress, global_progress = _phase_progress(
+            phase, num_phases=NUM_TASK6_PHASES
+        )
+        terminal_incomplete = not is_success or b3 is None
+        if terminal_incomplete and length:
+            terminal_phase = int(phase[-1])
+            terminal_start = int(np.flatnonzero(phase == terminal_phase)[-1])
+            while terminal_start > 0 and phase[terminal_start - 1] == terminal_phase:
+                terminal_start -= 1
+            phase_progress[terminal_start:] = 0.0
+            global_progress[terminal_start:] = terminal_phase / NUM_TASK6_PHASES
+
+        chocolate_pudding_on_plate = episode_trace[
+            "chocolate_pudding_on_plate"
+        ].to_numpy(dtype=bool)
+        chocolate_pudding_on_plate_left_region = episode_trace[
+            "chocolate_pudding_on_plate_left_region"
+        ].to_numpy(dtype=bool)
+        label_frames.append(
+            pd.DataFrame(
+                {
+                    "episode_index": int(episode_index),
+                    "frame_index": episode_trace["frame_index"].to_numpy(
+                        dtype=np.int64
+                    ),
+                    "phase": phase,
+                    "phase_progress": phase_progress,
+                    "global_progress": global_progress,
+                    "semantic_source": "simulator_trace",
+                    "semantic_confidence": np.where(
+                        b1 is not None and (not is_success or b3 is not None),
+                        "state_verified",
+                        "unresolved",
+                    ),
+                    "is_success": is_success,
+                }
+            )
+        )
+        audit_rows.append(
+            {
+                "episode_index": int(episode_index),
+                "episode_length": length,
+                "is_success": is_success,
+                "b1_frame": b1,
+                "b1_source": b1_source,
+                "b2_frame": b2,
+                "b2_source": b2_source,
+                "b3_frame": b3,
+                "b3_source": b3_source,
+                "porcelain_mug_on_plate_observed": bool(porcelain_mug_on_plate.any()),
+                "chocolate_pudding_on_plate_right_region_observed": bool(
+                    chocolate_pudding_on_plate_right_region.any()
+                ),
+                "chocolate_pudding_incorrect_placement_observed": bool(
+                    chocolate_pudding_on_plate.any()
+                    or chocolate_pudding_on_plate_left_region.any()
+                ),
+                "red_coffee_mug_gripper_contact_observed": bool(
+                    episode_trace["red_coffee_mug_gripper_contact"]
+                    .to_numpy(dtype=bool)
+                    .any()
+                ),
+                "b3_consistent_with_success": (b3 is not None) == is_success,
+                "trainable": b1 is not None and (not is_success or b3 is not None),
+            }
+        )
+    return pd.concat(label_frames, ignore_index=True), pd.DataFrame(audit_rows)
+
+
+def write_task6_semantic_artifacts(
+    dataset_path: str | Path,
+    records: list[dict[str, Any]],
+    metadata: dict[str, Any],
+    *,
+    output_name: str = "semantic_trace_task6",
+    stable_frames: int = 3,
+) -> dict[str, str]:
+    """Write raw task6 trace, phase labels, audit rows, and metadata."""
+    dataset_path = Path(dataset_path)
+    meta_dir = dataset_path / "meta"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = meta_dir / f"{output_name}.parquet"
+    labels_path = meta_dir / f"phase_progress_{output_name}.parquet"
+    audit_path = meta_dir / f"{output_name}_audit.csv"
+    metadata_path = meta_dir / f"{output_name}_metadata.json"
+    trace = pd.DataFrame(records).sort_values(["episode_index", "frame_index"])
+    labels, audit = build_task6_phase_labels(trace, stable_frames=stable_frames)
     trace.to_parquet(raw_path, index=False)
     labels.to_parquet(labels_path, index=False)
     audit.to_csv(audit_path, index=False)

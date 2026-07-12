@@ -617,11 +617,13 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
             Task3SemanticTraceRecorder,
             Task4SemanticTraceRecorder,
             Task5SemanticTraceRecorder,
+            Task6SemanticTraceRecorder,
             write_task1_semantic_artifacts,
             write_task2_semantic_artifacts,
             write_task3_semantic_artifacts,
             write_task4_semantic_artifacts,
             write_task5_semantic_artifacts,
+            write_task6_semantic_artifacts,
         )
 
         semantic_trace_specs = {
@@ -649,6 +651,11 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
                 5,
                 Task5SemanticTraceRecorder,
                 write_task5_semantic_artifacts,
+            ),
+            "task6": (
+                6,
+                Task6SemanticTraceRecorder,
+                write_task6_semantic_artifacts,
             ),
         }
         trace_spec = semantic_trace_specs.get(cfg.semantic_trace_task)

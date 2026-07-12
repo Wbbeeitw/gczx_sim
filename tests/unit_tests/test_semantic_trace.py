@@ -10,6 +10,7 @@ from rlinf.revalue.semantic_trace import (
     build_task3_phase_labels,
     build_task4_phase_labels,
     build_task5_phase_labels,
+    build_task6_phase_labels,
 )
 
 
@@ -140,6 +141,34 @@ def _task5_trace_row(
         "black_book_back_distance": black_book_back_distance,
         "black_book_caddy_contact": black_book_caddy_contact,
         "white_yellow_mug_gripper_contact": white_yellow_mug_gripper_contact,
+    }
+
+
+def _task6_trace_row(
+    frame_index: int,
+    *,
+    success: bool,
+    env_success: bool = False,
+    porcelain_mug_controlled: bool = False,
+    chocolate_pudding_controlled: bool = False,
+    porcelain_mug_on_plate: bool = False,
+    chocolate_pudding_on_plate: bool = False,
+    chocolate_pudding_on_plate_left_region: bool = False,
+    chocolate_pudding_on_plate_right_region: bool = False,
+    red_coffee_mug_gripper_contact: bool = False,
+) -> dict[str, object]:
+    return {
+        "episode_index": 0,
+        "frame_index": frame_index,
+        "is_success": success,
+        "env_success": env_success,
+        "porcelain_mug_controlled": porcelain_mug_controlled,
+        "chocolate_pudding_controlled": chocolate_pudding_controlled,
+        "porcelain_mug_on_plate": porcelain_mug_on_plate,
+        "chocolate_pudding_on_plate": chocolate_pudding_on_plate,
+        "chocolate_pudding_on_plate_left_region": chocolate_pudding_on_plate_left_region,
+        "chocolate_pudding_on_plate_right_region": chocolate_pudding_on_plate_right_region,
+        "red_coffee_mug_gripper_contact": red_coffee_mug_gripper_contact,
     }
 
 
@@ -673,3 +702,78 @@ def test_task5_env_success_terminal_completes_short_final_state() -> None:
     assert audit.loc[0, "b3_source"] == "env_success_terminal"
     assert bool(audit.loc[0, "b3_consistent_with_success"])
     assert labels.loc[labels["frame_index"] == 19, "phase"].item() == 3
+
+
+def test_task6_porcelain_mug_first_creates_b2_before_completion() -> None:
+    rows = [
+        _task6_trace_row(
+            frame,
+            success=True,
+            porcelain_mug_controlled=2 <= frame < 8,
+            porcelain_mug_on_plate=8 <= frame,
+            chocolate_pudding_controlled=11 <= frame < 16,
+            chocolate_pudding_on_plate_right_region=16 <= frame,
+        )
+        for frame in range(22)
+    ]
+    labels, audit = build_task6_phase_labels(pd.DataFrame(rows), stable_frames=3)
+    assert (
+        audit.loc[0, "b1_frame"],
+        audit.loc[0, "b2_frame"],
+        audit.loc[0, "b3_frame"],
+    ) == (2, 8, 16)
+    assert audit.loc[0, "b2_source"] == "porcelain_mug_on_plate"
+    assert labels.loc[labels["frame_index"] == 14, "phase"].item() == 2
+
+
+def test_task6_chocolate_pudding_first_creates_b2_before_completion() -> None:
+    rows = [
+        _task6_trace_row(
+            frame,
+            success=True,
+            chocolate_pudding_controlled=2 <= frame < 8,
+            chocolate_pudding_on_plate_right_region=8 <= frame,
+            porcelain_mug_controlled=11 <= frame < 16,
+            porcelain_mug_on_plate=16 <= frame,
+        )
+        for frame in range(22)
+    ]
+    labels, audit = build_task6_phase_labels(pd.DataFrame(rows), stable_frames=3)
+    assert audit.loc[0, "b1_frame"] == 2
+    assert audit.loc[0, "b2_frame"] == 8
+    assert audit.loc[0, "b2_source"] == "chocolate_pudding_on_plate_right_region"
+    assert audit.loc[0, "b3_frame"] == 16
+    assert labels.loc[labels["frame_index"] == 14, "phase"].item() == 2
+
+
+def test_task6_incorrect_pudding_placement_does_not_create_b2() -> None:
+    rows = [
+        _task6_trace_row(
+            frame,
+            success=False,
+            chocolate_pudding_controlled=2 <= frame < 8,
+            chocolate_pudding_on_plate=8 <= frame,
+            chocolate_pudding_on_plate_left_region=8 <= frame,
+        )
+        for frame in range(20)
+    ]
+    labels, audit = build_task6_phase_labels(pd.DataFrame(rows), stable_frames=3)
+    assert audit.loc[0, "b1_frame"] == 2
+    assert pd.isna(audit.loc[0, "b2_frame"])
+    assert bool(audit.loc[0, "chocolate_pudding_incorrect_placement_observed"])
+    assert labels["phase"].max() == 1
+
+
+def test_task6_distractor_contact_does_not_start_phase() -> None:
+    rows = [
+        _task6_trace_row(
+            frame,
+            success=False,
+            red_coffee_mug_gripper_contact=True,
+        )
+        for frame in range(20)
+    ]
+    labels, audit = build_task6_phase_labels(pd.DataFrame(rows), stable_frames=3)
+    assert pd.isna(audit.loc[0, "b1_frame"])
+    assert bool(audit.loc[0, "red_coffee_mug_gripper_contact_observed"])
+    assert labels["phase"].eq(0).all()
