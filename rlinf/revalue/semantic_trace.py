@@ -652,6 +652,23 @@ class Task9SemanticTraceRecorder:
         self._states: Any | None = None
         self._previous_position: np.ndarray | None = None
 
+    @property
+    def metadata(self) -> dict[str, Any]:
+        """Return the resolved Task9 trace schema for reproducibility."""
+        return {
+            "version": "task9_semantic_trace_v1",
+            "config": asdict(self.config),
+            "bodies": {
+                "white_yellow_mug": self._mug_body,
+                "microwave": self._microwave_body,
+            },
+            "state_names": {
+                "white_yellow_mug": self.config.white_yellow_mug_state_name,
+                "heating_region": self.config.heating_region_state_name,
+                "microwave": self.config.microwave_state_name,
+            },
+        }
+
     def capture(self, env: Any, episode_index: int, frame_index: int, observation: dict[str, Any] | None = None) -> dict[str, Any]:
         position, quaternion = _body_pose(env.sim, self._mug_body)
         motion = 0.0 if self._previous_position is None else float(np.linalg.norm(position - self._previous_position))
