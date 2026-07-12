@@ -619,6 +619,7 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
             Task5SemanticTraceRecorder,
             Task6SemanticTraceRecorder,
             Task7SemanticTraceRecorder,
+            Task8SemanticTraceRecorder,
             write_task1_semantic_artifacts,
             write_task2_semantic_artifacts,
             write_task3_semantic_artifacts,
@@ -662,6 +663,11 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
             "task7": (
                 7,
                 Task7SemanticTraceRecorder,
+                write_task7_semantic_artifacts,
+            ),
+            "task8": (
+                8,
+                Task8SemanticTraceRecorder,
                 write_task7_semantic_artifacts,
             ),
         }

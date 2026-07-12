@@ -206,6 +206,22 @@ class Task7SemanticTraceConfig:
     stable_frames: int = 5
 
 
+@dataclass(frozen=True)
+class Task8SemanticTraceConfig:
+    """Task8 simulator-state extraction settings."""
+
+    moka_pot_1_alias: str = "moka_pot_1_main"
+    moka_pot_2_alias: str = "moka_pot_2_main"
+    stove_alias: str = "flat_stove_1_main"
+    moka_pot_1_state_name: str = "moka_pot_1"
+    moka_pot_2_state_name: str = "moka_pot_2"
+    cook_region_state_name: str = "flat_stove_1_cook_region"
+    stove_state_name: str = "flat_stove_1"
+    gripper_width_threshold: float = 0.05
+    controlled_motion_threshold: float = 0.001
+    stable_frames: int = 3
+
+
 def _normalize_name(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", value.lower())
 
@@ -563,6 +579,44 @@ class Task7SemanticTraceRecorder(Task1SemanticTraceRecorder):
             required = {self.task7_config.alphabet_soup_state_name, self.task7_config.cream_cheese_state_name, self.task7_config.basket_contain_region_state_name}
             if states is None or required - set(states):
                 raise ValueError(f"LIBERO task7 semantic states are unavailable: {sorted(required - set(states or {}))}")
+            self._state_objects = states
+        return self._state_objects
+
+
+class Task8SemanticTraceRecorder(Task1SemanticTraceRecorder):
+    """Extract two-moka-pot stove placement state for Task8."""
+
+    def __init__(self, env: Any, config: Task8SemanticTraceConfig | None = None):
+        self.task8_config = config or Task8SemanticTraceConfig()
+        super().__init__(env, Task1SemanticTraceConfig(
+            object_a_alias=self.task8_config.moka_pot_1_alias,
+            object_b_alias=self.task8_config.moka_pot_2_alias,
+            basket_alias=self.task8_config.stove_alias,
+            gripper_width_threshold=self.task8_config.gripper_width_threshold,
+            controlled_motion_threshold=self.task8_config.controlled_motion_threshold,
+            stable_frames=self.task8_config.stable_frames,
+        ))
+        self._state_objects: Any | None = None
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        return {"version": "task8_semantic_trace_v1", "config": asdict(self.task8_config), "bodies": asdict(self.bodies)}
+
+    def capture(self, env: Any, episode_index: int, frame_index: int, observation: dict[str, Any] | None = None) -> dict[str, Any]:
+        record = super().capture(env, episode_index, frame_index, observation)
+        states = self._states(env)
+        region = states[self.task8_config.cook_region_state_name]
+        record["object_a_basket_contact"] = bool(region.check_ontop(states[self.task8_config.moka_pot_1_state_name]))
+        record["object_b_basket_contact"] = bool(region.check_ontop(states[self.task8_config.moka_pot_2_state_name]))
+        record["stove_turn_on"] = bool(states[self.task8_config.stove_state_name].turn_on())
+        return record
+
+    def _states(self, env: Any) -> Any:
+        if self._state_objects is None:
+            states = getattr(getattr(env, "env", env), "object_states_dict", None)
+            required = {self.task8_config.moka_pot_1_state_name, self.task8_config.moka_pot_2_state_name, self.task8_config.cook_region_state_name, self.task8_config.stove_state_name}
+            if states is None or required - set(states):
+                raise ValueError(f"LIBERO task8 semantic states unavailable: {sorted(required - set(states or {}))}")
             self._state_objects = states
         return self._state_objects
 

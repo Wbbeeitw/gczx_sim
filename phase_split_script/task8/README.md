@@ -1,4 +1,3 @@
-# LIBERO Long Task 8 任务卡
+# LIBERO Long Task 8：两只 moka pot 放上炉子
 
-状态：未开始。开始前按 `../README.md` 的流程采集 probe，并在此填写任务语言、BDDL、
-对象别名、目标、B1/B2/B3、可读特权状态和成功终止行为。该目录之后存放 task8 专属脚本。
+目标为 `moka_pot_1` 和 `moka_pot_2` 同时位于 `flat_stove_1_cook_region`。炉子在 BDDL reset 时已开启，仅记录 audit，不作为阶段边界。B1 为任一 pot 首次受控搬运；B2 为第一只 pot 稳定在 cook region 或最终转运准备；B3 为两只 pot 均在 cook region 且环境成功。失败 episode 不得产生 phase 3。
