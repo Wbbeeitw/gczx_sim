@@ -2584,3 +2584,69 @@ def write_task6_semantic_artifacts(
         "audit": str(audit_path),
         "metadata": str(metadata_path),
     }
+
+
+def build_task7_phase_labels(trace: pd.DataFrame, *, stable_frames: int = 5) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build Task7 phases with a pre-containment final-transfer boundary."""
+    required = {"episode_index", "frame_index", "is_success", "env_success", "object_a_controlled", "object_b_controlled", "object_a_basket_contact", "object_b_basket_contact", "object_a_near_basket", "object_b_near_basket"}
+    missing = required - set(trace.columns)
+    if missing:
+        raise ValueError(f"Semantic trace missing columns: {sorted(missing)}")
+    labels, audits = [], []
+    for episode_index, episode in trace.groupby("episode_index", sort=True):
+        episode = episode.sort_values("frame_index").reset_index(drop=True)
+        success = bool(episode["is_success"].iloc[-1])
+        controlled_a = episode["object_a_controlled"].to_numpy(bool)
+        controlled_b = episode["object_b_controlled"].to_numpy(bool)
+        contained_a = episode["object_a_basket_contact"].to_numpy(bool)
+        contained_b = episode["object_b_basket_contact"].to_numpy(bool)
+        near_a = episode["object_a_near_basket"].to_numpy(bool)
+        near_b = episode["object_b_near_basket"].to_numpy(bool)
+        env_success = episode["env_success"].to_numpy(bool)
+        b1 = _first_stable_frame(controlled_a | controlled_b, stable_frames)
+        b2_start = b1 + 1 if b1 is not None else 0
+        b2, b2_source = _first_boundary({
+            "object_a_in_basket": _first_stable_frame(contained_a, stable_frames, b2_start),
+            "object_b_in_basket": _first_stable_frame(contained_b, stable_frames, b2_start),
+            "object_a_final_transfer": _first_stable_frame(controlled_a & near_a, stable_frames, b2_start),
+            "object_b_final_transfer": _first_stable_frame(controlled_b & near_b, stable_frames, b2_start),
+        })
+        final_goal = contained_a & contained_b
+        b3 = _first_stable_frame(final_goal, stable_frames, b2 + 1 if b2 is not None else 0)
+        b3_source = "state_stable" if b3 is not None else "unresolved"
+        if b3 is None and success:
+            b3 = _first_true_frame(env_success, b2 + 1 if b2 is not None else 0)
+            b3_source = "env_success_terminal" if b3 is not None else "unresolved"
+        if not success:
+            b3, b3_source = None, "failed_episode"
+        phase = np.zeros(len(episode), dtype=np.int64)
+        if b1 is not None:
+            phase[b1:] = 1
+        if b2 is not None and b1 is not None and b2 > b1:
+            phase[b2:] = 2
+        else:
+            b2, b2_source = None, "unresolved"
+        if b3 is not None and b2 is not None and b3 > b2:
+            phase[b3:] = 3
+        else:
+            b3 = None
+            if success:
+                b3_source = "unresolved"
+        phase_progress, global_progress = _phase_progress(phase)
+        labels.append(pd.DataFrame({"episode_index": int(episode_index), "frame_index": episode["frame_index"].to_numpy(np.int64), "phase": phase, "phase_progress": phase_progress, "global_progress": global_progress, "semantic_source": "simulator_trace", "semantic_confidence": "state_verified" if b1 is not None and (not success or b3 is not None) else "unresolved", "is_success": success}))
+        audits.append({"episode_index": int(episode_index), "episode_length": len(episode), "is_success": success, "b1_frame": b1, "b2_frame": b2, "b2_source": b2_source, "b3_frame": b3, "b3_source": b3_source, "b2_joint_transfer_detected": bool(b2_source and "final_transfer" in b2_source), "b3_consistent_with_success": (b3 is not None) == success, "trainable": b1 is not None and (not success or b3 is not None)})
+    return pd.concat(labels, ignore_index=True), pd.DataFrame(audits)
+
+
+def write_task7_semantic_artifacts(dataset_path: str | Path, records: list[dict[str, Any]], metadata: dict[str, Any], *, output_name: str = "semantic_trace_task7", stable_frames: int = 5) -> dict[str, str]:
+    """Write Task7 raw trace, labels, audit, and metadata."""
+    dataset_path = Path(dataset_path)
+    meta_dir = dataset_path / "meta"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    trace = pd.DataFrame(records).sort_values(["episode_index", "frame_index"])
+    labels, audit = build_task7_phase_labels(trace, stable_frames=stable_frames)
+    raw_path, labels_path = meta_dir / f"{output_name}.parquet", meta_dir / f"phase_progress_{output_name}.parquet"
+    audit_path, metadata_path = meta_dir / f"{output_name}_audit.csv", meta_dir / f"{output_name}_metadata.json"
+    trace.to_parquet(raw_path, index=False); labels.to_parquet(labels_path, index=False); audit.to_csv(audit_path, index=False)
+    with open(metadata_path, "w", encoding="utf-8") as file: json.dump(metadata, file, indent=2, ensure_ascii=False)
+    return {"raw_trace": str(raw_path), "phase_labels": str(labels_path), "audit": str(audit_path), "metadata": str(metadata_path)}
