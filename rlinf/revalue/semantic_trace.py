@@ -222,6 +222,22 @@ class Task8SemanticTraceConfig:
     stable_frames: int = 3
 
 
+@dataclass(frozen=True)
+class Task9SemanticTraceConfig:
+    """Task9 simulator-state extraction settings."""
+
+    white_yellow_mug_alias: str = "white_yellow_mug_1_main"
+    microwave_alias: str = "microwave_1_main"
+    porcelain_mug_alias: str = "porcelain_mug_1_main"
+    white_yellow_mug_state_name: str = "white_yellow_mug_1"
+    heating_region_state_name: str = "microwave_1_heating_region"
+    microwave_state_name: str = "microwave_1"
+    microwave_joint_name: str = "microwave_1_microjoint"
+    gripper_width_threshold: float = 0.05
+    controlled_motion_threshold: float = 0.001
+    stable_frames: int = 3
+
+
 def _normalize_name(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", value.lower())
 
@@ -619,6 +635,42 @@ class Task8SemanticTraceRecorder(Task1SemanticTraceRecorder):
                 raise ValueError(f"LIBERO task8 semantic states unavailable: {sorted(required - set(states or {}))}")
             self._state_objects = states
         return self._state_objects
+
+
+class Task9SemanticTraceRecorder:
+    """Extract privileged mug-in-microwave and door-close state for Task9."""
+
+    def __init__(self, env: Any, config: Task9SemanticTraceConfig | None = None):
+        self.config = config or Task9SemanticTraceConfig()
+        model = env.sim.model
+        self._mug_body = _resolve_body_name(model, self.config.white_yellow_mug_alias)
+        self._microwave_body = _resolve_body_name(model, self.config.microwave_alias)
+        self._mug_geoms = _geom_ids_for_body(model, self._mug_body, self.config.white_yellow_mug_alias)
+        self._porcelain_geoms = _geom_ids_for_body(model, _resolve_body_name(model, self.config.porcelain_mug_alias), self.config.porcelain_mug_alias)
+        self._microwave_geoms = _geom_ids_for_body(model, self._microwave_body, self.config.microwave_alias)
+        self._gripper_geoms = _gripper_geom_ids(model)
+        self._states: Any | None = None
+        self._previous_position: np.ndarray | None = None
+
+    def capture(self, env: Any, episode_index: int, frame_index: int, observation: dict[str, Any] | None = None) -> dict[str, Any]:
+        position, quaternion = _body_pose(env.sim, self._mug_body)
+        motion = 0.0 if self._previous_position is None else float(np.linalg.norm(position - self._previous_position))
+        self._previous_position = position.copy()
+        width = Task1SemanticTraceRecorder._gripper_width(observation, env)
+        mug_contact = _has_contact(env.sim, self._mug_geoms, self._gripper_geoms)
+        states = self._state_objects(env)
+        mug = states[self.config.white_yellow_mug_state_name]
+        microwave = states[self.config.microwave_state_name]
+        heating = states[self.config.heating_region_state_name]
+        return {"episode_index": int(episode_index), "frame_index": int(frame_index), "env_success": _check_success(env), "mug_motion": motion, "mug_controlled": bool(width <= self.config.gripper_width_threshold and mug_contact and motion >= self.config.controlled_motion_threshold), "mug_in_heating_region": bool(heating.check_contain(mug)), "microwave_is_open": bool(microwave.is_open()), "microwave_is_close": bool(microwave.is_close()), "microwave_joint_qpos": _joint_qpos(env.sim, self.config.microwave_joint_name), "mug_microwave_contact": _has_contact(env.sim, self._mug_geoms, self._microwave_geoms), "porcelain_mug_gripper_contact": _has_contact(env.sim, self._porcelain_geoms, self._gripper_geoms), "mug_x": float(position[0]), "mug_y": float(position[1]), "mug_z": float(position[2]), "mug_qw": float(quaternion[0]), "mug_qx": float(quaternion[1]), "mug_qy": float(quaternion[2]), "mug_qz": float(quaternion[3])}
+
+    def _state_objects(self, env: Any) -> Any:
+        if self._states is None:
+            states = getattr(getattr(env, "env", env), "object_states_dict", None)
+            required = {self.config.white_yellow_mug_state_name, self.config.heating_region_state_name, self.config.microwave_state_name}
+            if states is None or required - set(states): raise ValueError(f"LIBERO task9 semantic states unavailable: {sorted(required - set(states or {}))}")
+            self._states = states
+        return self._states
 
 
 class Task2SemanticTraceRecorder:
@@ -2701,6 +2753,40 @@ def write_task7_semantic_artifacts(dataset_path: str | Path, records: list[dict[
     labels, audit = build_task7_phase_labels(trace, stable_frames=stable_frames)
     raw_path, labels_path = meta_dir / f"{output_name}.parquet", meta_dir / f"phase_progress_{output_name}.parquet"
     audit_path, metadata_path = meta_dir / f"{output_name}_audit.csv", meta_dir / f"{output_name}_metadata.json"
+    trace.to_parquet(raw_path, index=False); labels.to_parquet(labels_path, index=False); audit.to_csv(audit_path, index=False)
+    with open(metadata_path, "w", encoding="utf-8") as file: json.dump(metadata, file, indent=2, ensure_ascii=False)
+    return {"raw_trace": str(raw_path), "phase_labels": str(labels_path), "audit": str(audit_path), "metadata": str(metadata_path)}
+
+
+def build_task9_phase_labels(trace: pd.DataFrame, *, stable_frames: int = 3) -> tuple[pd.DataFrame, pd.DataFrame]:
+    required = {"episode_index", "frame_index", "is_success", "env_success", "mug_controlled", "mug_in_heating_region", "microwave_is_close", "porcelain_mug_gripper_contact"}
+    missing = required - set(trace.columns)
+    if missing: raise ValueError(f"Semantic trace missing columns: {sorted(missing)}")
+    labels, audits = [], []
+    for index, episode in trace.groupby("episode_index", sort=True):
+        episode = episode.sort_values("frame_index").reset_index(drop=True); success = bool(episode.is_success.iloc[-1])
+        controlled, inside, closed, env_success = (episode[name].to_numpy(bool) for name in ("mug_controlled", "mug_in_heating_region", "microwave_is_close", "env_success"))
+        b1 = _first_stable_frame(controlled, stable_frames); start = b1 + 1 if b1 is not None else 0
+        b2 = _first_stable_frame(inside, stable_frames, start); b2_source = "mug_in_heating_region" if b2 is not None else "unresolved"
+        b3 = _first_stable_frame(inside & closed, stable_frames, b2 + 1 if b2 is not None else 0); b3_source = "state_stable" if b3 is not None else "unresolved"
+        if b3 is None and success: b3 = _first_true_frame(env_success, b2 + 1 if b2 is not None else 0); b3_source = "env_success_terminal" if b3 is not None else "unresolved"
+        if not success: b3, b3_source = None, "failed_episode"
+        phase = np.zeros(len(episode), dtype=np.int64)
+        if b1 is not None: phase[b1:] = 1
+        if b2 is not None and b1 is not None and b2 > b1: phase[b2:] = 2
+        else: b2, b2_source = None, "unresolved"
+        if b3 is not None and b2 is not None and b3 > b2: phase[b3:] = 3
+        else: b3 = None; b3_source = "unresolved" if success else b3_source
+        progress, global_progress = _phase_progress(phase)
+        labels.append(pd.DataFrame({"episode_index": int(index), "frame_index": episode.frame_index.to_numpy(np.int64), "phase": phase, "phase_progress": progress, "global_progress": global_progress, "semantic_source": "simulator_trace", "semantic_confidence": "state_verified" if b1 is not None and (not success or b3 is not None) else "unresolved", "is_success": success}))
+        audits.append({"episode_index": int(index), "episode_length": len(episode), "is_success": success, "b1_frame": b1, "b2_frame": b2, "b2_source": b2_source, "b3_frame": b3, "b3_source": b3_source, "microwave_closed_before_mug_observed": bool((closed & ~inside).any()), "porcelain_mug_gripper_contact_observed": bool(episode.porcelain_mug_gripper_contact.to_numpy(bool).any()), "b3_consistent_with_success": (b3 is not None) == success, "trainable": b1 is not None and (not success or b3 is not None)})
+    return pd.concat(labels, ignore_index=True), pd.DataFrame(audits)
+
+
+def write_task9_semantic_artifacts(dataset_path: str | Path, records: list[dict[str, Any]], metadata: dict[str, Any], *, output_name: str = "semantic_trace_task9", stable_frames: int = 3) -> dict[str, str]:
+    dataset_path = Path(dataset_path); meta_dir = dataset_path / "meta"; meta_dir.mkdir(parents=True, exist_ok=True)
+    trace = pd.DataFrame(records).sort_values(["episode_index", "frame_index"]); labels, audit = build_task9_phase_labels(trace, stable_frames=stable_frames)
+    raw_path = meta_dir / f"{output_name}.parquet"; labels_path = meta_dir / f"phase_progress_{output_name}.parquet"; audit_path = meta_dir / f"{output_name}_audit.csv"; metadata_path = meta_dir / f"{output_name}_metadata.json"
     trace.to_parquet(raw_path, index=False); labels.to_parquet(labels_path, index=False); audit.to_csv(audit_path, index=False)
     with open(metadata_path, "w", encoding="utf-8") as file: json.dump(metadata, file, indent=2, ensure_ascii=False)
     return {"raw_trace": str(raw_path), "phase_labels": str(labels_path), "audit": str(audit_path), "metadata": str(metadata_path)}
