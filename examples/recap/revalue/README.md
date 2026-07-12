@@ -185,7 +185,7 @@ python examples/recap/revalue/revalue.py \
   rollout_collect.output_dir=/workspace/datasets/libero_task0_cfg_rollouts
 ```
 
-For LIBERO-10 task1 through task6 collection, add
+For LIBERO-10 task1 through task7 collection, add
 `rollout_collect.semantic_trace=true` and set
 `rollout_collect.semantic_trace_task` to the matching task. This keeps
 privileged simulator state out of policy observations and writes task-specific

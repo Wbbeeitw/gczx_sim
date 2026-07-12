@@ -188,6 +188,24 @@ class Task6SemanticBodies:
     red_coffee_mug: str
 
 
+@dataclass(frozen=True)
+class Task7SemanticTraceConfig:
+    """Task7 simulator-state extraction settings."""
+
+    alphabet_soup_alias: str = "alphabet_soup_1_main"
+    cream_cheese_alias: str = "cream_cheese_1_main"
+    basket_alias: str = "basket_1_main"
+    tomato_sauce_alias: str = "tomato_sauce_1_main"
+    ketchup_alias: str = "ketchup_1_main"
+    alphabet_soup_state_name: str = "alphabet_soup_1"
+    cream_cheese_state_name: str = "cream_cheese_1"
+    basket_contain_region_state_name: str = "basket_1_contain_region"
+    gripper_width_threshold: float = 0.05
+    controlled_motion_threshold: float = 0.001
+    basket_near_threshold: float = 0.18
+    stable_frames: int = 5
+
+
 def _normalize_name(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", value.lower())
 
@@ -482,6 +500,71 @@ class Task1SemanticTraceRecorder:
             if values is not None:
                 return float(np.abs(np.asarray(values, dtype=np.float32)).sum())
         return float("inf")
+
+
+class Task7SemanticTraceRecorder(Task1SemanticTraceRecorder):
+    """Extract task7 state while reusing task1's two-object phase contract."""
+
+    def __init__(self, env: Any, config: Task7SemanticTraceConfig | None = None):
+        self.task7_config = config or Task7SemanticTraceConfig()
+        super().__init__(
+            env,
+            Task1SemanticTraceConfig(
+                object_a_alias=self.task7_config.alphabet_soup_alias,
+                object_b_alias=self.task7_config.cream_cheese_alias,
+                basket_alias=self.task7_config.basket_alias,
+                gripper_width_threshold=self.task7_config.gripper_width_threshold,
+                controlled_motion_threshold=self.task7_config.controlled_motion_threshold,
+                basket_near_threshold=self.task7_config.basket_near_threshold,
+                stable_frames=self.task7_config.stable_frames,
+            ),
+        )
+        model = env.sim.model
+        self._tomato_sauce_geoms = _geom_ids_for_body(
+            model,
+            _resolve_body_name(model, self.task7_config.tomato_sauce_alias),
+            self.task7_config.tomato_sauce_alias,
+        )
+        self._ketchup_geoms = _geom_ids_for_body(
+            model,
+            _resolve_body_name(model, self.task7_config.ketchup_alias),
+            self.task7_config.ketchup_alias,
+        )
+        self._state_objects: Any | None = None
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        return {
+            "version": "task7_semantic_trace_v1",
+            "config": asdict(self.task7_config),
+            "bodies": asdict(self.bodies),
+            "state_names": {
+                "alphabet_soup": self.task7_config.alphabet_soup_state_name,
+                "cream_cheese": self.task7_config.cream_cheese_state_name,
+                "basket_contain_region": self.task7_config.basket_contain_region_state_name,
+            },
+        }
+
+    def capture(self, env: Any, episode_index: int, frame_index: int, observation: dict[str, Any] | None = None) -> dict[str, Any]:
+        record = super().capture(env, episode_index, frame_index, observation)
+        state_objects = self._state_objects_for_env(env)
+        basket_region = state_objects[self.task7_config.basket_contain_region_state_name]
+        alphabet_soup = state_objects[self.task7_config.alphabet_soup_state_name]
+        cream_cheese = state_objects[self.task7_config.cream_cheese_state_name]
+        record["object_a_basket_contact"] = bool(basket_region.check_contain(alphabet_soup))
+        record["object_b_basket_contact"] = bool(basket_region.check_contain(cream_cheese))
+        record["tomato_sauce_gripper_contact"] = _has_contact(env.sim, self._tomato_sauce_geoms, self._gripper_geoms)
+        record["ketchup_gripper_contact"] = _has_contact(env.sim, self._ketchup_geoms, self._gripper_geoms)
+        return record
+
+    def _state_objects_for_env(self, env: Any) -> Any:
+        if self._state_objects is None:
+            states = getattr(getattr(env, "env", env), "object_states_dict", None)
+            required = {self.task7_config.alphabet_soup_state_name, self.task7_config.cream_cheese_state_name, self.task7_config.basket_contain_region_state_name}
+            if states is None or required - set(states):
+                raise ValueError(f"LIBERO task7 semantic states are unavailable: {sorted(required - set(states or {}))}")
+            self._state_objects = states
+        return self._state_objects
 
 
 class Task2SemanticTraceRecorder:
