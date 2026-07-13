@@ -235,6 +235,7 @@ class Task9SemanticTraceConfig:
     microwave_joint_name: str = "microwave_1_microjoint"
     gripper_width_threshold: float = 0.05
     controlled_motion_threshold: float = 0.001
+    microwave_closed_qpos: float = 0.0
     stable_frames: int = 3
 
 
@@ -671,6 +672,7 @@ class Task9SemanticTraceRecorder:
 
     def capture(self, env: Any, episode_index: int, frame_index: int, observation: dict[str, Any] | None = None) -> dict[str, Any]:
         position, quaternion = _body_pose(env.sim, self._mug_body)
+        microwave_position, _ = _body_pose(env.sim, self._microwave_body)
         motion = 0.0 if self._previous_position is None else float(np.linalg.norm(position - self._previous_position))
         self._previous_position = position.copy()
         width = Task1SemanticTraceRecorder._gripper_width(observation, env)
@@ -679,7 +681,7 @@ class Task9SemanticTraceRecorder:
         mug = states[self.config.white_yellow_mug_state_name]
         microwave = states[self.config.microwave_state_name]
         heating = states[self.config.heating_region_state_name]
-        return {"episode_index": int(episode_index), "frame_index": int(frame_index), "env_success": _check_success(env), "mug_motion": motion, "mug_controlled": bool(width <= self.config.gripper_width_threshold and mug_contact and motion >= self.config.controlled_motion_threshold), "mug_in_heating_region": bool(heating.check_contain(mug)), "microwave_is_open": bool(microwave.is_open()), "microwave_is_close": bool(microwave.is_close()), "microwave_joint_qpos": _joint_qpos(env.sim, self.config.microwave_joint_name), "mug_microwave_contact": _has_contact(env.sim, self._mug_geoms, self._microwave_geoms), "porcelain_mug_gripper_contact": _has_contact(env.sim, self._porcelain_geoms, self._gripper_geoms), "mug_x": float(position[0]), "mug_y": float(position[1]), "mug_z": float(position[2]), "mug_qw": float(quaternion[0]), "mug_qx": float(quaternion[1]), "mug_qy": float(quaternion[2]), "mug_qz": float(quaternion[3])}
+        return {"episode_index": int(episode_index), "frame_index": int(frame_index), "env_success": _check_success(env), "mug_motion": motion, "mug_controlled": bool(width <= self.config.gripper_width_threshold and mug_contact and motion >= self.config.controlled_motion_threshold), "mug_in_heating_region": bool(heating.check_contain(mug)), "microwave_is_open": bool(microwave.is_open()), "microwave_is_close": bool(microwave.is_close()), "microwave_joint_qpos": _joint_qpos(env.sim, self.config.microwave_joint_name), "mug_microwave_distance": float(np.linalg.norm(position - microwave_position)), "mug_microwave_contact": _has_contact(env.sim, self._mug_geoms, self._microwave_geoms), "porcelain_mug_gripper_contact": _has_contact(env.sim, self._porcelain_geoms, self._gripper_geoms), "mug_x": float(position[0]), "mug_y": float(position[1]), "mug_z": float(position[2]), "mug_qw": float(quaternion[0]), "mug_qx": float(quaternion[1]), "mug_qy": float(quaternion[2]), "mug_qz": float(quaternion[3])}
 
     def _state_objects(self, env: Any) -> Any:
         if self._states is None:
@@ -2795,7 +2797,25 @@ def build_task9_phase_labels(trace: pd.DataFrame, *, stable_frames: int = 3) -> 
         if b3 is not None and b2 is not None and b3 > b2: phase[b3:] = 3
         else: b3 = None; b3_source = "unresolved" if success else b3_source
         progress, global_progress = _phase_progress(phase)
-        labels.append(pd.DataFrame({"episode_index": int(index), "frame_index": episode.frame_index.to_numpy(np.int64), "phase": phase, "phase_progress": progress, "global_progress": global_progress, "semantic_source": "simulator_trace", "semantic_confidence": "state_verified" if b1 is not None and (not success or b3 is not None) else "unresolved", "is_success": success}))
+        local_progress = np.zeros(len(episode), dtype=np.float32)
+        distance = episode["mug_microwave_distance"].to_numpy(dtype=np.float32)
+        if b1 is not None:
+            reference_distance = float(np.median(distance[b1 : min(b1 + stable_frames, len(distance))]))
+            target_distance = float(np.min(distance[b1:]))
+            if reference_distance > target_distance:
+                phase_one = phase == 1
+                local_progress[phase_one] = np.clip((reference_distance - distance[phase_one]) / (reference_distance - target_distance), 0.0, 1.0)
+        if b2 is not None:
+            door_qpos = episode["microwave_joint_qpos"].to_numpy(dtype=np.float32)
+            start_qpos = float(np.median(door_qpos[b2 : min(b2 + stable_frames, len(door_qpos))]))
+            denominator = abs(start_qpos)
+            phase_two = phase == 2
+            if denominator > 1e-6:
+                local_progress[phase_two] = np.clip(1.0 - np.abs(door_qpos[phase_two]) / denominator, 0.0, 1.0) * inside[phase_two]
+        local_progress[phase == 3] = 1.0
+        local_peak = pd.Series(local_progress).groupby(phase).cummax().to_numpy(dtype=np.float32)
+        local_source = np.where(phase == 1, "mug_to_microwave_distance", np.where(phase == 2, "microwave_door_joint", np.where(phase == 3, "task_success", "phase_zero")))
+        labels.append(pd.DataFrame({"episode_index": int(index), "frame_index": episode.frame_index.to_numpy(np.int64), "phase": phase, "phase_progress": progress, "global_progress": global_progress, "phase_local_progress": local_progress, "phase_local_progress_peak": local_peak, "phase_local_progress_source": local_source, "phase_local_progress_confidence": "state_verified", "semantic_source": "simulator_trace", "semantic_confidence": "state_verified" if b1 is not None and (not success or b3 is not None) else "unresolved", "is_success": success}))
         audits.append({"episode_index": int(index), "episode_length": len(episode), "is_success": success, "b1_frame": b1, "b2_frame": b2, "b2_source": b2_source, "b3_frame": b3, "b3_source": b3_source, "microwave_closed_before_mug_observed": bool((closed & ~inside).any()), "porcelain_mug_gripper_contact_observed": bool(episode.porcelain_mug_gripper_contact.to_numpy(bool).any()), "b3_consistent_with_success": (b3 is not None) == success, "trainable": b1 is not None and (not success or b3 is not None)})
     return pd.concat(labels, ignore_index=True), pd.DataFrame(audits)
 
