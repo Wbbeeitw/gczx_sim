@@ -1557,13 +1557,41 @@ def _first_stable_frame(mask: np.ndarray, stable_frames: int, start: int = 0) ->
 def _phase_progress(
     phase: np.ndarray,
     *,
+    is_success: bool,
     num_phases: int = NUM_TASK1_PHASES,
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Build time-based phase progress from verified phase boundaries.
+
+    Completed non-zero phases increase linearly from zero to one. For failed
+    episodes, the final phase increases only to 0.5 during its first half and
+    then remains at that value. Phase zero never receives progress.
+    """
     phase_progress = np.zeros(len(phase), dtype=np.float32)
+    if not len(phase):
+        return phase_progress, phase_progress
+
+    terminal_phase = int(phase[-1])
     for phase_id in np.unique(phase):
+        if phase_id == 0:
+            continue
+
         indices = np.flatnonzero(phase == phase_id)
-        if len(indices) > 1:
-            phase_progress[indices] = np.linspace(0.0, 1.0, len(indices), dtype=np.float32)
+        is_incomplete_terminal_phase = not is_success and phase_id == terminal_phase
+        if is_incomplete_terminal_phase:
+            if len(indices) == 1:
+                continue
+            ramp_length = max(2, (len(indices) + 1) // 2)
+            phase_progress[indices[:ramp_length]] = np.linspace(
+                0.0, 0.5, ramp_length, dtype=np.float32
+            )
+            phase_progress[indices[ramp_length:]] = 0.5
+        elif len(indices) == 1:
+            phase_progress[indices] = 1.0
+        else:
+            phase_progress[indices] = np.linspace(
+                0.0, 1.0, len(indices), dtype=np.float32
+            )
+
     global_progress = (phase.astype(np.float32) + phase_progress) / num_phases
     return phase_progress, global_progress
 
@@ -1649,15 +1677,9 @@ def build_task1_phase_labels(
                 else:
                     b3_source = "unresolved"
 
-        phase_progress, global_progress = _phase_progress(phase)
-        terminal_incomplete = not is_success or b3 is None
-        if terminal_incomplete and length:
-            terminal_phase = int(phase[-1])
-            terminal_start = int(np.flatnonzero(phase == terminal_phase)[-1])
-            while terminal_start > 0 and phase[terminal_start - 1] == terminal_phase:
-                terminal_start -= 1
-            phase_progress[terminal_start:] = 0.0
-            global_progress[terminal_start:] = terminal_phase / NUM_TASK1_PHASES
+        phase_progress, global_progress = _phase_progress(
+            phase, is_success=is_success
+        )
 
         label_frames.append(
             pd.DataFrame(
@@ -1843,16 +1865,8 @@ def build_task2_phase_labels(
                 b3_source = "unresolved"
 
         phase_progress, global_progress = _phase_progress(
-            phase, num_phases=NUM_TASK2_PHASES
+            phase, is_success=is_success, num_phases=NUM_TASK2_PHASES
         )
-        terminal_incomplete = not is_success or b3 is None
-        if terminal_incomplete and length:
-            terminal_phase = int(phase[-1])
-            terminal_start = int(np.flatnonzero(phase == terminal_phase)[-1])
-            while terminal_start > 0 and phase[terminal_start - 1] == terminal_phase:
-                terminal_start -= 1
-            phase_progress[terminal_start:] = 0.0
-            global_progress[terminal_start:] = terminal_phase / NUM_TASK2_PHASES
 
         label_frames.append(
             pd.DataFrame(
@@ -2036,16 +2050,8 @@ def build_task3_phase_labels(
                 b3_source = "unresolved"
 
         phase_progress, global_progress = _phase_progress(
-            phase, num_phases=NUM_TASK3_PHASES
+            phase, is_success=is_success, num_phases=NUM_TASK3_PHASES
         )
-        terminal_incomplete = not is_success or b3 is None
-        if terminal_incomplete and length:
-            terminal_phase = int(phase[-1])
-            terminal_start = int(np.flatnonzero(phase == terminal_phase)[-1])
-            while terminal_start > 0 and phase[terminal_start - 1] == terminal_phase:
-                terminal_start -= 1
-            phase_progress[terminal_start:] = 0.0
-            global_progress[terminal_start:] = terminal_phase / NUM_TASK3_PHASES
 
         label_frames.append(
             pd.DataFrame(
@@ -2229,16 +2235,8 @@ def build_task4_phase_labels(
                 b3_source = "unresolved"
 
         phase_progress, global_progress = _phase_progress(
-            phase, num_phases=NUM_TASK4_PHASES
+            phase, is_success=is_success, num_phases=NUM_TASK4_PHASES
         )
-        terminal_incomplete = not is_success or b3 is None
-        if terminal_incomplete and length:
-            terminal_phase = int(phase[-1])
-            terminal_start = int(np.flatnonzero(phase == terminal_phase)[-1])
-            while terminal_start > 0 and phase[terminal_start - 1] == terminal_phase:
-                terminal_start -= 1
-            phase_progress[terminal_start:] = 0.0
-            global_progress[terminal_start:] = terminal_phase / NUM_TASK4_PHASES
 
         porcelain_mug_on_right_plate = episode_trace[
             "porcelain_mug_on_right_plate"
@@ -2409,16 +2407,8 @@ def build_task5_phase_labels(
                 b3_source = "unresolved"
 
         phase_progress, global_progress = _phase_progress(
-            phase, num_phases=NUM_TASK5_PHASES
+            phase, is_success=is_success, num_phases=NUM_TASK5_PHASES
         )
-        terminal_incomplete = not is_success or b3 is None
-        if terminal_incomplete and length:
-            terminal_phase = int(phase[-1])
-            terminal_start = int(np.flatnonzero(phase == terminal_phase)[-1])
-            while terminal_start > 0 and phase[terminal_start - 1] == terminal_phase:
-                terminal_start -= 1
-            phase_progress[terminal_start:] = 0.0
-            global_progress[terminal_start:] = terminal_phase / NUM_TASK5_PHASES
 
         label_frames.append(
             pd.DataFrame(
@@ -2612,16 +2602,8 @@ def build_task6_phase_labels(
                 b3_source = "unresolved"
 
         phase_progress, global_progress = _phase_progress(
-            phase, num_phases=NUM_TASK6_PHASES
+            phase, is_success=is_success, num_phases=NUM_TASK6_PHASES
         )
-        terminal_incomplete = not is_success or b3 is None
-        if terminal_incomplete and length:
-            terminal_phase = int(phase[-1])
-            terminal_start = int(np.flatnonzero(phase == terminal_phase)[-1])
-            while terminal_start > 0 and phase[terminal_start - 1] == terminal_phase:
-                terminal_start -= 1
-            phase_progress[terminal_start:] = 0.0
-            global_progress[terminal_start:] = terminal_phase / NUM_TASK6_PHASES
 
         chocolate_pudding_on_plate = episode_trace[
             "chocolate_pudding_on_plate"
@@ -2757,7 +2739,9 @@ def build_task7_phase_labels(trace: pd.DataFrame, *, stable_frames: int = 5) -> 
             b3 = None
             if success:
                 b3_source = "unresolved"
-        phase_progress, global_progress = _phase_progress(phase)
+        phase_progress, global_progress = _phase_progress(
+            phase, is_success=success
+        )
         labels.append(pd.DataFrame({"episode_index": int(episode_index), "frame_index": episode["frame_index"].to_numpy(np.int64), "phase": phase, "phase_progress": phase_progress, "global_progress": global_progress, "semantic_source": "simulator_trace", "semantic_confidence": "state_verified" if b1 is not None and (not success or b3 is not None) else "unresolved", "is_success": success}))
         audits.append({"episode_index": int(episode_index), "episode_length": len(episode), "is_success": success, "b1_frame": b1, "b2_frame": b2, "b2_source": b2_source, "b3_frame": b3, "b3_source": b3_source, "b2_joint_transfer_detected": bool(b2_source and "final_transfer" in b2_source), "b3_consistent_with_success": (b3 is not None) == success, "trainable": b1 is not None and (not success or b3 is not None)})
     return pd.concat(labels, ignore_index=True), pd.DataFrame(audits)
@@ -2796,7 +2780,7 @@ def build_task9_phase_labels(trace: pd.DataFrame, *, stable_frames: int = 3) -> 
         else: b2, b2_source = None, "unresolved"
         if b3 is not None and b2 is not None and b3 > b2: phase[b3:] = 3
         else: b3 = None; b3_source = "unresolved" if success else b3_source
-        progress, global_progress = _phase_progress(phase)
+        progress, global_progress = _phase_progress(phase, is_success=success)
         local_progress = np.zeros(len(episode), dtype=np.float32)
         distance = episode["mug_microwave_distance"].to_numpy(dtype=np.float32)
         if b1 is not None:
