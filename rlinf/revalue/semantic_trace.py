@@ -1562,9 +1562,9 @@ def _phase_progress(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Build time-based phase progress from verified phase boundaries.
 
-    Completed non-zero phases increase linearly from zero to one. For failed
-    episodes, the final phase increases only to 0.5 during its first half and
-    then remains at that value. Phase zero never receives progress.
+    Completed phases, including phase zero, increase linearly from zero to
+    one. For failed episodes, the final observed phase increases only to 0.5
+    during its first half and then remains at that value.
     """
     phase_progress = np.zeros(len(phase), dtype=np.float32)
     if not len(phase):
@@ -1572,9 +1572,6 @@ def _phase_progress(
 
     terminal_phase = int(phase[-1])
     for phase_id in np.unique(phase):
-        if phase_id == 0:
-            continue
-
         indices = np.flatnonzero(phase == phase_id)
         is_incomplete_terminal_phase = not is_success and phase_id == terminal_phase
         if is_incomplete_terminal_phase:
