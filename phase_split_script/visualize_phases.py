@@ -3,7 +3,7 @@
 The renderer validates the simulator-state labels produced by
 ``semantic_trace_taskN`` before exporting a video. It shows the current phase,
 phase-local progress, and global progress on the exported video. Failed
-episodes explicitly show the final-phase ``0.50`` progress cap.
+episodes explicitly show the final-phase ``0.30`` progress cap.
 """
 
 from __future__ import annotations
@@ -146,7 +146,7 @@ def overlay_phase_info(
     if not is_success and phase == terminal_phase:
         cv2.putText(
             frame,
-            "failed terminal: phase cap=0.50",
+            "failed terminal: phase cap=0.30",
             (8, 52),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.32,
@@ -163,7 +163,7 @@ def overlay_phase_info(
         cv2.putText(frame, task_text, (8, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (200, 200, 200), 1)
 
     # Phase-local progress is separate from global progress.  This makes the
-    # failure terminal-phase 0.50 cap visible instead of hiding it in global
+    # failure terminal-phase 0.30 cap visible instead of hiding it in global
     # progress alone.
     bar_h = 10
     bar_w = w - 30

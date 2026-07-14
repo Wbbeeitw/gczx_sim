@@ -18,6 +18,7 @@ import pandas as pd
 
 NUM_PHASES = 4
 SUCCESS_PHASE = 3
+FAILED_TERMINAL_PHASE_PROGRESS_CAP = 0.3
 REQUIRED_COLUMNS = {
     "episode_index",
     "frame_index",
@@ -63,9 +64,12 @@ def _failed_terminal_progress(length: int) -> np.ndarray:
     if length == 1:
         return np.zeros(1, dtype=np.float32)
     ramp_length = max(2, (length + 1) // 2)
-    progress = np.full(length, 0.5, dtype=np.float32)
+    progress = np.full(length, FAILED_TERMINAL_PHASE_PROGRESS_CAP, dtype=np.float32)
     progress[:ramp_length] = np.linspace(
-        0.0, 0.5, ramp_length, dtype=np.float32
+        0.0,
+        FAILED_TERMINAL_PHASE_PROGRESS_CAP,
+        ramp_length,
+        dtype=np.float32,
     )
     return progress
 
@@ -75,7 +79,7 @@ def validate_phase_progress_labels(labels: pd.DataFrame) -> ValidationReport:
 
     Successful episodes must linearly complete every observed phase, including
     phase zero. Failed episodes must complete previous phases and ramp only the
-    final observed phase to 0.5 before remaining there.
+    final observed phase to 0.3 before remaining there.
     """
     missing = REQUIRED_COLUMNS - set(labels.columns)
     if missing:

@@ -28,25 +28,25 @@ def test_success_phase_progress_completes_each_entered_phase() -> None:
     assert global_progress[-1] == 1.0
 
 
-def test_failed_terminal_phase_reaches_half_then_plateaus() -> None:
+def test_failed_terminal_phase_reaches_cap_then_plateaus() -> None:
     phase = np.array([0, 1, 1, 1, 2, 2, 2, 2, 2])
 
     phase_progress, global_progress = _phase_progress(phase, is_success=False)
 
     np.testing.assert_allclose(
         phase_progress,
-        [1.0, 0.0, 0.5, 1.0, 0.0, 0.25, 0.5, 0.5, 0.5],
+        [1.0, 0.0, 0.5, 1.0, 0.0, 0.15, 0.3, 0.3, 0.3],
     )
-    assert global_progress[-1] == 0.625
+    np.testing.assert_allclose(global_progress[-1], 0.575)
 
 
-def test_failed_episode_without_b1_caps_phase_zero_at_half() -> None:
+def test_failed_episode_without_b1_caps_phase_zero() -> None:
     phase = np.zeros(4, dtype=np.int64)
 
     phase_progress, global_progress = _phase_progress(phase, is_success=False)
 
-    np.testing.assert_allclose(phase_progress, [0.0, 0.5, 0.5, 0.5])
-    np.testing.assert_allclose(global_progress, [0.0, 0.125, 0.125, 0.125])
+    np.testing.assert_allclose(phase_progress, [0.0, 0.3, 0.3, 0.3])
+    np.testing.assert_allclose(global_progress, [0.0, 0.075, 0.075, 0.075])
 
 
 def _trace_row(
