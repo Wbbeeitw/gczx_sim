@@ -1,14 +1,16 @@
-"""Visualize phase annotations on top of episode videos.
+"""Render one successful and one failed phase-labelled LIBERO episode.
 
-Reads a LeRobot dataset with `meta/phase_progress_semantic.parquet` and renders
-a few demo videos with phase overlay and progress bar.
+The renderer reads the simulator-state labels produced by
+``semantic_trace_taskN``.  It shows the current phase, phase-local progress,
+and global progress on the exported video.  Failed episodes explicitly show
+the final-phase ``0.50`` progress cap.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import shutil
+import re
 from pathlib import Path
 
 import av
@@ -111,9 +113,11 @@ def overlay_phase_info(
     global_progress: float,
     frame_index: int,
     episode_index: int,
+    is_success: bool,
+    terminal_phase: int,
     task: str | None = None,
 ) -> np.ndarray:
-    """Draw compact phase text, progress bar, and frame info on the frame.
+    """Draw phase text plus local/global progress bars on the frame.
 
     The overlay is tuned for 256x256 LIBERO videos so that all text fits
     within the frame width.
@@ -123,14 +127,27 @@ def overlay_phase_info(
 
     # Black translucent top bar (compact for small resolution).
     overlay = frame.copy()
-    cv2.rectangle(overlay, (0, 0), (w, 52), (0, 0, 0), -1)
+    cv2.rectangle(overlay, (0, 0), (w, 56), (0, 0, 0), -1)
     frame = cv2.addWeighted(overlay, 0.6, frame, 0.4, 0)
 
-    # Compact two-line info.
+    outcome = "SUCCESS" if is_success else "FAILURE"
+    outcome_color = (0, 220, 0) if is_success else (0, 80, 255)
     line1 = f"ep={episode_index} frame={frame_index} phase={phase}"
-    line2 = f"p_phase={phase_progress:.2f} p_global={global_progress:.2f}"
+    line2 = f"phase={phase_progress:.2f}  global={global_progress:.2f}"
     cv2.putText(frame, line1, (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
-    cv2.putText(frame, line2, (8, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+    cv2.putText(frame, line2, (8, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.43, (255, 255, 255), 1)
+    cv2.putText(frame, outcome, (w - 76, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.38, outcome_color, 1)
+
+    if not is_success and phase == terminal_phase:
+        cv2.putText(
+            frame,
+            "failed terminal: phase cap=0.50",
+            (8, 52),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.32,
+            (0, 180, 255),
+            1,
+        )
 
     # Optional task text (very small, truncated to frame width).
     if task:
@@ -138,21 +155,24 @@ def overlay_phase_info(
         max_chars = max(20, w // 6)
         if len(task_text) > max_chars:
             task_text = task_text[: max_chars - 3] + "..."
-        cv2.putText(frame, task_text, (8, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (200, 200, 200), 1)
+        cv2.putText(frame, task_text, (8, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (200, 200, 200), 1)
 
-    # Progress bar at the bottom.
-    bar_h = 14
-    bar_y = h - bar_h - 8
+    # Phase-local progress is separate from global progress.  This makes the
+    # failure terminal-phase 0.50 cap visible instead of hiding it in global
+    # progress alone.
+    bar_h = 10
     bar_w = w - 30
-    cv2.rectangle(frame, (15, bar_y), (15 + bar_w, bar_y + bar_h), (50, 50, 50), -1)
-    filled_w = int(bar_w * global_progress)
-    cv2.rectangle(frame, (15, bar_y), (15 + filled_w, bar_y + bar_h), color, -1)
-    cv2.rectangle(frame, (15, bar_y), (15 + bar_w, bar_y + bar_h), (255, 255, 255), 1)
-
-    # Current phase marker on the bar.
-    marker_x = 15 + filled_w
-    cv2.circle(frame, (marker_x, bar_y + bar_h // 2), 5, (255, 255, 255), -1)
-    cv2.circle(frame, (marker_x, bar_y + bar_h // 2), 5, color, 1)
+    local_y = h - 36
+    global_y = h - 18
+    for label, value, bar_y in (
+        ("phase", phase_progress, local_y),
+        ("global", global_progress, global_y),
+    ):
+        cv2.putText(frame, label, (15, bar_y - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.28, (255, 255, 255), 1)
+        cv2.rectangle(frame, (54, bar_y), (54 + bar_w - 39, bar_y + bar_h), (50, 50, 50), -1)
+        filled_w = int((bar_w - 39) * np.clip(value, 0.0, 1.0))
+        cv2.rectangle(frame, (54, bar_y), (54 + filled_w, bar_y + bar_h), color, -1)
+        cv2.rectangle(frame, (54, bar_y), (54 + bar_w - 39, bar_y + bar_h), (255, 255, 255), 1)
 
     return frame
 
@@ -183,6 +203,9 @@ def render_episode(
         print(f"[warn] no annotations for episode {episode_index}")
         return
 
+    is_success = bool(ep_ann["is_success"].iloc[-1]) if "is_success" in ep_ann else False
+    terminal_phase = int(ep_ann["phase"].iloc[-1])
+
     try:
         container = av.open(str(video_path))
         video_stream = container.streams.video[0]
@@ -208,8 +231,10 @@ def render_episode(
                 phase=int(row["phase"]),
                 phase_progress=float(row["phase_progress"]),
                 global_progress=float(row["global_progress"]),
-                frame_index=frame_idx,
+                frame_index=int(row["frame_index"]),
                 episode_index=episode_index,
+                is_success=is_success,
+                terminal_phase=terminal_phase,
                 task=task,
             )
 
@@ -343,15 +368,19 @@ def select_demo_episodes(
     if num_failure is not None:
         selected.extend(failure_eps[:num_failure])
 
-    # Fill remaining slots from all episodes without duplication.
-    requested_total = (num_success or 0) + (num_failure or 0)
-    for ep in all_eps:
-        if ep not in selected:
-            selected.append(ep)
-        if len(selected) >= requested_total:
-            break
+    if num_success and len(success_eps) < num_success:
+        print(f"[warn] requested {num_success} successful episode(s), found {len(success_eps)}")
+    if num_failure and len(failure_eps) < num_failure:
+        print(f"[warn] requested {num_failure} failed episode(s), found {len(failure_eps)}")
+    return selected
 
-    return selected[:requested_total]
+
+def infer_annotation_name(dataset_path: Path) -> str:
+    """Infer the semantic trace label name from a ``taskN`` dataset folder."""
+    match = re.fullmatch(r"task(\d+)", dataset_path.name)
+    if match:
+        return f"phase_progress_semantic_trace_task{match.group(1)}"
+    return "phase_progress_semantic"
 
 
 def main() -> None:
@@ -365,20 +394,23 @@ def main() -> None:
     parser.add_argument(
         "--annotation_name",
         type=str,
-        default="phase_progress_semantic",
-        help="Name of the annotation parquet under meta/ (without .parquet extension).",
+        default=None,
+        help=(
+            "Name of the annotation parquet under meta/ (without .parquet). "
+            "Defaults to phase_progress_semantic_trace_taskN for a taskN directory."
+        ),
     )
     parser.add_argument(
         "--num_success",
         type=int,
-        default=None,
-        help="Number of successful episodes to render. Enables stratified selection.",
+        default=1,
+        help="Number of successful episodes to render (default: 1).",
     )
     parser.add_argument(
         "--num_failure",
         type=int,
-        default=None,
-        help="Number of failed episodes to render. Enables stratified selection.",
+        default=1,
+        help="Number of failed episodes to render (default: 1).",
     )
     parser.add_argument(
         "--seed",
@@ -391,7 +423,8 @@ def main() -> None:
     args = parser.parse_args()
 
     dataset_path = Path(args.dataset_path)
-    annotations_path = dataset_path / "meta" / f"{args.annotation_name}.parquet"
+    annotation_name = args.annotation_name or infer_annotation_name(dataset_path)
+    annotations_path = dataset_path / "meta" / f"{annotation_name}.parquet"
     if not annotations_path.exists():
         raise FileNotFoundError(f"Annotations not found: {annotations_path}")
 
@@ -399,14 +432,15 @@ def main() -> None:
 
     if args.output_dir is None:
         repo_root = Path(__file__).resolve().parent
-        output_dir = repo_root / "output_demo" / args.annotation_name
+        output_dir = repo_root / "output_demo" / annotation_name
     else:
         output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Clear old demo videos to avoid confusion.
-    for old_mp4 in output_dir.glob("*.mp4"):
-        old_mp4.unlink()
+    for pattern in ("*.mp4", "*.gif"):
+        for old_video in output_dir.glob(pattern):
+            old_video.unlink()
 
     episodes = select_demo_episodes(
         dataset_path, annotations, args.num_success, args.num_failure, args.seed
@@ -418,7 +452,10 @@ def main() -> None:
         task = summary.get("task_suite_name", "")
 
     for ep_idx in episodes:
-        output_path = output_dir / f"{args.annotation_name}_episode_{ep_idx:03d}_phases.mp4"
+        ep_annotations = annotations[annotations["episode_index"] == ep_idx]
+        is_success = bool(ep_annotations["is_success"].iloc[-1])
+        outcome = "success" if is_success else "failure"
+        output_path = output_dir / f"{annotation_name}_{outcome}_episode_{ep_idx:03d}.mp4"
         render_episode(
             dataset_path=dataset_path,
             annotations=annotations,
@@ -428,7 +465,7 @@ def main() -> None:
             video_key=args.video_key,
         )
 
-    print(f"\nDone. Rendered {len(episodes)} demo videos to {output_dir}")
+    print(f"\nDone. Rendered {len(episodes)} stratified demo video(s) to {output_dir}")
 
 
 if __name__ == "__main__":
