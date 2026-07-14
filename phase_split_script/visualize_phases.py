@@ -1,16 +1,15 @@
 """Render one successful and one failed phase-labelled LIBERO episode.
 
-The renderer reads the simulator-state labels produced by
-``semantic_trace_taskN``.  It shows the current phase, phase-local progress,
-and global progress on the exported video.  Failed episodes explicitly show
-the final-phase ``0.50`` progress cap.
+The renderer validates the simulator-state labels produced by
+``semantic_trace_taskN`` before exporting a video. It shows the current phase,
+phase-local progress, and global progress on the exported video. Failed
+episodes explicitly show the final-phase ``0.50`` progress cap.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import re
 from pathlib import Path
 
 import av
@@ -18,6 +17,12 @@ import cv2
 import numpy as np
 import pandas as pd
 from PIL import Image
+
+from validate_phase_progress import (
+    infer_annotation_name,
+    print_validation_report,
+    validate_phase_progress_labels,
+)
 
 
 # Color map for phases (BGR for OpenCV).
@@ -375,14 +380,6 @@ def select_demo_episodes(
     return selected
 
 
-def infer_annotation_name(dataset_path: Path) -> str:
-    """Infer the semantic trace label name from a ``taskN`` dataset folder."""
-    match = re.fullmatch(r"task(\d+)", dataset_path.name)
-    if match:
-        return f"phase_progress_semantic_trace_task{match.group(1)}"
-    return "phase_progress_semantic"
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Visualize phase annotations on episode videos.")
     parser.add_argument("--dataset_path", required=True, help="Path to LeRobot dataset root.")
@@ -420,6 +417,11 @@ def main() -> None:
     )
     parser.add_argument("--video_key", default="image", help="Video key to render (image or wrist_image).")
     parser.add_argument("--task", default=None, help="Optional task description to overlay.")
+    parser.add_argument(
+        "--skip_validation",
+        action="store_true",
+        help="Export videos even when phase-progress validation fails.",
+    )
     args = parser.parse_args()
 
     dataset_path = Path(args.dataset_path)
@@ -429,6 +431,11 @@ def main() -> None:
         raise FileNotFoundError(f"Annotations not found: {annotations_path}")
 
     annotations = pd.read_parquet(annotations_path)
+    if not args.skip_validation:
+        report = validate_phase_progress_labels(annotations)
+        print_validation_report(dataset_path.name, report)
+        if not report.passed:
+            raise ValueError("Phase-progress validation failed; refusing to export videos.")
 
     if args.output_dir is None:
         repo_root = Path(__file__).resolve().parent
