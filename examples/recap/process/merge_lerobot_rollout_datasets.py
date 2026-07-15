@@ -96,6 +96,8 @@ def _copy_additional_data(
             local_index = int(stem.removeprefix("episode_"))
             global_index = local_index + episode_offset
             relative_parent = source_video.parent.relative_to(source_video_root)
+            if relative_parent.parts and relative_parent.parts[0].startswith("chunk-"):
+                relative_parent = Path(*relative_parent.parts[1:])
             target_chunk = global_index // chunks_size
             target_dir = (
                 output_path
