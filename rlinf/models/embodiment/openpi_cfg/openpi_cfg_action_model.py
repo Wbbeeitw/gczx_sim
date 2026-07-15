@@ -1012,7 +1012,7 @@ class OpenPi0ForCFGActionPrediction(BasePolicy, PI0Pytorch):
 
             # New tensor assignment avoids autograd in-place mutation errors
             x_t = x_t + dt * v_t
-            time += dt
+            time = time + dt
 
         return {"actions": x_t}
 
