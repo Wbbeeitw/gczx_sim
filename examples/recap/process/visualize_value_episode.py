@@ -190,7 +190,6 @@ def main() -> None:
     if not dataset_path.is_dir():
         raise FileNotFoundError(f"Dataset directory not found: {dataset_path}")
 
-    metadata = LeRobotDatasetMetadata(dataset_path.name, root=dataset_path)
     dataset = LeRobotDataset(
         dataset_path.name,
         root=dataset_path,
