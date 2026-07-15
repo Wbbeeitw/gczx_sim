@@ -12,7 +12,7 @@ Example:
         --checkpoint /workspace/results/value_sft/task1_d0_40/value_task1_d0_40/checkpoints/global_step_1200 \
         --episode 0 \
         --tag fail300_d0 \
-        --output /workspace/results/value_sft/task1_d0_40/value_episode_0000.png \
+        --output-dir /workspace/results/value_sft/task1_d0_40/visualizations \
         --siglip-path /workspace/models/siglip2-so400m-patch14-224 \
         --gemma3-path /workspace/models/gemma-3-270m \
         --tokenizer-path /workspace/models/gemma-3-270m
@@ -31,10 +31,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from lerobot.common.datasets.lerobot_dataset import (
-    LeRobotDataset,
-    LeRobotDatasetMetadata,
-)
+from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 
 from rlinf.data.datasets.recap.utils import (
     decode_image_struct_batch,
@@ -127,7 +124,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--episode", type=int, required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Explicit PNG path; mutually exclusive with --output-dir.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory for value_episode_XXXX.png/csv; mutually exclusive "
+            "with --output."
+        ),
+    )
     parser.add_argument("--tag", default=None)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--device", default="cuda")
@@ -165,6 +176,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if (args.output is None) == (args.output_dir is None):
+        raise ValueError("Provide exactly one of --output or --output-dir")
     if args.batch_size <= 0:
         raise ValueError(f"--batch-size must be positive, got {args.batch_size}")
     if args.return_min >= args.return_max:
@@ -235,7 +248,12 @@ def main() -> None:
     raw_returns = np.asarray(sidecar_return, dtype=np.float32)
     frame_indices_array = np.asarray(frame_indices, dtype=np.int64)
 
-    output_path = args.output.expanduser()
+    if args.output is not None:
+        output_path = args.output.expanduser()
+    else:
+        output_path = (
+            args.output_dir.expanduser() / f"value_episode_{args.episode:04d}.png"
+        )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     csv_path = output_path.with_suffix(".csv")
     _write_predictions(csv_path, frame_indices_array, raw_returns, predicted_values)
