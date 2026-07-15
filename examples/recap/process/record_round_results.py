@@ -47,6 +47,14 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _as_float(value: Any) -> float:
+    while isinstance(value, list):
+        if not value:
+            raise ValueError("Cannot convert an empty list to float.")
+        value = value[0]
+    return float(value)
+
+
 def _dataset_episode_stats(dataset_path: Path) -> dict[int, dict[str, Any]]:
     episode_path = dataset_path / "meta" / "episodes.jsonl"
     stats_path = dataset_path / "meta" / "episodes_stats.jsonl"
@@ -61,7 +69,7 @@ def _dataset_episode_stats(dataset_path: Path) -> dict[int, dict[str, Any]]:
             success_stats = row.get("stats", {}).get("is_success", {})
             if "mean" in success_stats:
                 episodes.setdefault(episode, {})["is_success"] = bool(
-                    float(success_stats["mean"]) >= 0.5
+                    _as_float(success_stats["mean"]) >= 0.5
                 )
     return episodes
 
