@@ -137,6 +137,7 @@ cfg_train:
   advantage_tag: null
   dataset_path: null
   base_model_path: null
+  init_checkpoint_path: null
   episode_split_path: null
   episode_split_name: train
   experiment_name: revalue_cfg_train
@@ -210,3 +211,18 @@ rollout_collect:
   fps: 10
   overwrite: false
   failure_reward: null
+
+export_view:
+  source_advantages_path: null
+  predictions_path: null
+  child_dataset_path: null
+  output_tag: fused_child
+  source_episode_start: 0
+  source_episode_end: null
+  child_episode_offset: 0
+  lookahead_step: 10
+  gamma: 1.0
+  positive_quantile: 0.3
+  discount_next_value: true
+  expected_episodes: null
+  report_path: null

@@ -33,6 +33,7 @@ from rlinf.revalue.config import (
     RevalueConfig,
     RevalueBaseConfig,
     RevalueDataConfig,
+    RevalueExportViewConfig,
     RevalueFusionConfig,
     RevalueManifestConfig,
     RevalueOutputConfig,
@@ -71,6 +72,7 @@ def _to_dataclass(cfg: DictConfig) -> RevalueConfig:
         rollout_collect=RevalueRolloutCollectConfig(
             **(obj.get("rollout_collect") or {})
         ),
+        export_view=RevalueExportViewConfig(**(obj.get("export_view") or {})),
     )
 
 

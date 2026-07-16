@@ -1,0 +1,142 @@
+# Round 2: LIBERO-Long Task1, PR-CFG.
+#
+# Policy1 (PR-CFG global_step_500) collects R1 (40 fresh episodes).
+# D0 (40) + R1 (40) -> D1 (80) trains Value1 + z/p + fusion.
+# Policy2 trains ONLY on R1 with fused advantages exported from the D1 critic,
+# initialized from Policy1 weights via init_checkpoint_path (fresh optimizer).
+#
+# Usage (inside the docker container, /workspace/RLinf):
+#   python examples/recap/rounds/run_round.py \
+#     --config examples/recap/rounds/config/task1_iter02_prcfg.yaml \
+#     --stage collect
+#   # human audit, then:
+#   python examples/recap/rounds/run_round.py \
+#     --config examples/recap/rounds/config/task1_iter02_prcfg.yaml \
+#     --stage fit_critic --confirm-audit
+#   python examples/recap/rounds/run_round.py \
+#     --config examples/recap/rounds/config/task1_iter02_prcfg.yaml \
+#     --stage export_policy_data
+#   python examples/recap/rounds/run_round.py \
+#     --config examples/recap/rounds/config/task1_iter02_prcfg.yaml \
+#     --stage train_policy
+#   python examples/recap/rounds/run_round.py \
+#     --config examples/recap/rounds/config/task1_iter02_prcfg.yaml \
+#     --stage eval_policy
+
+round_id: 2
+task: task1
+task_id: 1
+task_suite_name: libero_10
+method: prcfg
+repo_root: /workspace/RLinf
+
+gpu:
+  # Container only sees the free host GPU; inside the container it is
+  # always logical GPU 0.
+  cuda_visible_devices: "0"
+  gpu_id: 0
+
+paths:
+  base_model: /workspace/models/RLinf-Pi05-LIBERO-SFT
+  siglip: /workspace/models/siglip2-so400m-patch14-224
+  gemma3: /workspace/models/gemma-3-270m
+  tokenizer: /workspace/models/gemma-3-270m
+  parent_dataset: /data/libero_long/task1_d0_40
+  child_dataset: /data/libero_long/task1_r1_prcfg_40
+  merged_dataset: /data/libero_long/task1_d1_80
+  exp_root: /data/libero_long/experiments/task1/iter02_prcfg_s500
+
+datasets:
+  # Episodes already in parent_dataset; the fresh collection appends after
+  # them inside merged_dataset (child occupies episodes 40-79 there).
+  parent_episodes: 40
+
+parent_policy:
+  checkpoint: /data/gczx_sim/results/recap/task1_policy1_prcfg_full_750/task1_policy1_prcfg_full_750/checkpoints/global_step_500/actor/model_state_dict/full_weights.pt
+  label: Policy1-PR-CFG-s500
+
+tags:
+  returns: fail300_d1
+  merged_base: task1_d1_base_v1
+  child_fused: task1_r1_fused_v1
+
+collect:
+  num_episodes: 40
+  seed: 20260717
+  fps: 10
+  action_chunk: 5
+  num_steps: 5
+  num_steps_wait: 10
+  model_type: cfg_model
+  openpi_config_name: pi05_libero
+  visualize: true
+
+returns:
+  failure_reward: -300.0
+  gamma: 1.0
+  global_min: -900.0
+  global_max: 0.0
+  num_workers: 64
+
+value:
+  steps: 1200
+  save_interval: 600
+  micro_batch_size: 16
+  global_batch_size: 64
+  lr: 1.0e-5
+  value_lr: 1.0e-4
+  lr_warmup_steps: 100
+  action_dim: 7
+  action_horizon: 10
+  critic_expert_variant: gemma_1m
+
+revalue:
+  label_name: phase_progress_semantic_trace_task1
+  num_phases: 4
+  success_phase: 3
+  seed: 42
+  lookahead_step: 10
+  positive_quantile: 0.3
+  zp_head_type: temporal_local_stage_gated
+  zp_use_class_weights: false
+  zp_max_epochs: 100
+  zp_early_stop_patience: 10
+  fusion_max_epochs: 100
+  fusion_early_stop_patience: 10
+  fusion_alpha: 1.0
+  extract_batch_size: 16
+  train_batch_size: 256
+
+policy:
+  # Round 2 stays PR-CFG (no FACD).
+  strategy: csa_residual
+  positive_only_conditional: false
+  positive_residual_alpha: 0.5
+  positive_quantile: 0.3
+  unconditional_prob: 0.1
+  csa_bottom_quantile: 0.15
+  csa_bottom_negative_prob: 0.5
+  csa_positive_prompt_prob: 0.85
+  csa_weight_lambda: 0.2
+  max_steps: 500
+  save_interval: 500
+  lr_warmup_steps: 50
+  global_batch_size: 64
+  micro_batch_size: 16
+  extra_overrides:
+    - actor.model.openpi.train_expert_only=false
+    - actor.fsdp_config.use_orig_params=true
+
+eval:
+  eval_rollout_epoch: 5
+  total_num_envs: 10
+  guidance_scale: 1.0
+  save_video: false
+
+results:
+  enabled: true
+  round_index: 1
+  policy_label: Policy2-PR-CFG
+  critic_label: Value1-fused
+  output_dir: /data/libero_long/experiment_results/task1
+  output_name: round1_prcfg_value1

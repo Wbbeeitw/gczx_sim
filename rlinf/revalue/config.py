@@ -272,6 +272,25 @@ class RevalueRolloutCollectConfig:
 
 
 @dataclass
+class RevalueExportViewConfig:
+    """Child-dataset view export settings (re-indexed fused advantages)."""
+
+    source_advantages_path: str | None = None
+    predictions_path: str | None = None
+    child_dataset_path: str | None = None
+    output_tag: str = "fused_child"
+    source_episode_start: int = 0
+    source_episode_end: int | None = None
+    child_episode_offset: int = 0
+    lookahead_step: int = 10
+    gamma: float = 1.0
+    positive_quantile: float = 0.3
+    discount_next_value: bool = True
+    expected_episodes: int | None = None
+    report_path: str | None = None
+
+
+@dataclass
 class RevalueConfig:
     """Top-level Revalue CLI config."""
 
@@ -291,4 +310,7 @@ class RevalueConfig:
     policy_eval: RevaluePolicyEvalConfig = field(default_factory=RevaluePolicyEvalConfig)
     rollout_collect: RevalueRolloutCollectConfig = field(
         default_factory=RevalueRolloutCollectConfig
+    )
+    export_view: RevalueExportViewConfig = field(
+        default_factory=RevalueExportViewConfig
     )

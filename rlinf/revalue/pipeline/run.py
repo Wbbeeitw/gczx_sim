@@ -30,6 +30,7 @@ from rlinf.revalue.constants import (
     STAGE_COMPARE_RETURNS,
     STAGE_EVAL_POLICY,
     STAGE_EXPORT,
+    STAGE_EXPORT_DATASET_VIEW,
     STAGE_EXTRACT_FEATURES,
     STAGE_PREPARE_DATA,
     STAGE_PREDICT,
@@ -85,6 +86,10 @@ from rlinf.revalue.pipeline.train import (
     train_zp_head,
 )
 from rlinf.revalue.recap.export import ExportConfig, export_fused_advantages
+from rlinf.revalue.recap.export_view import (
+    ExportDatasetViewConfig,
+    export_dataset_view,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -705,5 +710,35 @@ def run_revalue(cfg: RevalueConfig) -> None:
                 Path(output_dir) / "collection_summary.json",
                 float(summary.get("success_rate", 0.0)),
             )
+        elif stage == STAGE_EXPORT_DATASET_VIEW:
+            if not cfg.export_view.child_dataset_path:
+                raise ValueError(
+                    "export_view.child_dataset_path is required for "
+                    "export_dataset_view stage"
+                )
+            view_out = export_dataset_view(
+                ExportDatasetViewConfig(
+                    source_advantages_path=(
+                        cfg.export_view.source_advantages_path
+                        or str(source_advantages)
+                    ),
+                    predictions_path=(
+                        cfg.export_view.predictions_path
+                        or str(paths["predictions"])
+                    ),
+                    child_dataset_path=cfg.export_view.child_dataset_path,
+                    output_tag=cfg.export_view.output_tag,
+                    source_episode_start=cfg.export_view.source_episode_start,
+                    source_episode_end=cfg.export_view.source_episode_end,
+                    child_episode_offset=cfg.export_view.child_episode_offset,
+                    lookahead_step=cfg.export_view.lookahead_step,
+                    gamma=cfg.export_view.gamma,
+                    positive_quantile=cfg.export_view.positive_quantile,
+                    discount_next_value=cfg.export_view.discount_next_value,
+                    expected_episodes=cfg.export_view.expected_episodes,
+                    report_path=cfg.export_view.report_path,
+                )
+            )
+            logger.info("exported dataset view advantages: %s", view_out)
         else:
             raise ValueError(f"Unhandled stage={stage!r}")
