@@ -18,7 +18,7 @@ import pandas as pd
 
 
 NUM_TASK1_PHASES = 4
-FAILED_TERMINAL_PHASE_PROGRESS_CAP = 0.3
+FAILED_TERMINAL_PHASE_PROGRESS_CAP = 0.15
 TASK1_SUCCESS_PHASE = 3
 NUM_TASK2_PHASES = 4
 TASK2_SUCCESS_PHASE = 3
@@ -1564,8 +1564,9 @@ def _phase_progress(
     """Build time-based phase progress from verified phase boundaries.
 
     Completed phases, including phase zero, increase linearly from zero to
-    one. For failed episodes, the final observed phase increases only to 0.3
-    during its first half and then remains at that value.
+    one. For failed episodes, the final observed phase increases only to
+    FAILED_TERMINAL_PHASE_PROGRESS_CAP during its first half and then remains
+    at that value.
     """
     phase_progress = np.zeros(len(phase), dtype=np.float32)
     if not len(phase):
