@@ -55,6 +55,7 @@ class DownstreamCFGTrainingConfig:
     episode_split_name: str = "train"
     model_type: str = "cfg_model"
     openpi_config_name: str = "pi05_libero"
+    init_checkpoint_path: str | None = None
     strategy: str = "binary"
     guidance_type: str = "positive"
     positive_only_conditional: bool = True
@@ -344,6 +345,11 @@ def train_cfg_from_advantages(cfg: DownstreamCFGTrainingConfig) -> dict[str, Any
                 f"actor.model.openpi.positive_residual_alpha={cfg.positive_residual_alpha}",
             ]
         )
+    if cfg.init_checkpoint_path:
+        init_checkpoint = _quote_override(str(cfg.init_checkpoint_path))
+        overrides.append(
+            f"actor.model.openpi.init_checkpoint_path={init_checkpoint}"
+        )
     overrides.extend(cfg.extra_overrides)
     proc = _run_python_entry(
         repo_root=cfg.repo_root,
@@ -361,6 +367,7 @@ def train_cfg_from_advantages(cfg: DownstreamCFGTrainingConfig) -> dict[str, Any
         "log_dir": str(log_dir / cfg.experiment_name),
         "checkpoint_path": str(checkpoint_path) if checkpoint_path else None,
         "advantage_tag": cfg.advantage_tag,
+        "init_checkpoint_path": cfg.init_checkpoint_path,
         "returncode": proc.returncode,
         "stdout_tail": (proc.stdout or "")[-4000:],
     }

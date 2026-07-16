@@ -610,6 +610,7 @@ def run_revalue(cfg: RevalueConfig) -> None:
                     episode_split_name=cfg.cfg_train.episode_split_name,
                     model_type=cfg.cfg_train.model_type,
                     openpi_config_name=cfg.cfg_train.openpi_config_name,
+                    init_checkpoint_path=cfg.cfg_train.init_checkpoint_path,
                     strategy=cfg.cfg_train.strategy,
                     guidance_type=cfg.cfg_train.guidance_type,
                     positive_only_conditional=cfg.cfg_train.positive_only_conditional,

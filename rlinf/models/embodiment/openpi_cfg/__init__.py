@@ -67,6 +67,14 @@ def get_model(cfg: DictConfig, torch_dtype=None):
         for weight_path in weight_paths:
             safetensors.torch.load_model(model, weight_path, strict=False)
 
+    init_checkpoint_path = getattr(actor_model_config, "init_checkpoint_path", None)
+    if init_checkpoint_path:
+        from rlinf.models.embodiment.openpi_cfg.init_checkpoint import (
+            load_init_checkpoint,
+        )
+
+        load_init_checkpoint(model, init_checkpoint_path)
+
     model.paligemma_with_expert.to_bfloat16_for_selected_params("bfloat16")
     data_config = actor_train_config.data.create(
         actor_train_config.assets_dirs, actor_model_config

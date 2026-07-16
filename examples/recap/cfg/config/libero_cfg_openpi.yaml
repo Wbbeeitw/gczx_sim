@@ -85,6 +85,10 @@ actor:
       positive_only_conditional: true
       csa_positive_prompt_prob: 0.85
       positive_residual_alpha: 0.50
+      # Optional model-weights-only init checkpoint: a full_weights.pt file or a
+      # global_step_* checkpoint dir. Overlaid on actor.model.model_path weights;
+      # optimizer, lr schedule and global_step stay fresh (unlike runner.resume_dir).
+      init_checkpoint_path: null
 
   optim:
     lr: 1.0e-5

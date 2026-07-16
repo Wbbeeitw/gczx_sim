@@ -186,6 +186,7 @@ class RevalueCFGTrainConfig:
     advantage_tag: str | None = None
     dataset_path: str | None = None
     base_model_path: str | None = None
+    init_checkpoint_path: str | None = None
     episode_split_path: str | None = None
     episode_split_name: str = "train"
     experiment_name: str = "revalue_cfg_train"
