@@ -100,6 +100,21 @@ def compute_evaluate_metrics(eval_metrics_list):
         if metric:
             all_eval_metrics[env_info_key] = metric
 
+    paired_metrics = [
+        (eval_metrics["success_once"], eval_metrics["episode_len"])
+        for eval_metrics in eval_metrics_list
+        if "success_once" in eval_metrics and "episode_len" in eval_metrics
+    ]
+    success_values = None
+    episode_lengths = None
+    if paired_metrics:
+        success_values = torch.cat(
+            [_normalize_metric_shard(success) for success, _ in paired_metrics]
+        )
+        episode_lengths = torch.cat(
+            [_normalize_metric_shard(length) for _, length in paired_metrics]
+        )
+
     for key in all_eval_metrics:
         shards = [_normalize_metric_shard(s) for s in all_eval_metrics[key]]
         stacked = torch.concat(shards).float()
@@ -107,6 +122,28 @@ def compute_evaluate_metrics(eval_metrics_list):
             stacked.mean().detach().cpu().numpy()
             if stacked.numel() > 0
             else np.asarray(0.0, dtype=np.float64)
+        )
+
+    if success_values is not None and episode_lengths is not None:
+        success_mask = success_values > 0.5
+        success_count = int(success_mask.sum().item())
+        total_count = int(success_mask.numel())
+        success_lengths = episode_lengths[success_mask]
+        all_eval_metrics["success_count"] = np.asarray(success_count)
+        all_eval_metrics["failure_count"] = np.asarray(total_count - success_count)
+        all_eval_metrics["success_rate"] = np.asarray(
+            success_count / total_count if total_count else 0.0
+        )
+        all_eval_metrics["all_episode_act_mean"] = np.asarray(
+            float(episode_lengths.mean().item()) if total_count else 0.0
+        )
+        all_eval_metrics["success_episode_act_mean"] = np.asarray(
+            float(success_lengths.mean().item()) if success_count else 0.0
+        )
+        all_eval_metrics["success_episode_act_std"] = np.asarray(
+            float(success_lengths.std(unbiased=False).item())
+            if success_count
+            else 0.0
         )
 
     # Add total trajectory count to metrics
