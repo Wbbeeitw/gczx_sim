@@ -125,6 +125,35 @@ def _require(cfg: dict, dotted: str) -> Any:
     return value
 
 
+def _apply_overrides(cfg: dict, overrides: list[str]) -> dict:
+    """Apply ``--set key=value`` overrides onto the round config.
+
+    Values are parsed as JSON first (so ``40``, ``true``, ``0.3`` become
+    native types) and fall back to plain strings. Overrides are applied
+    before the config hash is computed, so stage reports stay correct.
+    """
+    for item in overrides:
+        if "=" not in item:
+            raise ValueError(f"--set expects KEY=VALUE, got {item!r}")
+        key, raw = item.split("=", 1)
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError:
+            value = raw
+        node = cfg
+        parts = key.split(".")
+        for part in parts[:-1]:
+            child = node.setdefault(part, {})
+            if not isinstance(child, dict):
+                raise ValueError(
+                    f"cannot override {key!r}: {part!r} is not a mapping"
+                )
+            node = child
+        node[parts[-1]] = value
+        logger.info("config override: %s = %r", key, value)
+    return cfg
+
+
 def _config_hash(cfg: dict) -> str:
     payload = json.dumps(cfg, sort_keys=True, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -930,6 +959,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="print stage commands without executing them",
     )
+    parser.add_argument(
+        "--set",
+        dest="overrides",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help=(
+            "override a round config value (repeatable), e.g. "
+            "--set paths.child_dataset=/data/libero_long/task1_r1b_40 "
+            "--set collect.num_episodes=20"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -940,6 +981,7 @@ def main() -> None:
     )
     args = parse_args()
     cfg = _load_yaml(Path(args.config))
+    cfg = _apply_overrides(cfg, args.overrides)
     ctx = _build_ctx(cfg)
     stages = STAGE_ORDER if args.stage == "all" else [args.stage]
     for stage in stages:
