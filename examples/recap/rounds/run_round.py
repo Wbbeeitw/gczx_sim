@@ -193,6 +193,10 @@ def _build_ctx(cfg: dict) -> dict[str, Any]:
     eval_episodes = int(eval_cfg["eval_rollout_epoch"]) * int(
         eval_cfg["total_num_envs"]
     )
+    # Heavy, re-trainable checkpoints live under results_root
+    # (/workspace/results); small artifacts stay under exp_root
+    # (/data/libero_long). Defaults to exp_root when unset.
+    results_root = str(_get(cfg, "paths.results_root") or exp_root)
 
     ctx = {
         "cfg": cfg,
@@ -203,6 +207,7 @@ def _build_ctx(cfg: dict) -> dict[str, Any]:
         "task_suite_name": str(_get(cfg, "task_suite_name", "libero_10")),
         "repo_root": str(_get(cfg, "repo_root", "/workspace/RLinf")),
         "exp_root": exp_root,
+        "results_root": results_root,
         "parent_ds": parent_ds,
         "child_ds": child_ds,
         "merged_ds": merged_ds,
@@ -217,12 +222,12 @@ def _build_ctx(cfg: dict) -> dict[str, Any]:
         "child_fused_tag": str(_require(cfg, "tags.child_fused")),
         "value_exp": value_exp,
         "value_ckpt": (
-            f"{exp_root}/value_sft/{value_exp}"
+            f"{results_root}/value_sft/{value_exp}"
             f"/checkpoints/global_step_{value_steps}"
         ),
         "policy_exp": policy_exp,
         "policy_ckpt": (
-            f"{exp_root}/policy/{policy_exp}/checkpoints"
+            f"{results_root}/policy/{policy_exp}/checkpoints"
             f"/global_step_{int(_get(cfg, 'policy.max_steps'))}"
             "/actor/model_state_dict/full_weights.pt"
         ),
@@ -414,7 +419,7 @@ def _steps_fit_critic(ctx: dict) -> list[Step]:
                 f"runner.max_steps={value['steps']}",
                 "runner.val_check_interval=-1",
                 f"runner.save_interval={value['save_interval']}",
-                f"runner.logger.log_path={ctx['exp_root']}/value_sft",
+                f"runner.logger.log_path={ctx['results_root']}/value_sft",
                 f"runner.logger.experiment_name={ctx['value_exp']}",
             ],
             artifacts=[ctx["value_ckpt"]],
@@ -642,7 +647,7 @@ def _steps_train_policy(ctx: dict) -> list[Step]:
         f"cfg_train.episode_split_path={ctx['child_manifest']}",
         "cfg_train.episode_split_name=selected",
         f"cfg_train.experiment_name={ctx['policy_exp']}",
-        f"cfg_train.log_dir={ctx['exp_root']}/policy",
+        f"cfg_train.log_dir={ctx['results_root']}/policy",
         "cfg_train.model_type=cfg_model",
         f"cfg_train.openpi_config_name={_get(cfg, 'collect.openpi_config_name')}",
         f"cfg_train.strategy={policy.get('strategy')}",

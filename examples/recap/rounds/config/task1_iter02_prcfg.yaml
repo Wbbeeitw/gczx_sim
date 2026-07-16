@@ -45,6 +45,9 @@ paths:
   child_dataset: /data/libero_long/task1_r1_prcfg_40
   merged_dataset: /data/libero_long/task1_d1_80
   exp_root: /data/libero_long/experiments/task1/iter02_prcfg_s500
+  # Heavy, re-trainable checkpoints (Value/Policy, tens of GB) go to the
+  # results mount; everything else stays under exp_root. Same iter name.
+  results_root: /workspace/results/experiments/task1/iter02_prcfg_s500
 
 datasets:
   # Episodes already in parent_dataset; the fresh collection appends after
