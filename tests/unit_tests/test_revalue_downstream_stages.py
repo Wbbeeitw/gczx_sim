@@ -7,6 +7,7 @@ from pathlib import Path
 from rlinf.revalue.pipeline.embodied import (  # noqa: E402
     DownstreamCFGTrainingConfig,
     _quote_override,
+    _parse_eval_metrics,
     PolicyEvaluationConfig,
     evaluate_policy_checkpoint,
     train_cfg_from_advantages,
@@ -86,6 +87,21 @@ def test_evaluate_policy_checkpoint_appends_task_id_filter_override(monkeypatch,
     overrides = captured["overrides"]
     assert isinstance(overrides, list)
     assert '+env.eval.task_id_filter=[0]' in overrides
+
+
+def test_parse_eval_metrics_supports_numpy_scalar_arrays() -> None:
+    stdout = (
+        "\x1b[36m(Runner)\x1b[0m [INFO 12:00:00 RLinf] "
+        "{'eval/success_count': array(30), "
+        "'eval/success_rate': array(0.6), "
+        "'eval/episode_len': array(297., dtype=float32)}"
+    )
+
+    assert _parse_eval_metrics(stdout) == {
+        "eval/success_count": 30,
+        "eval/success_rate": 0.6,
+        "eval/episode_len": 297.0,
+    }
 
 
 def test_train_cfg_from_advantages_appends_csa_overrides(monkeypatch, tmp_path: Path) -> None:

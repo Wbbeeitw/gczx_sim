@@ -372,9 +372,11 @@ def _parse_eval_metrics(stdout: str) -> dict[str, Any] | None:
     marker = "[INFO"
     lines = stdout.splitlines()
     for line in reversed(lines):
+        line = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", line)
         if marker in line and "RLinf" in line and "{" in line and "}" in line:
             payload = line[line.find("{") : line.rfind("}") + 1]
-            cleaned = payload.replace("array(", "").replace(", dtype=float32)", "")
+            cleaned = payload.replace("array(", "(")
+            cleaned = re.sub(r",\s*dtype=[^)]+(?=\))", "", cleaned)
             try:
                 parsed = ast.literal_eval(cleaned)
             except (ValueError, SyntaxError):
@@ -429,6 +431,10 @@ def evaluate_policy_checkpoint(cfg: PolicyEvaluationConfig) -> dict[str, Any]:
         python_bin=cfg.python_bin,
     )
     metrics = _parse_eval_metrics(proc.stdout or "")
+    if metrics is None:
+        metrics = _parse_eval_metrics(
+            (log_dir / "eval_policy.log").read_text(encoding="utf-8")
+        )
     summary = {
         "config_name": cfg.config_name,
         "experiment_name": cfg.experiment_name,

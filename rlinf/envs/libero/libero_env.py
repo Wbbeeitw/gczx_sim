@@ -547,12 +547,12 @@ class LiberoEnv(gym.Env):
         self.success_once = self.success_once | terminations
         episode_info["success_once"] = self.success_once.copy()
         episode_info["return"] = self.returns.copy()
-        episode_info["episode_len"] = self.elapsed_steps.copy()
 
         # Use success episode_len for reward if already succeeded, else current elapsed
         episode_len_for_reward = np.where(
             self.success_once, self.success_episode_len, self.elapsed_steps
         )
+        episode_info["episode_len"] = episode_len_for_reward.copy()
         episode_info["reward"] = episode_info["return"] / np.maximum(
             episode_len_for_reward, 1
         )
