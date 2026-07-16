@@ -52,7 +52,7 @@ datasets:
   parent_episodes: 40
 
 parent_policy:
-  checkpoint: /data/gczx_sim/results/recap/task1_policy1_prcfg_full_750/task1_policy1_prcfg_full_750/checkpoints/global_step_500/actor/model_state_dict/full_weights.pt
+  checkpoint: /workspace/results/recap/task1_policy1_prcfg_full_750/task1_policy1_prcfg_full_750/checkpoints/global_step_500/actor/model_state_dict/full_weights.pt
   label: Policy1-PR-CFG-s500
 
 tags:
