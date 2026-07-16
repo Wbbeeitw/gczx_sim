@@ -53,6 +53,11 @@ class EmbodiedEvalRunner:
         self.logger = get_logger()
 
     def init_workers(self):
+        if self.cfg.rollout.get("warmup_before_env", False):
+            self.rollout.init_worker().wait()
+            self.rollout.warmup_eval_policy().wait()
+            self.env.init_worker().wait()
+            return
         rollout_handle = self.rollout.init_worker()
         env_handle = self.env.init_worker()
 

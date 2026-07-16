@@ -238,6 +238,7 @@ class RevaluePolicyEvalConfig:
     guidance_type: str = "positive"
     positive_only_conditional: bool = True
     negative_guidance_scale: float = 0.0
+    warmup_before_env: bool = False
     python_bin: str | None = None
     extra_overrides: list[str] = field(default_factory=list)
 
@@ -264,6 +265,11 @@ class RevalueRolloutCollectConfig:
     gpu_id: int = 0
     fps: int = 10
     overwrite: bool = False
+    warmup_before_env: bool = False
+    guidance_type: str = "positive"
+    positive_only_conditional: bool = True
+    guidance_scale: float = 1.0
+    negative_guidance_scale: float = 0.0
     failure_reward: float | None = None
     semantic_trace: bool = False
     semantic_trace_task: str = "task1"

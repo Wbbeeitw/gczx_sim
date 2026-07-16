@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256
+LIBERO_STATE_DIM = 8
 
 
 @dataclass
@@ -126,6 +127,12 @@ class LiberoRolloutCollectionConfig:
     gpu_id: int = 0
     fps: int = 10
     overwrite: bool = False
+    warmup_before_env: bool = False
+    guidance_type: str = "positive"
+    positive_only_conditional: bool = True
+    guidance_scale: float = 1.0
+    negative_guidance_scale: float = 0.0
+    warmup_before_env: bool = False
     failure_reward: float | None = None
     semantic_trace: bool = False
     semantic_trace_task: str = "task1"
@@ -415,6 +422,8 @@ def evaluate_policy_checkpoint(cfg: PolicyEvaluationConfig) -> dict[str, Any]:
     ]
     if cfg.checkpoint_path:
         overrides.append(f"runner.ckpt_path={_quote_override(cfg.checkpoint_path)}")
+    if cfg.warmup_before_env:
+        overrides.append("+rollout.warmup_before_env=true")
     if cfg.task_suite_name:
         overrides.append(f"env.eval.task_suite_name={_quote_override(cfg.task_suite_name)}")
     if cfg.task_id_filter:
@@ -447,6 +456,7 @@ def evaluate_policy_checkpoint(cfg: PolicyEvaluationConfig) -> dict[str, Any]:
         "experiment_name": cfg.experiment_name,
         "log_dir": str(log_dir / cfg.experiment_name),
         "checkpoint_path": cfg.checkpoint_path,
+        "warmup_before_env": cfg.warmup_before_env,
         "metrics": metrics,
         "returncode": proc.returncode,
     }
@@ -545,8 +555,10 @@ def _load_rollout_policy(cfg: LiberoRolloutCollectionConfig):
                     "precision": None,
                     "openpi": {
                         "config_name": cfg.openpi_config_name,
-                        "guidance_type": "positive",
-                        "positive_only_conditional": True,
+                        "guidance_type": cfg.guidance_type,
+                        "positive_only_conditional": cfg.positive_only_conditional,
+                        "cfgrl_guidance_scale": cfg.guidance_scale,
+                        "cfgrl_negative_guidance_scale": cfg.negative_guidance_scale,
                     },
                 }
             )
@@ -588,6 +600,50 @@ def _load_rollout_policy(cfg: LiberoRolloutCollectionConfig):
     return setup_policy(policy_args)
 
 
+def warmup_libero_rollout_policy(policy, task_description: str) -> None:
+    """Compile a rollout policy with production input shapes before EGL starts."""
+    if not hasattr(policy, "predict_action_batch"):
+        return
+
+    import time
+
+    import torch
+
+    started = time.perf_counter()
+    logger.info("warming up rollout policy before creating the EGL environment")
+    if hasattr(policy, "reset"):
+        policy.reset()
+    cpu_rng_state = torch.random.get_rng_state()
+    cuda_rng_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    dummy_observation = {
+        "main_images": torch.zeros(
+            (1, LIBERO_ENV_RESOLUTION, LIBERO_ENV_RESOLUTION, 3),
+            dtype=torch.uint8,
+        ),
+        "wrist_images": torch.zeros(
+            (1, LIBERO_ENV_RESOLUTION, LIBERO_ENV_RESOLUTION, 3),
+            dtype=torch.uint8,
+        ),
+        "states": torch.zeros((1, LIBERO_STATE_DIM), dtype=torch.float32),
+        "task_descriptions": [str(task_description)],
+    }
+    try:
+        with torch.inference_mode():
+            policy.predict_action_batch(dummy_observation, mode="eval")
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+    finally:
+        torch.random.set_rng_state(cpu_rng_state)
+        if cuda_rng_states is not None:
+            torch.cuda.set_rng_state_all(cuda_rng_states)
+    if hasattr(policy, "reset"):
+        policy.reset()
+    logger.info(
+        "rollout policy warmup completed in %.2f seconds",
+        time.perf_counter() - started,
+    )
+
+
 def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any]:
     """Collect LIBERO rollouts and save them as a LeRobot dataset."""
     from libero.libero import benchmark
@@ -609,12 +665,14 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
             )
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    policy = _load_rollout_policy(cfg)
     benchmark_dict = benchmark.get_benchmark_dict()
     task_suite = benchmark_dict[cfg.task_suite_name]()
     task = task_suite.get_task(cfg.task_id)
     initial_states = task_suite.get_task_init_states(cfg.task_id)
     max_steps = _max_steps_for_suite(cfg.task_suite_name)
+    policy = _load_rollout_policy(cfg)
+    if cfg.warmup_before_env:
+        warmup_libero_rollout_policy(policy, task.language)
     env, task_description = _get_libero_env(
         task, LIBERO_ENV_RESOLUTION, cfg.seed, cfg.gpu_id
     )
@@ -866,6 +924,11 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
         "model_path": cfg.model_path,
         "checkpoint_path": cfg.checkpoint_path,
         "model_type": cfg.model_type,
+        "warmup_before_env": cfg.warmup_before_env,
+        "guidance_type": cfg.guidance_type,
+        "positive_only_conditional": cfg.positive_only_conditional,
+        "guidance_scale": cfg.guidance_scale,
+        "negative_guidance_scale": cfg.negative_guidance_scale,
         "task_suite_name": cfg.task_suite_name,
         "task_id": cfg.task_id,
         "num_episodes": cfg.num_episodes,

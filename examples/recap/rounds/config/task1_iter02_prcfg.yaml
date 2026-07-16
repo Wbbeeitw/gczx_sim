@@ -7,21 +7,11 @@
 #
 # Usage (inside the docker container, /workspace/RLinf):
 #   python examples/recap/rounds/run_round.py \
-#     --config examples/recap/rounds/config/task1_iter02_prcfg.yaml \
-#     --stage collect
-#   # human audit, then:
+#     --config examples/recap/rounds/config/task1_iter02_prcfg.yaml --stage all
+#   # Audit the new rollouts, then repeat once with approval:
 #   python examples/recap/rounds/run_round.py \
 #     --config examples/recap/rounds/config/task1_iter02_prcfg.yaml \
-#     --stage fit_critic --confirm-audit
-#   python examples/recap/rounds/run_round.py \
-#     --config examples/recap/rounds/config/task1_iter02_prcfg.yaml \
-#     --stage export_policy_data
-#   python examples/recap/rounds/run_round.py \
-#     --config examples/recap/rounds/config/task1_iter02_prcfg.yaml \
-#     --stage train_policy
-#   python examples/recap/rounds/run_round.py \
-#     --config examples/recap/rounds/config/task1_iter02_prcfg.yaml \
-#     --stage eval_policy
+#     --stage all --confirm-audit
 
 round_id: 2
 task: task1
@@ -72,6 +62,11 @@ collect:
   num_steps_wait: 10
   model_type: cfg_model
   openpi_config_name: pi05_libero
+  warmup_before_env: true
+  guidance_type: positive
+  positive_only_conditional: true
+  guidance_scale: 1.0
+  negative_guidance_scale: 0.0
   visualize: true
 
 returns:
@@ -113,7 +108,10 @@ revalue:
 policy:
   # Round 2 stays PR-CFG (no FACD).
   strategy: csa_residual
+  guidance_type: positive
   positive_only_conditional: false
+  guidance_scale: 1.0
+  negative_guidance_scale: 0.0
   positive_residual_alpha: 0.5
   positive_quantile: 0.3
   unconditional_prob: 0.1
@@ -134,6 +132,10 @@ eval:
   eval_rollout_epoch: 5
   total_num_envs: 10
   guidance_scale: 1.0
+  guidance_type: positive
+  positive_only_conditional: true
+  negative_guidance_scale: 0.0
+  warmup_before_env: true
   save_video: false
 
 results:

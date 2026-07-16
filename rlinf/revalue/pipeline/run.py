@@ -660,6 +660,7 @@ def run_revalue(cfg: RevalueConfig) -> None:
                     guidance_type=cfg.policy_eval.guidance_type,
                     positive_only_conditional=cfg.policy_eval.positive_only_conditional,
                     negative_guidance_scale=cfg.policy_eval.negative_guidance_scale,
+                    warmup_before_env=cfg.policy_eval.warmup_before_env,
                     eval_rollout_epoch=cfg.policy_eval.eval_rollout_epoch,
                     total_num_envs=cfg.policy_eval.total_num_envs,
                     save_video=cfg.policy_eval.save_video,
@@ -697,6 +698,15 @@ def run_revalue(cfg: RevalueConfig) -> None:
                     gpu_id=cfg.rollout_collect.gpu_id,
                     fps=cfg.rollout_collect.fps,
                     overwrite=cfg.rollout_collect.overwrite,
+                    warmup_before_env=cfg.rollout_collect.warmup_before_env,
+                    guidance_type=cfg.rollout_collect.guidance_type,
+                    positive_only_conditional=(
+                        cfg.rollout_collect.positive_only_conditional
+                    ),
+                    guidance_scale=cfg.rollout_collect.guidance_scale,
+                    negative_guidance_scale=(
+                        cfg.rollout_collect.negative_guidance_scale
+                    ),
                     failure_reward=cfg.rollout_collect.failure_reward,
                     semantic_trace=cfg.rollout_collect.semantic_trace,
                     semantic_trace_task=cfg.rollout_collect.semantic_trace_task,

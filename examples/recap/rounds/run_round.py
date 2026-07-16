@@ -41,8 +41,9 @@ Usage:
       --config examples/recap/rounds/config/task1_iter02_prcfg.yaml \
       --stage fit_critic --confirm-audit
 
-``--dry-run`` prints every command without executing it, ``--force`` re-runs
-a stage whose report is already up to date.
+``--dry-run`` prints every command without executing it. ``--force`` re-runs
+compute steps, while dataset replacement additionally requires
+``--overwrite-datasets``.
 """
 
 from __future__ import annotations
@@ -156,6 +157,19 @@ def _apply_overrides(cfg: dict, overrides: list[str]) -> dict:
 
 def _config_hash(cfg: dict) -> str:
     payload = json.dumps(cfg, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _step_hash(step: Step) -> str:
+    payload = json.dumps(
+        {"name": step.name, "argv": step.argv, "artifacts": step.artifacts},
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _stage_hash(steps: list[Step]) -> str:
+    payload = json.dumps([_step_hash(step) for step in steps])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -311,6 +325,15 @@ def _steps_collect(ctx: dict) -> list[Step]:
         f"rollout_collect.action_chunk={_get(cfg, 'collect.action_chunk', 5)}",
         f"rollout_collect.num_steps={_get(cfg, 'collect.num_steps', 5)}",
         f"rollout_collect.num_steps_wait={_get(cfg, 'collect.num_steps_wait', 10)}",
+        "rollout_collect.warmup_before_env="
+        f"{_get(cfg, 'collect.warmup_before_env', True)}",
+        f"rollout_collect.guidance_type={_get(cfg, 'collect.guidance_type', 'positive')}",
+        "rollout_collect.positive_only_conditional="
+        f"{_get(cfg, 'collect.positive_only_conditional', True)}",
+        "rollout_collect.guidance_scale="
+        f"{_get(cfg, 'collect.guidance_scale', 1.0)}",
+        "rollout_collect.negative_guidance_scale="
+        f"{_get(cfg, 'collect.negative_guidance_scale', 0.0)}",
         "rollout_collect.semantic_trace=true",
         f"rollout_collect.semantic_trace_task={ctx['task']}",
         f"rollout_collect.semantic_trace_output_name=semantic_trace_{ctx['task']}",
@@ -537,7 +560,10 @@ def _steps_fit_critic(ctx: dict) -> list[Step]:
                     f"fusion.alpha={revalue.get('fusion_alpha', 1.0)}",
                 ],
             ),
-            artifacts=[f"{revalue_root}/fusion/metrics.json"],
+            artifacts=[
+                f"{revalue_root}/fusion/fusion.pt",
+                f"{revalue_root}/fusion/metrics.json",
+            ],
         ),
         Step(
             name="predict",
@@ -651,9 +677,11 @@ def _steps_train_policy(ctx: dict) -> list[Step]:
         "cfg_train.model_type=cfg_model",
         f"cfg_train.openpi_config_name={_get(cfg, 'collect.openpi_config_name')}",
         f"cfg_train.strategy={policy.get('strategy')}",
-        "cfg_train.guidance_type=positive",
+        f"cfg_train.guidance_type={policy.get('guidance_type', 'positive')}",
         "cfg_train.positive_only_conditional="
         f"{policy.get('positive_only_conditional')}",
+        "cfg_train.negative_guidance_scale="
+        f"{policy.get('negative_guidance_scale', 0.0)}",
         f"cfg_train.unconditional_prob={policy.get('unconditional_prob')}",
         f"cfg_train.csa_positive_quantile={policy.get('positive_quantile')}",
         f"cfg_train.csa_bottom_quantile={policy.get('csa_bottom_quantile')}",
@@ -689,6 +717,7 @@ def _steps_train_policy(ctx: dict) -> list[Step]:
 
 def _steps_eval_policy(ctx: dict) -> list[Step]:
     cfg = ctx["cfg"]
+    policy = cfg.get("policy", {})
     eval_cfg = cfg.get("eval", {})
     results = cfg.get("results", {})
     steps = [
@@ -706,8 +735,14 @@ def _steps_eval_policy(ctx: dict) -> list[Step]:
                     "policy_eval.config_name=libero_10_pi05_sft_eval",
                     "policy_eval.openpi_config_name="
                     f"{_get(cfg, 'collect.openpi_config_name')}",
-                    "policy_eval.guidance_type=positive",
-                    "policy_eval.positive_only_conditional=true",
+                    "policy_eval.guidance_type="
+                    f"{eval_cfg.get('guidance_type', policy.get('guidance_type', 'positive'))}",
+                    "policy_eval.positive_only_conditional="
+                    f"{eval_cfg.get('positive_only_conditional', True)}",
+                    "policy_eval.negative_guidance_scale="
+                    f"{eval_cfg.get('negative_guidance_scale', policy.get('negative_guidance_scale', 0.0))}",
+                    "policy_eval.warmup_before_env="
+                    f"{eval_cfg.get('warmup_before_env', True)}",
                     _list_override(
                         "policy_eval.extra_overrides",
                         [
@@ -738,7 +773,10 @@ def _steps_eval_policy(ctx: dict) -> list[Step]:
                         f"--policy-label={results['policy_label']}",
                         f"--critic-label={results['critic_label']}",
                         f"--train-dataset={ctx['merged_ds']}",
-                        f"--eval-dataset={ctx['child_ds']}",
+                        f"--critic-dataset={ctx['merged_ds']}",
+                        "--critic-scope=merged_training_dataset",
+                        "--policy-eval-summary="
+                        f"{ctx['exp_root']}/eval/eval_policy_summary.json",
                         f"--comparison={ctx['comparison']}",
                         f"--zp-metrics={ctx['revalue_root']}/zp_head/metrics.json",
                         f"--fusion-metrics={ctx['revalue_root']}/fusion/metrics.json",
@@ -747,7 +785,8 @@ def _steps_eval_policy(ctx: dict) -> list[Step]:
                     ],
                 ),
                 artifacts=[
-                    f"{results['output_dir']}/{results['output_name']}.json"
+                    f"{results['output_dir']}/{results['output_name']}.json",
+                    f"{results['output_dir']}/{results['output_name']}.csv",
                 ],
             )
         )
@@ -767,6 +806,15 @@ def _report_path(ctx: dict, stage: str) -> Path:
     return Path(ctx["exp_root"]) / "stage_reports" / f"{stage}.json"
 
 
+def _step_report_path(ctx: dict, stage: str, step: Step) -> Path:
+    return (
+        Path(ctx["exp_root"])
+        / "stage_reports"
+        / "steps"
+        / f"{stage}_{step.name}.json"
+    )
+
+
 def _load_report(ctx: dict, stage: str) -> dict | None:
     path = _report_path(ctx, stage)
     if not path.exists():
@@ -775,6 +823,74 @@ def _load_report(ctx: dict, stage: str) -> dict | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return None
+
+
+def _load_step_report(ctx: dict, stage: str, step: Step) -> dict | None:
+    path = _step_report_path(ctx, stage, step)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+
+
+def _step_is_current(ctx: dict, stage: str, step: Step) -> bool:
+    report = _load_step_report(ctx, stage, step)
+    return bool(
+        report
+        and report.get("step_hash") == _step_hash(step)
+        and all(Path(path).exists() for path in step.artifacts)
+    )
+
+
+def _write_step_report(
+    ctx: dict,
+    stage: str,
+    step: Step,
+    executed_argv: list[str],
+    started_at: str,
+    finished_at: str,
+) -> None:
+    path = _step_report_path(ctx, stage, step)
+    payload = {
+        "stage": stage,
+        "step": step.name,
+        "step_hash": _step_hash(step),
+        "git_commit": _git_commit(ctx["repo_root"]),
+        "argv": executed_argv,
+        "artifacts": step.artifacts,
+        "started_at": started_at,
+        "finished_at": finished_at,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _execution_step(step: Step, overwrite_datasets: bool) -> Step:
+    argv = list(step.argv)
+    if overwrite_datasets and step.name == "collect_rollouts":
+        argv.append("rollout_collect.overwrite=true")
+    if overwrite_datasets and step.name == "merge_datasets":
+        argv.append("--overwrite")
+    return Step(name=step.name, argv=argv, artifacts=list(step.artifacts))
+
+
+def _dataset_output_exists(ctx: dict, step: Step) -> bool:
+    if step.name == "collect_rollouts":
+        return Path(ctx["child_ds"]).exists()
+    if step.name == "merge_datasets":
+        return Path(ctx["merged_ds"]).exists()
+    return False
+
+
+def _stage_is_current(ctx: dict, stage: str, steps: list[Step]) -> bool:
+    report = _load_report(ctx, stage)
+    return bool(
+        report
+        and report.get("stage_hash") == _stage_hash(steps)
+        and all(_step_is_current(ctx, stage, step) for step in steps)
+    )
 
 
 def _build_env(ctx: dict) -> dict[str, str]:
@@ -865,39 +981,30 @@ def _write_manifest(ctx: dict, cfg_hash: str) -> None:
 
 def run_stage(stage: str, ctx: dict, args: argparse.Namespace) -> None:
     cfg_hash = _config_hash(ctx["cfg"])
-    existing = _load_report(ctx, stage)
-    if (
-        existing
-        and existing.get("config_hash") == cfg_hash
-        and not args.force
-    ):
+    steps = _STAGE_BUILDERS[stage](ctx)
+    stage_hash = _stage_hash(steps)
+    if _stage_is_current(ctx, stage, steps) and not args.force:
         logger.info(
-            "stage %s already completed with the same config; skipping "
+            "stage %s already completed with matching step reports; skipping "
             "(use --force to re-run)",
             stage,
         )
         return
 
     for dep in STAGE_REQUIRES.get(stage, []):
-        dep_report = _load_report(ctx, dep)
-        if dep_report is None and not args.dry_run:
+        dep_steps = _STAGE_BUILDERS[dep](ctx)
+        if not _stage_is_current(ctx, dep, dep_steps) and not args.dry_run:
             raise RuntimeError(
-                f"stage {stage!r} requires completed stage {dep!r}; "
-                f"run --stage {dep} first"
-            )
-        if dep_report and dep_report.get("config_hash") != cfg_hash:
-            logger.warning(
-                "dependency stage %s was completed under a different config "
-                "hash; results may be stale",
-                dep,
+                f"stage {stage!r} requires current stage {dep!r}; "
+                f"run --stage {dep} with the current round config first"
             )
 
-    steps = _STAGE_BUILDERS[stage](ctx)
     if args.dry_run:
         print(f"\n=== stage: {stage} (dry-run) ===")
         for step in steps:
+            execution_step = _execution_step(step, args.overwrite_datasets)
             print(f"\n# step: {step.name}")
-            print(shlex.join(step.argv))
+            print(shlex.join(execution_step.argv))
             for artifact in step.artifacts:
                 print(f"#   artifact: {artifact}")
         return
@@ -912,22 +1019,41 @@ def run_stage(stage: str, ctx: dict, args: argparse.Namespace) -> None:
     started = datetime.now(timezone.utc).isoformat()
     env = _build_env(ctx)
     for step in steps:
-        if not args.force and step.artifacts and all(
-            Path(path).exists() for path in step.artifacts
-        ):
+        if not args.force and _step_is_current(ctx, stage, step):
             logger.info(
-                "step %s artifacts already exist; skipping", step.name
+                "step %s has a matching report and artifacts; skipping", step.name
             )
             continue
+        if (
+            step.name in {"collect_rollouts", "merge_datasets"}
+            and _dataset_output_exists(ctx, step)
+            and not args.overwrite_datasets
+        ):
+            raise RuntimeError(
+                f"step {step.name!r} needs to replace an existing dataset; "
+                "re-run with --overwrite-datasets after verifying the target path"
+            )
+        execution_step = _execution_step(step, args.overwrite_datasets)
         log_path = (
             Path(ctx["exp_root"]) / "logs" / f"{stage}_{step.name}.log"
         )
-        _run_step(step, log_path, env, ctx["repo_root"])
+        step_started = datetime.now(timezone.utc).isoformat()
+        _run_step(execution_step, log_path, env, ctx["repo_root"])
+        step_finished = datetime.now(timezone.utc).isoformat()
+        _write_step_report(
+            ctx,
+            stage,
+            step,
+            execution_step.argv,
+            step_started,
+            step_finished,
+        )
 
     finished = datetime.now(timezone.utc).isoformat()
     report = {
         "stage": stage,
         "config_hash": cfg_hash,
+        "stage_hash": stage_hash,
         "git_commit": _git_commit(ctx["repo_root"]),
         "steps": [step.name for step in steps],
         "started_at": started,
@@ -957,7 +1083,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="re-run even if the stage report is up to date",
+        help="re-run compute steps even if their reports are current",
+    )
+    parser.add_argument(
+        "--overwrite-datasets",
+        action="store_true",
+        help="allow collect or merge steps to replace their output datasets",
     )
     parser.add_argument(
         "--dry-run",
@@ -988,6 +1119,14 @@ def main() -> None:
     cfg = _load_yaml(Path(args.config))
     cfg = _apply_overrides(cfg, args.overrides)
     ctx = _build_ctx(cfg)
+    if args.stage == "all" and args.confirm_audit:
+        collect_steps = _STAGE_BUILDERS["collect"](ctx)
+        if not _stage_is_current(ctx, "collect", collect_steps):
+            raise RuntimeError(
+                "--stage all --confirm-audit requires a previously completed "
+                "collect stage; run --stage all once, audit the new rollouts, "
+                "then repeat the command with --confirm-audit"
+            )
     stages = STAGE_ORDER if args.stage == "all" else [args.stage]
     for stage in stages:
         run_stage(stage, ctx, args)

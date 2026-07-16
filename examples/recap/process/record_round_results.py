@@ -113,6 +113,40 @@ def _dataset_summary(dataset_path: Path) -> dict[str, Any]:
     }
 
 
+def _metric_value(metrics: dict[str, Any], name: str) -> Any:
+    if name in metrics:
+        return metrics[name]
+    matches = [value for key, value in metrics.items() if key.endswith(f"/{name}")]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _policy_summary(path: Path) -> dict[str, Any]:
+    summary = _read_json(path)
+    metrics = summary.get("metrics") or {}
+
+    def _optional_float(name: str) -> float | None:
+        value = _metric_value(metrics, name)
+        return _as_float(value) if value is not None else None
+
+    episodes_value = _metric_value(metrics, "num_trajectories")
+    successes_value = _metric_value(metrics, "success_count")
+    failures_value = _metric_value(metrics, "failure_count")
+    return {
+        "episodes": int(_as_float(episodes_value)) if episodes_value is not None else None,
+        "frames": None,
+        "successes": int(_as_float(successes_value))
+        if successes_value is not None
+        else None,
+        "failures": int(_as_float(failures_value))
+        if failures_value is not None
+        else None,
+        "success_rate": _optional_float("success_rate"),
+        "mean_episode_length": _optional_float("all_episode_act_mean"),
+        "success_only_act": _optional_float("success_episode_act_mean"),
+        "success_only_act_std": _optional_float("success_episode_act_std"),
+    }
+
+
 def _load_comparison_frame(comparison: dict[str, Any]) -> pd.DataFrame:
     advantages = pd.read_parquet(comparison["advantages_path"])
     predictions = pd.read_parquet(comparison["predictions_path"])
@@ -273,7 +307,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--policy-label", required=True)
     parser.add_argument("--critic-label", required=True)
     parser.add_argument("--train-dataset", type=Path, default=None)
-    parser.add_argument("--eval-dataset", type=Path, required=True)
+    parser.add_argument("--eval-dataset", type=Path, default=None)
+    parser.add_argument("--critic-dataset", type=Path, default=None)
+    parser.add_argument("--policy-eval-summary", type=Path, default=None)
+    parser.add_argument("--critic-scope", default="unspecified")
     parser.add_argument("--comparison", type=Path, required=True)
     parser.add_argument("--zp-metrics", type=Path, default=None)
     parser.add_argument("--fusion-metrics", type=Path, default=None)
@@ -285,24 +322,39 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     comparison = _read_json(args.comparison)
-    collection_path = args.eval_dataset / "collection_summary.json"
-    collection = _read_json(collection_path) if collection_path.exists() else {}
-    eval_data = _dataset_summary(args.eval_dataset)
-    eval_data["successes"] = collection.get("successes", eval_data["successes"])
-    eval_data["success_rate"] = collection.get(
-        "success_rate",
-        (
-            eval_data["successes"] / eval_data["episodes"]
-            if eval_data["successes"] is not None and eval_data["episodes"]
-            else None
-        ),
+    critic_dataset = args.critic_dataset or args.eval_dataset
+    if critic_dataset is None:
+        raise ValueError("--critic-dataset is required")
+
+    collection_path = (
+        args.eval_dataset / "collection_summary.json" if args.eval_dataset else None
     )
-    eval_data["mean_episode_length"] = collection.get(
-        "mean_episode_length", eval_data["mean_episode_length"]
-    )
+    if args.policy_eval_summary:
+        eval_data = _policy_summary(args.policy_eval_summary)
+    elif args.eval_dataset:
+        collection = (
+            _read_json(collection_path)
+            if collection_path is not None and collection_path.exists()
+            else {}
+        )
+        eval_data = _dataset_summary(args.eval_dataset)
+        eval_data["successes"] = collection.get("successes", eval_data["successes"])
+        eval_data["success_rate"] = collection.get(
+            "success_rate",
+            (
+                eval_data["successes"] / eval_data["episodes"]
+                if eval_data["successes"] is not None and eval_data["episodes"]
+                else None
+            ),
+        )
+        eval_data["mean_episode_length"] = collection.get(
+            "mean_episode_length", eval_data["mean_episode_length"]
+        )
+    else:
+        raise ValueError("--policy-eval-summary or --eval-dataset is required")
 
     frame = _load_comparison_frame(comparison)
-    outcomes = _dataset_episode_stats(args.eval_dataset)
+    outcomes = _dataset_episode_stats(critic_dataset)
     frame["outcome"] = frame["episode_index"].map(
         lambda episode: "success"
         if outcomes.get(int(episode), {}).get("is_success") is True
@@ -325,6 +377,8 @@ def main() -> None:
         "training": training,
         "evaluation": eval_data,
         "critic": {
+            "scope": args.critic_scope,
+            "dataset_path": str(critic_dataset),
             "frame_level_all": _error_metrics(frame),
             "episode_level_all": _episode_error_metrics(frame),
             "status_frame_metrics": status_metrics,
@@ -344,19 +398,30 @@ def main() -> None:
             "policy_confidence_interval",
         ],
         "source_paths": {
-            "eval_dataset": str(args.eval_dataset),
+            "eval_dataset": str(args.eval_dataset) if args.eval_dataset else None,
+            "critic_dataset": str(critic_dataset),
+            "policy_eval_summary": str(args.policy_eval_summary)
+            if args.policy_eval_summary
+            else None,
             "train_dataset": str(args.train_dataset)
             if args.train_dataset
             else None,
             "comparison": str(args.comparison),
             "collection_summary": str(collection_path)
-            if collection_path.exists()
+            if collection_path is not None and collection_path.exists()
             else None,
             "zp_metrics": str(args.zp_metrics) if args.zp_metrics else None,
             "fusion_metrics": (
                 str(args.fusion_metrics) if args.fusion_metrics else None
             ),
         },
+    }
+    result["primary_metrics"] = {
+        "critic_fused_frame_mae": result["critic"]["frame_level_all"].get(
+            "fused_mae"
+        ),
+        "policy_success_rate": eval_data.get("success_rate"),
+        "policy_success_episode_act_mean": eval_data.get("success_only_act"),
     }
     row = _build_row(result)
     output_dir = args.output_dir

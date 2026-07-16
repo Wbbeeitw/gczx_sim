@@ -149,6 +149,57 @@ class MultiStepRolloutWorker(Worker):
                 self.total_num_eval_envs // self.num_pipeline_stages
             )
 
+    def warmup_eval_policy(self):
+        """Compile CFG inference before LIBERO workers create EGL contexts."""
+        if not self.cfg.rollout.get("warmup_before_env", False):
+            return None
+        if SupportedModel(self.cfg.actor.model.model_type) != SupportedModel.CFG_MODEL:
+            return None
+
+        from libero.libero import benchmark
+
+        task_suite_name = self.cfg.env.eval.task_suite_name
+        task_ids = self.cfg.env.eval.get("task_id_filter", [0])
+        task_id = int(task_ids[0]) if task_ids else 0
+        task_suite = benchmark.get_benchmark_dict()[task_suite_name]()
+        task_description = task_suite.get_task(task_id).language
+        batch_size = int(self.eval_batch_size)
+        height = int(self.cfg.env.eval.get("camera_heights", 256))
+        width = int(self.cfg.env.eval.get("camera_widths", 256))
+        env_obs = {
+            "main_images": torch.zeros(
+                (batch_size, height, width, 3), dtype=torch.uint8
+            ),
+            "wrist_images": torch.zeros(
+                (batch_size, height, width, 3), dtype=torch.uint8
+            ),
+            "states": torch.zeros((batch_size, 8), dtype=torch.float32),
+            "task_descriptions": [str(task_description)] * batch_size,
+        }
+        self.log_info(
+            f"Warming up CFG eval policy before EGL initialization: "
+            f"batch_size={batch_size}, task_id={task_id}"
+        )
+        if hasattr(self.hf_model, "reset"):
+            self.hf_model.reset()
+        cpu_rng_state = torch.random.get_rng_state()
+        cuda_rng_states = (
+            torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+        )
+        try:
+            with torch.inference_mode():
+                self.hf_model.predict_action_batch(env_obs=env_obs, mode="eval")
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+        finally:
+            torch.random.set_rng_state(cpu_rng_state)
+            if cuda_rng_states is not None:
+                torch.cuda.set_rng_state_all(cuda_rng_states)
+        if hasattr(self.hf_model, "reset"):
+            self.hf_model.reset()
+        self.log_info("CFG eval policy warmup completed")
+        return {"batch_size": batch_size, "task_id": task_id}
+
         self.log_info(f"Rollout worker initialized with dst_ranks: {self.dst_ranks}")
         self.log_info(f"Rollout worker initialized with src_ranks: {self.src_ranks}")
         self.setup_sample_params()

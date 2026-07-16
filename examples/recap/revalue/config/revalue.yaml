@@ -185,6 +185,7 @@ policy_eval:
   guidance_type: positive
   positive_only_conditional: true
   negative_guidance_scale: 0.0
+  warmup_before_env: false
   python_bin: null
   extra_overrides: []
 
@@ -210,6 +211,11 @@ rollout_collect:
   gpu_id: 0
   fps: 10
   overwrite: false
+  warmup_before_env: false
+  guidance_type: positive
+  positive_only_conditional: true
+  guidance_scale: 1.0
+  negative_guidance_scale: 0.0
   failure_reward: null
 
 export_view:

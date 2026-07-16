@@ -22,6 +22,7 @@ from rlinf.revalue.pipeline.embodied import (  # noqa: E402
     _load_rollout_policy,
     _max_steps_for_suite,
     _quat2axisangle,
+    warmup_libero_rollout_policy,
 )
 
 
@@ -95,6 +96,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, object]:
     task = task_suite.get_task(args.task_id)
     initial_states = task_suite.get_task_init_states(args.task_id)
     max_steps = _max_steps_for_suite(args.task_suite_name)
+    warmup_libero_rollout_policy(policy, task.language)
     env, task_description = _get_libero_env(
         task, (256, 256), args.seed, args.gpu_id
     )
