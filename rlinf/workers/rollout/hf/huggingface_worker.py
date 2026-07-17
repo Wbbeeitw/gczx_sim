@@ -159,7 +159,7 @@ class MultiStepRolloutWorker(Worker):
         """Compile CFG inference before LIBERO workers create EGL contexts."""
         if not self.cfg.rollout.get("warmup_before_env", False):
             return None
-        if SupportedModel(self.cfg.actor.model.model_type) != SupportedModel.CFG_MODEL:
+        if not hasattr(self.hf_model, "predict_action_batch"):
             return None
 
         from libero.libero import benchmark
