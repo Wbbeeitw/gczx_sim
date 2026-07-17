@@ -56,3 +56,6 @@ examples/recap/process/config/compute_advantages_maniskill_eval.yaml
 examples/recap/process/outputs/
 # Local temporary debug scripts
 tmp_debug/
+
+# Slim image build context (large binary export, regenerate locally)
+docker/slim/slim_export/
