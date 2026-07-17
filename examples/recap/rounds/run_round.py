@@ -70,12 +70,27 @@ STAGE_ORDER = [
     "train_policy",
     "eval_policy",
 ]
-STAGE_REQUIRES = {
-    "fit_critic": ["collect"],
-    "export_policy_data": ["fit_critic"],
-    "train_policy": ["export_policy_data"],
-    "eval_policy": ["train_policy"],
-}
+KNOWN_STAGES = [*STAGE_ORDER, "fit_value", "build_child_base"]
+
+
+def _stage_dependencies(ctx: dict, stage: str) -> list[str]:
+    """Linear dependency: the stage right before `stage` in the pipeline."""
+    pipeline = ctx["pipeline"]
+    if stage not in pipeline:
+        return []
+    index = pipeline.index(stage)
+    return [pipeline[index - 1]] if index > 0 else []
+
+
+def _audit_gate_stage(ctx: dict) -> str | None:
+    """First stage after collect; it requires the human audit confirmation."""
+    pipeline = ctx["pipeline"]
+    if "collect" not in pipeline:
+        return None
+    index = pipeline.index("collect")
+    if index + 1 < len(pipeline):
+        return pipeline[index + 1]
+    return None
 
 
 @dataclass
@@ -222,6 +237,7 @@ def _build_ctx(cfg: dict) -> dict[str, Any]:
         "repo_root": str(_get(cfg, "repo_root", "/workspace/RLinf")),
         "exp_root": exp_root,
         "results_root": results_root,
+        "pipeline": [str(s) for s in (_get(cfg, "pipeline") or STAGE_ORDER)],
         "parent_ds": parent_ds,
         "child_ds": child_ds,
         "merged_ds": merged_ds,
@@ -236,9 +252,13 @@ def _build_ctx(cfg: dict) -> dict[str, Any]:
         "child_fused_tag": str(_require(cfg, "tags.child_fused")),
         "value_exp": value_exp,
         "value_ckpt": (
-            f"{results_root}/value_sft/{value_exp}"
-            f"/checkpoints/global_step_{value_steps}"
+            str(_get(cfg, "paths.value_checkpoint") or "")
+            or (
+                f"{results_root}/value_sft/{value_exp}"
+                f"/checkpoints/global_step_{value_steps}"
+            )
         ),
+        "value_ckpt_external": bool(_get(cfg, "paths.value_checkpoint")),
         "policy_exp": policy_exp,
         "policy_ckpt": (
             f"{results_root}/policy/{policy_exp}/checkpoints"
@@ -250,7 +270,10 @@ def _build_ctx(cfg: dict) -> dict[str, Any]:
         "policy_data_root": f"{exp_root}/policy_data",
     }
     ctx["predictions"] = f"{ctx['revalue_root']}/predictions.parquet"
-    ctx["comparison"] = f"{ctx['revalue_root']}/return_compare.json"
+    ctx["comparison"] = str(
+        _get(cfg, "results.comparison")
+        or f"{ctx['revalue_root']}/return_compare.json"
+    )
     ctx["merged_base_adv"] = (
         f"{merged_ds}/meta/advantages_{ctx['merged_base_tag']}.parquet"
     )
@@ -327,7 +350,8 @@ def _steps_collect(ctx: dict) -> list[Step]:
         f"rollout_collect.num_steps_wait={_get(cfg, 'collect.num_steps_wait', 10)}",
         "rollout_collect.warmup_before_env="
         f"{_get(cfg, 'collect.warmup_before_env', True)}",
-        f"rollout_collect.guidance_type={_get(cfg, 'collect.guidance_type', 'positive')}",
+        "rollout_collect.guidance_type="
+        f"{_get(cfg, 'collect.guidance_type', 'positive')}",
         "rollout_collect.positive_only_conditional="
         f"{_get(cfg, 'collect.positive_only_conditional', True)}",
         "rollout_collect.guidance_scale="
@@ -362,7 +386,8 @@ def _steps_collect(ctx: dict) -> list[Step]:
                     [
                         f"--dataset_path={ctx['child_ds']}",
                         f"--output_dir={ctx['exp_root']}/collection/visualizations",
-                        f"--annotation_name=phase_progress_semantic_trace_{ctx['task']}",
+                        "--annotation_name="
+                        f"phase_progress_semantic_trace_{ctx['task']}",
                         f"--num_success={int(collect.get('viz_success', 1))}",
                         f"--num_failure={int(collect.get('viz_failure', 1))}",
                     ],
@@ -373,12 +398,11 @@ def _steps_collect(ctx: dict) -> list[Step]:
     return steps
 
 
-def _steps_fit_critic(ctx: dict) -> list[Step]:
+def _steps_fit_value(ctx: dict) -> list[Step]:
+    """Merge parent+child datasets, compute returns, train the value model."""
     cfg = ctx["cfg"]
-    revalue_root = ctx["revalue_root"]
     returns = cfg.get("returns", {})
     value = cfg.get("value", {})
-    revalue = cfg.get("revalue", {})
     steps = [
         Step(
             name="merge_datasets",
@@ -448,6 +472,17 @@ def _steps_fit_critic(ctx: dict) -> list[Step]:
             ],
             artifacts=[ctx["value_ckpt"]],
         ),
+    ]
+    return steps
+
+
+def _steps_fit_critic(ctx: dict) -> list[Step]:
+    cfg = ctx["cfg"]
+    revalue_root = ctx["revalue_root"]
+    returns = cfg.get("returns", {})
+    value = cfg.get("value", {})
+    revalue = cfg.get("revalue", {})
+    steps = _steps_fit_value(ctx) + [
         Step(
             name="prepare_data",
             argv=_revalue_entry(
@@ -608,31 +643,99 @@ def _steps_fit_critic(ctx: dict) -> list[Step]:
     return steps
 
 
+def _step_prepare_child_manifest(ctx: dict) -> Step:
+    revalue = ctx["cfg"].get("revalue", {})
+    policy_data_root = ctx["policy_data_root"]
+    return Step(
+        name="prepare_child_manifest",
+        argv=_revalue_entry(
+            "prepare_data",
+            [
+                f"data.dataset_path={ctx['child_ds']}",
+                f"data.label_name={revalue['label_name']}",
+                f"data.seed={revalue.get('seed', 42)}",
+                f"manifest.num_episodes={ctx['child_episodes']}",
+                "manifest.success_ratio=0.5",
+                "manifest.val_episode_ratio=0.0",
+                "manifest.test_episode_ratio=0.0",
+                f"manifest.success_phase={revalue.get('success_phase', 3)}",
+                f"manifest.num_phases={revalue.get('num_phases', 4)}",
+                "manifest.overwrite=true",
+                f"output.root={policy_data_root}",
+            ],
+        ),
+        artifacts=[ctx["child_manifest"]],
+    )
+
+
+def _steps_build_child_base(ctx: dict) -> list[Step]:
+    """Returns + raw value base advantages + manifest for the child dataset.
+
+    Used by the raw (Pure CFG) track: the shared (or separately trained)
+    value model scores the child episodes once; no z/p head or fusion.
+    """
+    cfg = ctx["cfg"]
+    revalue = cfg.get("revalue", {})
+    returns = cfg.get("returns", {})
+    child_root = f"{ctx['exp_root']}/revalue_child"
+    return [
+        _step_prepare_child_manifest(ctx),
+        Step(
+            name="compute_child_returns",
+            argv=_script_entry(
+                "examples/recap/process/compute_returns.py",
+                [
+                    "--config-name",
+                    "compute_returns",
+                    "data.train_data_paths=[{dataset_path: "
+                    f"{ctx['child_ds']}, type: rollout}}]",
+                    "data.dataset_type=rollout",
+                    f"data.gamma={returns['gamma']}",
+                    f"data.failure_reward={returns['failure_reward']}",
+                    f"data.tag={ctx['returns_tag']}",
+                    f"data.num_workers={_get(cfg, 'returns.num_workers', 64)}",
+                ],
+            ),
+            artifacts=[
+                f"{ctx['child_ds']}/meta/returns_{ctx['returns_tag']}.parquet"
+            ],
+        ),
+        Step(
+            name="build_child_base",
+            argv=_revalue_entry(
+                "build_base",
+                [
+                    *_data_overrides(ctx, ctx["child_ds"]),
+                    *_value_model_overrides(ctx, ctx["value_ckpt"]),
+                    f"data.episode_split_path={ctx['child_manifest']}",
+                    f"returns.global_min={returns['global_min']}",
+                    f"returns.global_max={returns['global_max']}",
+                    "returns.dataset_type=rollout",
+                    f"returns.failure_reward={returns['failure_reward']}",
+                    "returns.compute=false",
+                    f"base.tag={ctx['child_fused_tag']}",
+                    f"base.returns_tag={ctx['returns_tag']}",
+                    "base.compute_returns=false",
+                    "base.compute_advantages=true",
+                    f"recap.lookahead_step={revalue.get('lookahead_step', 10)}",
+                    f"recap.gamma={returns['gamma']}",
+                    "recap.positive_quantile="
+                    f"{revalue.get('positive_quantile', 0.3)}",
+                    "recap.discount_next_value=true",
+                    f"output.root={child_root}",
+                ],
+            ),
+            artifacts=[ctx["child_fused_adv"]],
+        ),
+    ]
+
+
 def _steps_export_policy_data(ctx: dict) -> list[Step]:
     cfg = ctx["cfg"]
     revalue = cfg.get("revalue", {})
     policy_data_root = ctx["policy_data_root"]
     return [
-        Step(
-            name="prepare_child_manifest",
-            argv=_revalue_entry(
-                "prepare_data",
-                [
-                    f"data.dataset_path={ctx['child_ds']}",
-                    f"data.label_name={revalue['label_name']}",
-                    f"data.seed={revalue.get('seed', 42)}",
-                    f"manifest.num_episodes={ctx['child_episodes']}",
-                    "manifest.success_ratio=0.5",
-                    "manifest.val_episode_ratio=0.0",
-                    "manifest.test_episode_ratio=0.0",
-                    f"manifest.success_phase={revalue.get('success_phase', 3)}",
-                    f"manifest.num_phases={revalue.get('num_phases', 4)}",
-                    "manifest.overwrite=true",
-                    f"output.root={policy_data_root}",
-                ],
-            ),
-            artifacts=[ctx["child_manifest"]],
-        ),
+        _step_prepare_child_manifest(ctx),
         Step(
             name="export_dataset_view",
             argv=_revalue_entry(
@@ -720,6 +823,8 @@ def _steps_eval_policy(ctx: dict) -> list[Step]:
     cfg = ctx["cfg"]
     policy = cfg.get("policy", {})
     eval_cfg = cfg.get("eval", {})
+    default_guidance = policy.get("guidance_type", "positive")
+    default_neg_scale = policy.get("negative_guidance_scale", 0.0)
     results = cfg.get("results", {})
     steps = [
         Step(
@@ -737,11 +842,11 @@ def _steps_eval_policy(ctx: dict) -> list[Step]:
                     "policy_eval.openpi_config_name="
                     f"{_get(cfg, 'collect.openpi_config_name')}",
                     "policy_eval.guidance_type="
-                    f"{eval_cfg.get('guidance_type', policy.get('guidance_type', 'positive'))}",
+                    f"{eval_cfg.get('guidance_type', default_guidance)}",
                     "policy_eval.positive_only_conditional="
                     f"{eval_cfg.get('positive_only_conditional', True)}",
                     "policy_eval.negative_guidance_scale="
-                    f"{eval_cfg.get('negative_guidance_scale', policy.get('negative_guidance_scale', 0.0))}",
+                    f"{eval_cfg.get('negative_guidance_scale', default_neg_scale)}",
                     "policy_eval.warmup_before_env="
                     f"{eval_cfg.get('warmup_before_env', True)}",
                     _list_override(
@@ -796,7 +901,9 @@ def _steps_eval_policy(ctx: dict) -> list[Step]:
 
 _STAGE_BUILDERS = {
     "collect": _steps_collect,
+    "fit_value": _steps_fit_value,
     "fit_critic": _steps_fit_critic,
+    "build_child_base": _steps_build_child_base,
     "export_policy_data": _steps_export_policy_data,
     "train_policy": _steps_train_policy,
     "eval_policy": _steps_eval_policy,
@@ -944,7 +1051,7 @@ def _run_step(step: Step, log_path: Path, env: dict, cwd: str) -> None:
 def _write_manifest(ctx: dict, cfg_hash: str) -> None:
     manifest_path = Path(ctx["exp_root"]) / "run_manifest.json"
     reports = {}
-    for stage in STAGE_ORDER:
+    for stage in ctx["pipeline"]:
         report = _load_report(ctx, stage)
         reports[stage] = (
             {"status": "done", "finished_at": report.get("finished_at")}
@@ -992,7 +1099,7 @@ def run_stage(stage: str, ctx: dict, args: argparse.Namespace) -> None:
         )
         return
 
-    for dep in STAGE_REQUIRES.get(stage, []):
+    for dep in _stage_dependencies(ctx, stage):
         dep_steps = _STAGE_BUILDERS[dep](ctx)
         if not _stage_is_current(ctx, dep, dep_steps) and not args.dry_run:
             raise RuntimeError(
@@ -1010,11 +1117,23 @@ def run_stage(stage: str, ctx: dict, args: argparse.Namespace) -> None:
                 print(f"#   artifact: {artifact}")
         return
 
-    if stage == "fit_critic" and not args.confirm_audit:
+    gate_stage = _audit_gate_stage(ctx)
+    if stage == gate_stage and not args.confirm_audit:
         raise RuntimeError(
-            "fit_critic requires --confirm-audit: review the collection "
-            "summary, semantic trace and visualizations of the fresh "
-            "rollouts before merging them into the critic dataset"
+            f"stage {stage!r} requires --confirm-audit: review the "
+            "collection summary, semantic trace and visualizations of the "
+            "fresh rollouts before building critic data on top of them"
+        )
+    if (
+        stage == "build_child_base"
+        and ctx.get("value_ckpt_external")
+        and not Path(ctx["value_ckpt"]).exists()
+    ):
+        raise RuntimeError(
+            f"value checkpoint not found: {ctx['value_ckpt']}; run the "
+            "fused track's fit_critic first, or switch to separate-critic "
+            "mode (pipeline: [collect, fit_value, build_child_base, ...] "
+            "with paths.value_checkpoint: null)"
         )
 
     started = datetime.now(timezone.utc).isoformat()
@@ -1073,7 +1192,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--stage",
         required=True,
-        choices=[*STAGE_ORDER, "all"],
+        choices=[*KNOWN_STAGES, "all"],
         help="stage to run",
     )
     parser.add_argument(
@@ -1128,7 +1247,7 @@ def main() -> None:
                 "collect stage; run --stage all once, audit the new rollouts, "
                 "then repeat the command with --confirm-audit"
             )
-    stages = STAGE_ORDER if args.stage == "all" else [args.stage]
+    stages = ctx["pipeline"] if args.stage == "all" else [args.stage]
     for stage in stages:
         run_stage(stage, ctx, args)
         if stage == "collect" and args.stage == "all" and not args.confirm_audit:

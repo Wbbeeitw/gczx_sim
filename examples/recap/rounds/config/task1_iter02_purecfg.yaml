@@ -1,0 +1,152 @@
+# Round 2 baseline: LIBERO-Long Task1, Pure CFG (raw advantage) track.
+#
+# Policy1 Pure-CFG step500 collects R1_purecfg (40 fresh episodes).
+# The Pure-CFG Policy2 trains ONLY on R1_purecfg with the RAW advantage
+# produced by the value critic — no z/p head, no fusion.
+#
+# Critic mode is switchable between shared and separate:
+#
+#   SHARED (default below): reuse the fused track's Value1 checkpoint via
+#   paths.value_checkpoint. Pipeline: collect -> build_child_base ->
+#   train_policy -> eval_policy.
+#
+#   SEPARATE: train an own Value on D1' = D0 + R1_purecfg. Change to:
+#     pipeline: [collect, fit_value, build_child_base, train_policy, eval_policy]
+#     paths.value_checkpoint: null
+#   fit_value then merges into paths.merged_dataset and trains Value1' into
+#   this track's own results_root.
+#
+# Usage (inside the docker container, /workspace/RLinf):
+#   python examples/recap/rounds/run_round.py \
+#     --config examples/recap/rounds/config/task1_iter02_purecfg.yaml \
+#     --stage all
+#   # human audit, then:
+#   python examples/recap/rounds/run_round.py \
+#     --config examples/recap/rounds/config/task1_iter02_purecfg.yaml \
+#     --stage all --confirm-audit
+
+round_id: 2
+task: task1
+task_id: 1
+task_suite_name: libero_10
+method: purecfg
+repo_root: /workspace/RLinf
+
+pipeline: [collect, build_child_base, train_policy, eval_policy]
+
+gpu:
+  cuda_visible_devices: "0"
+  gpu_id: 0
+
+paths:
+  base_model: /workspace/models/RLinf-Pi05-LIBERO-SFT
+  siglip: /workspace/models/siglip2-so400m-patch14-224
+  gemma3: /workspace/models/gemma-3-270m
+  tokenizer: /workspace/models/gemma-3-270m
+  parent_dataset: /data/libero_long/task1_d0_40
+  child_dataset: /data/libero_long/task1_r1_purecfg_40
+  merged_dataset: /data/libero_long/task1_d1_pure_80
+  exp_root: /data/libero_long/experiments/task1/iter02_purecfg_s500
+  results_root: /workspace/results/experiments/task1/iter02_purecfg_s500
+  # Shared critic: the fused track's Value1. Set to null for separate mode.
+  value_checkpoint: /workspace/results/experiments/task1/iter02_prcfg_s500/value_sft/value_task1_d1_80/checkpoints/global_step_1200
+
+datasets:
+  parent_episodes: 40
+
+parent_policy:
+  checkpoint: /workspace/results/recap/task1_policy1_purecfg_raw_full_750/task1_policy1_purecfg_raw_full_750/checkpoints/global_step_500/actor/model_state_dict/full_weights.pt
+  label: Policy1-PureCFG-s500
+
+tags:
+  returns: fail300_r1_pure
+  merged_base: task1_d1_pure_base_v1
+  child_fused: task1_r1_pure_base_v1
+
+collect:
+  num_episodes: 40
+  seed: 20260718
+  fps: 10
+  action_chunk: 5
+  num_steps: 5
+  num_steps_wait: 10
+  model_type: cfg_model
+  openpi_config_name: pi05_libero
+  warmup_before_env: true
+  guidance_type: positive
+  positive_only_conditional: true
+  guidance_scale: 1.0
+  negative_guidance_scale: 0.0
+  visualize: true
+
+returns:
+  failure_reward: -300.0
+  gamma: 1.0
+  global_min: -900.0
+  global_max: 0.0
+  num_workers: 64
+
+# Used only in separate-critic mode (pipeline contains fit_value).
+value:
+  steps: 1200
+  save_interval: 600
+  micro_batch_size: 16
+  global_batch_size: 64
+  lr: 1.0e-5
+  value_lr: 1.0e-4
+  lr_warmup_steps: 100
+  action_dim: 7
+  action_horizon: 10
+  critic_expert_variant: gemma_1m
+
+revalue:
+  label_name: phase_progress_semantic_trace_task1
+  num_phases: 4
+  success_phase: 3
+  seed: 42
+  lookahead_step: 10
+  positive_quantile: 0.3
+
+policy:
+  # Pure CFG raw baseline: binary strategy on the raw advantage.
+  strategy: binary
+  guidance_type: positive
+  positive_only_conditional: true
+  guidance_scale: 1.0
+  negative_guidance_scale: 0.0
+  positive_residual_alpha: 0.5
+  positive_quantile: 0.3
+  unconditional_prob: 0.1
+  csa_bottom_quantile: 0.15
+  csa_bottom_negative_prob: 0.5
+  csa_positive_prompt_prob: 0.85
+  csa_weight_lambda: 0.2
+  max_steps: 500
+  save_interval: 500
+  lr_warmup_steps: 50
+  global_batch_size: 64
+  micro_batch_size: 16
+  extra_overrides:
+    - actor.model.openpi.train_expert_only=false
+    - actor.fsdp_config.use_orig_params=true
+
+eval:
+  eval_rollout_epoch: 5
+  total_num_envs: 10
+  guidance_scale: 1.0
+  guidance_type: positive
+  positive_only_conditional: true
+  negative_guidance_scale: 0.0
+  warmup_before_env: true
+  save_video: false
+
+results:
+  enabled: true
+  round_index: 1
+  policy_label: Policy2-Pure-CFG
+  critic_label: Value1-raw
+  # Critic MAE is recorded by the fused track's comparison; override to a
+  # separate track comparison if you train a separate critic.
+  comparison: /data/libero_long/experiments/task1/iter02_prcfg_s500/revalue/return_compare.json
+  output_dir: /data/libero_long/experiment_results/task1
+  output_name: round1_purecfg_value1
