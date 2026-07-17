@@ -245,7 +245,8 @@ def main() -> None:
                 successes,
                 ordinal + 1,
             )
-        env.close()
+        # NB: no env.close() here; EGL teardown between task groups has been
+        # a crash point, contexts are released at process exit instead.
         pending_artifacts.append(
             (
                 writer_fn,
@@ -259,8 +260,28 @@ def main() -> None:
                 successes,
             )
         )
+        # Crash-safe staging: persist this task's trace artifacts outside the
+        # dataset root immediately (lerobot's root-wide parquet glob forbids
+        # writing them into meta/ before finalize).
+        staging_dir = out.parent / f"{out.name}_trace_staging"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        staged = writer_fn(
+            staging_dir,
+            task_trace_records,
+            recorder.metadata,
+            output_name=trace_name,
+            stable_frames=recorder.config.stable_frames,
+        )
+        logger.info("staged trace artifacts for task%d: %s", task_id, staged)
 
     writer.finalize()
+    staging_dir = out.parent / f"{out.name}_trace_staging"
+    for staged_file in sorted(staging_dir.rglob("*")):
+        if staged_file.is_file():
+            shutil.copy2(
+                staged_file,
+                out / "meta" / staged_file.relative_to(staging_dir),
+            )
     for (
         writer_fn,
         trace_name,
@@ -272,13 +293,16 @@ def main() -> None:
         num_episodes,
         successes,
     ) in pending_artifacts:
-        artifacts = writer_fn(
-            out,
-            task_trace_records,
-            recorder_metadata,
-            output_name=trace_name,
-            stable_frames=stable_frames,
-        )
+        artifacts = {
+            key: str(out / "meta" / Path(value).relative_to(staging_dir))
+            for key, value in writer_fn(
+                staging_dir,
+                task_trace_records,
+                recorder_metadata,
+                output_name=trace_name,
+                stable_frames=stable_frames,
+            ).items()
+        }
         summary["tasks"][str(task_id)] = {
             "task": task_description,
             "episodes": num_episodes,
