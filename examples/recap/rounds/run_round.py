@@ -362,6 +362,7 @@ def _steps_collect(ctx: dict) -> list[Step]:
                     [
                         f"--dataset_path={ctx['child_ds']}",
                         f"--output_dir={ctx['exp_root']}/collection/visualizations",
+                        f"--annotation_name=phase_progress_semantic_trace_{ctx['task']}",
                         f"--num_success={int(collect.get('viz_success', 1))}",
                         f"--num_failure={int(collect.get('viz_failure', 1))}",
                     ],
