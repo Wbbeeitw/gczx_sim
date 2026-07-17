@@ -73,6 +73,38 @@ def _download_with_retry(
             delay = min(delay * 2.0, 120.0)
 
 
+def _reindex_episodes(
+    out: Path,
+    selected_indices: list[int],
+    pruned_episodes: list[dict],
+    pruned_stats: list[dict],
+) -> None:
+    """Renumber downloaded episodes to a contiguous 0..N-1 range.
+
+    Some LeRobot loaders expect contiguous indices; two-phase renames avoid
+    collisions between source and target filenames.
+    """
+    mapping = {old: new for new, old in enumerate(selected_indices)}
+    for directory, pattern in (
+        (out / "data", "**/episode_*.parquet"),
+        (out / "videos", "**/episode_*.mp4"),
+    ):
+        if not directory.exists():
+            continue
+        for file in directory.rglob(pattern):
+            old_index = int(file.stem.removeprefix("episode_"))
+            if old_index not in mapping:
+                continue
+            file.rename(file.with_name(f"episode_tmp_{mapping[old_index]:06d}{file.suffix}"))
+        for file in directory.rglob("episode_tmp_*"):
+            new_index = int(file.stem.removeprefix("episode_tmp_"))
+            file.rename(file.with_name(f"episode_{new_index:06d}{file.suffix}"))
+    for episode in pruned_episodes:
+        episode["episode_index"] = mapping[int(episode["episode_index"])]
+    for record in pruned_stats:
+        record["episode_index"] = mapping[int(record["episode_index"])]
+
+
 def _read_jsonl(path: Path) -> list[dict]:
     with path.open(encoding="utf-8") as file:
         return [json.loads(line) for line in file if line.strip()]
@@ -90,6 +122,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", required=True)
     parser.add_argument("--keywords", nargs="+", required=True)
     parser.add_argument("--limit-per-task", type=int, default=0)
+    parser.add_argument(
+        "--keep-indices",
+        action="store_true",
+        help="keep original episode indices instead of renumbering from 0",
+    )
     parser.add_argument(
         "--pause",
         type=float,
@@ -175,15 +212,20 @@ def main() -> None:
         for episode in episodes
         if int(episode["episode_index"]) in index_set
     ]
-    _write_jsonl(meta_dir / "episodes.jsonl", pruned_episodes)
 
     stats_path = meta_dir / "episodes_stats.jsonl"
+    pruned_stats = []
     if stats_path.exists():
         pruned_stats = [
             record
             for record in _read_jsonl(stats_path)
             if int(record["episode_index"]) in index_set
         ]
+
+    if not args.keep_indices:
+        _reindex_episodes(out, selected_indices, pruned_episodes, pruned_stats)
+    _write_jsonl(meta_dir / "episodes.jsonl", pruned_episodes)
+    if stats_path.exists():
         _write_jsonl(stats_path, pruned_stats)
 
     info_path = meta_dir / "info.json"
