@@ -75,6 +75,11 @@ KNOWN_STAGES = [
     "fit_value",
     "build_child_base",
     "export_bootstrap",
+    "collect_multitask",
+    "fit_critic_multitask",
+    "task_heads",
+    "predict_multitask",
+    "export_multitask",
 ]
 
 
@@ -105,6 +110,7 @@ class Step:
     name: str
     argv: list[str]
     artifacts: list[str] = field(default_factory=list)
+    dataset_path: str | None = None
 
 
 def _load_yaml(path: Path) -> dict:
@@ -213,22 +219,41 @@ def _build_ctx(cfg: dict) -> dict[str, Any]:
     task = str(_require(cfg, "task"))
     exp_root = str(_require(cfg, "paths.exp_root"))
     merged_ds = str(_require(cfg, "paths.merged_dataset"))
-    child_ds = str(_require(cfg, "paths.child_dataset"))
+    child_ds = str(_get(cfg, "paths.child_dataset") or "")
     parent_ds = str(_require(cfg, "paths.parent_dataset"))
     bootstrap = bool(_get(cfg, "bootstrap", False))
     if bootstrap:
         merged_ds = child_ds
+    tasks = [str(task) for task in (_get(cfg, "tasks") or [])]
+    task_datasets: dict[str, str] = {}
+    task_ranges: dict[str, tuple[int, int]] = {}
+    if not tasks and not child_ds:
+        raise ValueError("paths.child_dataset is required for single-task rounds")
+    if tasks:
+        child_pattern = _get(cfg, "paths.child_pattern")
+        if not child_pattern:
+            raise ValueError("paths.child_pattern is required when tasks: is set")
+        start = 0
+        per_task = int(_get(cfg, "collect.num_episodes"))
+        for task in tasks:
+            task_datasets[task] = str(child_pattern).format(task=task)
+            task_ranges[task] = (start, start + per_task)
+            start += per_task
+        merged_episodes = start
     parent_episodes = int(_require(cfg, "datasets.parent_episodes"))
     child_episodes = int(_get(cfg, "collect.num_episodes"))
-    merged_episodes = parent_episodes + child_episodes
+    if tasks:
+        merged_episodes = start
+    else:
+        merged_episodes = parent_episodes + child_episodes
 
     merged_name = os.path.basename(merged_ds.rstrip("/"))
     value_steps = int(_get(cfg, "value.steps"))
     value_exp = f"value_{merged_name}"
     policy_exp = f"policy{round_id}_{method}"
     eval_cfg = cfg.get("eval", {})
-    eval_episodes = int(eval_cfg["eval_rollout_epoch"]) * int(
-        eval_cfg["total_num_envs"]
+    eval_episodes = int(eval_cfg.get("eval_rollout_epoch", 0)) * int(
+        eval_cfg.get("total_num_envs", 0)
     )
     # Heavy, re-trainable checkpoints live under results_root
     # (/workspace/results); small artifacts stay under exp_root
@@ -253,6 +278,10 @@ def _build_ctx(cfg: dict) -> dict[str, Any]:
         "child_episodes": child_episodes,
         "merged_episodes": merged_episodes,
         "bootstrap": bootstrap,
+        "tasks": tasks,
+        "task_datasets": task_datasets,
+        "task_ranges": task_ranges,
+        "multitask": bool(tasks),
         "base_model": str(_require(cfg, "paths.base_model")),
         "parent_checkpoint": str(_get(cfg, "parent_policy.checkpoint") or ""),
         "parent_label": str(_get(cfg, "parent_policy.label", "parent")),
@@ -271,7 +300,7 @@ def _build_ctx(cfg: dict) -> dict[str, Any]:
         "policy_exp": policy_exp,
         "policy_ckpt": (
             f"{results_root}/policy/{policy_exp}/checkpoints"
-            f"/global_step_{int(_get(cfg, 'policy.max_steps'))}"
+            f"/global_step_{int(_get(cfg, 'policy.max_steps') or 0)}"
             "/actor/model_state_dict/full_weights.pt"
         ),
         "eval_exp": f"{policy_exp}_eval{eval_episodes}",
@@ -464,7 +493,7 @@ def _steps_fit_value(ctx: dict) -> list[Step]:
                 f"actor.model.siglip_path={_require(cfg, 'paths.siglip')}",
                 f"actor.model.gemma3_path={_require(cfg, 'paths.gemma3')}",
                 f"actor.model.tokenizer_path={_require(cfg, 'paths.tokenizer')}",
-                "actor.model.freeze_vlm=true",
+                f"actor.model.freeze_vlm={value.get('freeze_vlm', True)}",
                 "actor.fsdp_config.use_orig_params=true",
                 f"actor.micro_batch_size={value['micro_batch_size']}",
                 f"actor.global_batch_size={value['global_batch_size']}",
@@ -484,6 +513,11 @@ def _steps_fit_value(ctx: dict) -> list[Step]:
     ]
     if ctx.get("bootstrap"):
         steps = [step for step in steps if step.name != "merge_datasets"]
+    if ctx.get("multitask"):
+        steps = [
+            _step_merge_multitask(ctx) if step.name == "merge_datasets" else step
+            for step in steps
+        ]
     return steps
 
 
@@ -945,12 +979,340 @@ def _steps_export_bootstrap(ctx: dict) -> list[Step]:
     ]
 
 
+def _step_merge_multitask(ctx: dict) -> Step:
+    return Step(
+        name="merge_datasets",
+        argv=_script_entry(
+            "examples/recap/process/merge_lerobot_multitask_datasets.py",
+            [
+                "--datasets",
+                *[ctx["task_datasets"][task] for task in ctx["tasks"]],
+                f"--output_dataset={ctx['merged_ds']}",
+            ],
+        ),
+        artifacts=[
+            f"{ctx['merged_ds']}/meta/info.json",
+            f"{ctx['merged_ds']}/meta/phase_progress_multitask.parquet",
+        ],
+        dataset_path=ctx["merged_ds"],
+    )
+
+
+def _steps_collect_multitask(ctx: dict) -> list[Step]:
+    """Collect fresh rollouts for every task in the round (parallel-safe)."""
+    cfg = ctx["cfg"]
+    collect = cfg.get("collect", {})
+    steps: list[Step] = []
+    for task in ctx["tasks"]:
+        dataset = ctx["task_datasets"][task]
+        task_id = int(task.replace("task", ""))
+        overrides = [
+            "rollout_collect.enabled=true",
+            f"rollout_collect.output_dir={dataset}",
+            f"rollout_collect.model_path={ctx['base_model']}",
+            f"rollout_collect.model_type={_get(cfg, 'collect.model_type', 'openpi')}",
+            "rollout_collect.openpi_config_name="
+            f"{_get(cfg, 'collect.openpi_config_name')}",
+            f"rollout_collect.task_suite_name={ctx['task_suite_name']}",
+            f"rollout_collect.task_id={task_id}",
+            f"rollout_collect.num_episodes={ctx['child_episodes']}",
+            f"rollout_collect.seed={_get(cfg, 'collect.seed', 42)}",
+            f"rollout_collect.gpu_id={_get(cfg, 'gpu.gpu_id', 0)}",
+            f"rollout_collect.fps={_get(cfg, 'collect.fps', 10)}",
+            f"rollout_collect.action_chunk={_get(cfg, 'collect.action_chunk', 5)}",
+            f"rollout_collect.num_steps={_get(cfg, 'collect.num_steps', 5)}",
+            f"rollout_collect.num_steps_wait={_get(cfg, 'collect.num_steps_wait', 10)}",
+            "rollout_collect.warmup_before_env="
+            f"{_get(cfg, 'collect.warmup_before_env', True)}",
+            "rollout_collect.guidance_type="
+            f"{_get(cfg, 'collect.guidance_type', 'positive')}",
+            "rollout_collect.positive_only_conditional="
+            f"{_get(cfg, 'collect.positive_only_conditional', True)}",
+            "rollout_collect.guidance_scale="
+            f"{_get(cfg, 'collect.guidance_scale', 1.0)}",
+            "rollout_collect.negative_guidance_scale="
+            f"{_get(cfg, 'collect.negative_guidance_scale', 0.0)}",
+            "rollout_collect.semantic_trace=true",
+            f"rollout_collect.semantic_trace_task={task}",
+            f"rollout_collect.semantic_trace_output_name=semantic_trace_{task}",
+            f"output.root={ctx['exp_root']}/revalue",
+        ]
+        if ctx["parent_checkpoint"]:
+            overrides.append(
+                f"rollout_collect.checkpoint_path={ctx['parent_checkpoint']}"
+            )
+        steps.append(
+            Step(
+                name=f"collect_rollouts_{task}",
+                argv=_revalue_entry("collect_rollouts", overrides),
+                artifacts=[
+                    f"{dataset}/meta/info.json",
+                    f"{dataset}/collection_summary.json",
+                ],
+                dataset_path=dataset,
+            )
+        )
+        if collect.get("visualize", True):
+            steps.append(
+                Step(
+                    name=f"visualize_{task}",
+                    argv=_script_entry(
+                        "phase_split_script/visualize_phases.py",
+                        [
+                            f"--dataset_path={dataset}",
+                            "--output_dir="
+                            f"{ctx['exp_root']}/collection/visualizations/{task}",
+                            "--annotation_name="
+                            f"phase_progress_semantic_trace_{task}",
+                            f"--num_success={int(collect.get('viz_success', 1))}",
+                            f"--num_failure={int(collect.get('viz_failure', 1))}",
+                        ],
+                    ),
+                    artifacts=[f"{ctx['exp_root']}/collection/visualizations/{task}"],
+                )
+            )
+    return steps
+
+
+def _steps_fit_critic_multitask(ctx: dict) -> list[Step]:
+    """Joint critic on the merged multi-task dataset (no joint z/p/fusion)."""
+    critic_steps = _steps_fit_value(ctx)
+    critic_steps += _steps_fit_critic(ctx)[3:6]
+    return critic_steps
+
+
+def _steps_task_heads(ctx: dict) -> list[Step]:
+    """Split features by task and train one z/p head and one fusion per task."""
+    cfg = ctx["cfg"]
+    revalue = cfg.get("revalue", {})
+    returns = cfg.get("returns", {})
+    revalue_root = ctx["revalue_root"]
+    first_task = ctx["tasks"][0]
+    steps = [
+        Step(
+            name="split_features_by_task",
+            argv=_script_entry(
+                "examples/recap/process/split_feature_cache_by_task.py",
+                [
+                    f"--features_dir={revalue_root}/features",
+                    "--ranges",
+                    *[
+                        f"{task}={start}-{end}"
+                        for task, (start, end) in ctx["task_ranges"].items()
+                    ],
+                    f"--out_dir={revalue_root}/features",
+                ],
+            ),
+            artifacts=[f"{revalue_root}/features/{first_task}/train.pt"],
+        )
+    ]
+    for task in ctx["tasks"]:
+        steps.append(
+            Step(
+                name=f"train_zp_{task}",
+                argv=_revalue_entry(
+                    "train_zp",
+                    [
+                        *_data_overrides(ctx, ctx["merged_ds"]),
+                        f"output.root={revalue_root}",
+                        f"output.features_dir={revalue_root}/features/{task}",
+                        f"output.zp_dir={revalue_root}/zp_head/{task}",
+                        "train.device=cuda",
+                        f"train.batch_size={revalue.get('train_batch_size', 256)}",
+                        "train.num_workers=0",
+                        f"zp.head_type={revalue.get('zp_head_type')}",
+                        f"zp.use_class_weights={revalue.get('zp_use_class_weights')}",
+                        f"zp.max_epochs={revalue.get('zp_max_epochs', 100)}",
+                        "zp.early_stop_patience="
+                        f"{revalue.get('zp_early_stop_patience', 10)}",
+                    ],
+                ),
+                artifacts=[
+                    f"{revalue_root}/zp_head/{task}/zp_head.pt",
+                    f"{revalue_root}/zp_head/{task}/metrics.json",
+                ],
+            )
+        )
+    for task in ctx["tasks"]:
+        steps.append(
+            Step(
+                name=f"train_fusion_{task}",
+                argv=_revalue_entry(
+                    "train_fusion",
+                    [
+                        *_data_overrides(ctx, ctx["merged_ds"]),
+                        *_value_model_overrides(ctx, None),
+                        f"returns.global_min={returns['global_min']}",
+                        f"returns.global_max={returns['global_max']}",
+                        f"base.tag={ctx['merged_base_tag']}",
+                        f"output.root={revalue_root}",
+                        f"output.features_dir={revalue_root}/features/{task}",
+                        f"output.zp_dir={revalue_root}/zp_head/{task}",
+                        f"output.fusion_dir={revalue_root}/fusion/{task}",
+                        "train.device=cuda",
+                        f"train.batch_size={revalue.get('train_batch_size', 256)}",
+                        "train.num_workers=0",
+                        f"fusion.max_epochs={revalue.get('fusion_max_epochs', 100)}",
+                        "fusion.early_stop_patience="
+                        f"{revalue.get('fusion_early_stop_patience', 10)}",
+                        f"fusion.alpha={revalue.get('fusion_alpha', 1.0)}",
+                    ],
+                ),
+                artifacts=[
+                    f"{revalue_root}/fusion/{task}/fusion.pt",
+                    f"{revalue_root}/fusion/{task}/metrics.json",
+                ],
+            )
+        )
+    return steps
+
+
+def _steps_predict_multitask(ctx: dict) -> list[Step]:
+    """Predict fused values per task, then concat and compare jointly."""
+    cfg = ctx["cfg"]
+    revalue = cfg.get("revalue", {})
+    returns = cfg.get("returns", {})
+    revalue_root = ctx["revalue_root"]
+    steps: list[Step] = []
+    prediction_files: list[str] = []
+    for task in ctx["tasks"]:
+        prediction_path = f"{revalue_root}/predictions_{task}.parquet"
+        prediction_files.append(prediction_path)
+        steps.append(
+            Step(
+                name=f"predict_{task}",
+                argv=_revalue_entry(
+                    "predict",
+                    [
+                        *_data_overrides(ctx, ctx["merged_ds"]),
+                        f"base.tag={ctx['merged_base_tag']}",
+                        f"recap.source_advantages_path={ctx['merged_base_adv']}",
+                        f"output.root={revalue_root}",
+                        f"output.features_dir={revalue_root}/features/{task}",
+                        f"output.zp_dir={revalue_root}/zp_head/{task}",
+                        f"output.fusion_dir={revalue_root}/fusion/{task}",
+                        f"output.predictions_path={prediction_path}",
+                        "train.device=cuda",
+                        f"train.batch_size={revalue.get('train_batch_size', 256)}",
+                    ],
+                ),
+                artifacts=[prediction_path],
+            )
+        )
+    steps.append(
+        Step(
+            name="concat_predictions",
+            argv=_script_entry(
+                "examples/recap/process/concat_parquet.py",
+                ["--inputs", *prediction_files, f"--output={ctx['predictions']}"],
+            ),
+            artifacts=[ctx["predictions"]],
+        )
+    )
+    steps.append(
+        Step(
+            name="compare_returns",
+            argv=_revalue_entry(
+                "compare_returns",
+                [
+                    *_data_overrides(ctx, ctx["merged_ds"]),
+                    f"base.tag={ctx['merged_base_tag']}",
+                    f"recap.source_advantages_path={ctx['merged_base_adv']}",
+                    f"output.root={revalue_root}",
+                    f"output.predictions_path={ctx['predictions']}",
+                    f"output.comparison_path={ctx['comparison']}",
+                    f"returns.global_min={returns['global_min']}",
+                    f"returns.global_max={returns['global_max']}",
+                    "value.v_min=-1.0",
+                    "value.v_max=0.0",
+                ],
+            ),
+            artifacts=[ctx["comparison"]],
+        )
+    )
+    return steps
+
+
+def _steps_export_multitask(ctx: dict) -> list[Step]:
+    """Export per-task fused advantages with per-task positive thresholds."""
+    cfg = ctx["cfg"]
+    revalue = cfg.get("revalue", {})
+    policy_data_root = ctx["policy_data_root"]
+    steps: list[Step] = []
+    for task in ctx["tasks"]:
+        start, end = ctx["task_ranges"][task]
+        task_root = f"{policy_data_root}/{task}"
+        steps.append(
+            Step(
+                name=f"prepare_manifest_{task}",
+                argv=_revalue_entry(
+                    "prepare_data",
+                    [
+                        f"data.dataset_path={ctx['task_datasets'][task]}",
+                        "data.label_name="
+                        f"phase_progress_semantic_trace_{task}",
+                        f"data.seed={revalue.get('seed', 42)}",
+                        f"manifest.num_episodes={ctx['child_episodes']}",
+                        "manifest.success_ratio=0.5",
+                        "manifest.val_episode_ratio=0.0",
+                        "manifest.test_episode_ratio=0.0",
+                        f"manifest.success_phase={revalue.get('success_phase', 3)}",
+                        f"manifest.num_phases={revalue.get('num_phases', 4)}",
+                        "manifest.overwrite=true",
+                        f"output.root={task_root}",
+                    ],
+                ),
+                artifacts=[f"{task_root}/episode_manifest.json"],
+            )
+        )
+        fused_tag = f"{task}_d{ctx['round_id'] - 1}_fused_v{ctx['round_id'] - 1}"
+        steps.append(
+            Step(
+                name=f"export_dataset_view_{task}",
+                argv=_revalue_entry(
+                    "export_dataset_view",
+                    [
+                        "export_view.source_advantages_path="
+                        f"{ctx['merged_base_adv']}",
+                        f"export_view.predictions_path={ctx['predictions']}",
+                        "export_view.child_dataset_path="
+                        f"{ctx['task_datasets'][task]}",
+                        f"export_view.output_tag={fused_tag}",
+                        f"export_view.source_episode_start={start}",
+                        f"export_view.source_episode_end={end}",
+                        f"export_view.child_episode_offset=-{start}",
+                        "export_view.lookahead_step="
+                        f"{revalue.get('lookahead_step', 10)}",
+                        f"export_view.gamma={_get(cfg, 'returns.gamma')}",
+                        "export_view.positive_quantile="
+                        f"{revalue.get('positive_quantile', 0.3)}",
+                        "export_view.discount_next_value=true",
+                        f"export_view.expected_episodes={ctx['child_episodes']}",
+                        f"export_view.report_path={task_root}/export_report.json",
+                        f"output.root={task_root}",
+                    ],
+                ),
+                artifacts=[
+                    f"{ctx['task_datasets'][task]}/meta/advantages_"
+                    f"{fused_tag}.parquet",
+                    f"{task_root}/export_report.json",
+                ],
+            )
+        )
+    return steps
+
+
 _STAGE_BUILDERS = {
     "collect": _steps_collect,
     "fit_value": _steps_fit_value,
     "fit_critic": _steps_fit_critic,
     "build_child_base": _steps_build_child_base,
     "export_bootstrap": _steps_export_bootstrap,
+    "collect_multitask": _steps_collect_multitask,
+    "fit_critic_multitask": _steps_fit_critic_multitask,
+    "task_heads": _steps_task_heads,
+    "predict_multitask": _steps_predict_multitask,
+    "export_multitask": _steps_export_multitask,
     "export_policy_data": _steps_export_policy_data,
     "train_policy": _steps_train_policy,
     "eval_policy": _steps_eval_policy,
@@ -1024,7 +1386,7 @@ def _write_step_report(
 
 def _execution_step(step: Step, overwrite_datasets: bool) -> Step:
     argv = list(step.argv)
-    if overwrite_datasets and step.name == "collect_rollouts":
+    if overwrite_datasets and step.name.startswith("collect_rollouts"):
         argv.append("rollout_collect.overwrite=true")
     if overwrite_datasets and step.name == "merge_datasets":
         argv.append("--overwrite")
@@ -1032,7 +1394,9 @@ def _execution_step(step: Step, overwrite_datasets: bool) -> Step:
 
 
 def _dataset_output_exists(ctx: dict, step: Step) -> bool:
-    if step.name == "collect_rollouts":
+    if step.dataset_path:
+        return Path(step.dataset_path).exists()
+    if step.name.startswith("collect_rollouts"):
         return Path(ctx["child_ds"]).exists()
     if step.name == "merge_datasets":
         return Path(ctx["merged_ds"]).exists()
@@ -1064,7 +1428,13 @@ def _build_env(ctx: dict) -> dict[str, str]:
     return env
 
 
-def _run_step(step: Step, log_path: Path, env: dict, cwd: str) -> None:
+def _run_step(
+    step: Step,
+    log_path: Path,
+    env: dict,
+    cwd: str,
+    stream: bool = True,
+) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     logger.info(">>> %s", step.name)
     logger.info("    %s", shlex.join(step.argv))
@@ -1081,7 +1451,8 @@ def _run_step(step: Step, log_path: Path, env: dict, cwd: str) -> None:
         for line in proc.stdout:
             log_file.write(line)
             log_file.flush()
-            sys.stdout.write(line)
+            if stream:
+                sys.stdout.write(line)
         proc.wait()
     if proc.returncode != 0:
         raise RuntimeError(
@@ -1093,6 +1464,74 @@ def _run_step(step: Step, log_path: Path, env: dict, cwd: str) -> None:
         raise RuntimeError(
             f"step {step.name!r} finished but artifacts are missing: {missing}"
         )
+
+
+def _run_steps_parallel(
+    ctx: dict,
+    stage: str,
+    steps: list[Step],
+    env: dict,
+    args: argparse.Namespace,
+    workers: int,
+) -> None:
+    """Run independent steps concurrently (used for multi-task collection)."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    pending: list[Step] = []
+    for step in steps:
+        if not args.force and _step_is_current(ctx, stage, step):
+            logger.info("step %s has a matching report; skipping", step.name)
+            continue
+        if (
+            step.dataset_path is not None
+            and _dataset_output_exists(ctx, step)
+            and not args.overwrite_datasets
+        ):
+            raise RuntimeError(
+                f"step {step.name!r} needs to replace an existing dataset; "
+                "re-run with --overwrite-datasets after verifying the target path"
+            )
+        pending.append(_execution_step(step, args.overwrite_datasets))
+    if not pending:
+        return
+
+    logger.info("running %d steps with %d workers", len(pending), workers)
+
+    def _job(step: Step) -> tuple[Step, str, str]:
+        log_path = Path(ctx["exp_root"]) / "logs" / f"{stage}_{step.name}.log"
+        started = datetime.now(timezone.utc).isoformat()
+        _run_step(step, log_path, env, ctx["repo_root"], stream=False)
+        finished = datetime.now(timezone.utc).isoformat()
+        return step, started, finished
+
+    failures: list[str] = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_job, step): step for step in pending}
+        for future in as_completed(futures):
+            try:
+                done_step, started, finished = future.result()
+            except Exception:  # noqa: BLE001 - report and re-raise below
+                failures.append(futures[future].name)
+                logger.exception("step %s failed", futures[future].name)
+                continue
+            logger.info("step %s finished", done_step.name)
+            _write_step_report(
+                ctx,
+                stage,
+                _step_by_name(steps, done_step.name),
+                done_step.argv,
+                started,
+                finished,
+            )
+    if failures:
+        raise RuntimeError(f"parallel steps failed: {sorted(failures)}")
+
+
+def _step_by_name(steps: list[Step], name: str) -> Step:
+    for step in steps:
+        if step.name == name:
+            return step
+    raise KeyError(name)
 
 
 def _write_manifest(ctx: dict, cfg_hash: str) -> None:
@@ -1185,6 +1624,9 @@ def run_stage(stage: str, ctx: dict, args: argparse.Namespace) -> None:
 
     started = datetime.now(timezone.utc).isoformat()
     env = _build_env(ctx)
+    parallel_workers = int(_get(ctx["cfg"], "collect.parallel", 1))
+    if stage == "collect_multitask" and parallel_workers > 1:
+        _run_steps_parallel(ctx, stage, steps, env, args, parallel_workers)
     for step in steps:
         if not args.force and _step_is_current(ctx, stage, step):
             logger.info(
@@ -1192,7 +1634,10 @@ def run_stage(stage: str, ctx: dict, args: argparse.Namespace) -> None:
             )
             continue
         if (
-            step.name in {"collect_rollouts", "merge_datasets"}
+            (
+                step.dataset_path is not None
+                or step.name in {"collect_rollouts", "merge_datasets"}
+            )
             and _dataset_output_exists(ctx, step)
             and not args.overwrite_datasets
         ):

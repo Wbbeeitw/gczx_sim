@@ -1,0 +1,124 @@
+# Round 1 (bootstrap, multi-task): LIBERO-Long all 10 tasks, PR-CFG.
+#
+# The SFT pi0.5 policy collects D0 for every task (40 episodes each, 400
+# total). The critic Value backbone is trained JOINTLY on the merged
+# multi-task dataset with an UNFROZEN VLM; z/p head and fusion are trained
+# per task; fused advantages are exported per task with per-task top-30%
+# thresholds.
+#
+# Pipeline:
+#   collect_multitask     (10 collections, collect.parallel workers)
+#   fit_critic_multitask  (N-way merge -> returns -> joint Value -> features
+#                          -> base advantages)
+#   task_heads            (split features by task -> z/p x10 -> fusion x10)
+#   predict_multitask     (predict x10 -> concat -> joint MAE)
+#   export_multitask      (per-task manifest + fused advantage x10)
+#
+# Usage (inside the docker container, /workspace/RLinf):
+#   python examples/recap/rounds/run_round.py \
+#     --config examples/recap/rounds/config/multitask_round1_prcfg.yaml \
+#     --stage all
+#   # human audit of all ten collections, then:
+#   python examples/recap/rounds/run_round.py \
+#     --config examples/recap/rounds/config/multitask_round1_prcfg.yaml \
+#     --stage all --confirm-audit
+
+round_id: 1
+task: multitask
+task_id: 0
+task_suite_name: libero_10
+method: prcfg
+repo_root: /workspace/RLinf
+bootstrap: false
+pipeline:
+  - collect_multitask
+  - fit_critic_multitask
+  - task_heads
+  - predict_multitask
+  - export_multitask
+tasks: [task0, task1, task2, task3, task4, task5, task6, task7, task8, task9]
+
+gpu:
+  cuda_visible_devices: "0"
+  gpu_id: 0
+
+paths:
+  base_model: /workspace/models/RLinf-Pi05-LIBERO-SFT
+  siglip: /workspace/models/siglip2-so400m-patch14-224
+  gemma3: /workspace/models/gemma-3-270m
+  tokenizer: /workspace/models/gemma-3-270m
+  parent_dataset: /data/libero_long/multitask_d0_400
+  child_pattern: /data/libero_long/{task}_d0_40
+  merged_dataset: /data/libero_long/multitask_d0_400
+  exp_root: /data/libero_long/experiments/multitask/iter01_prcfg
+  results_root: /workspace/results/experiments/multitask/iter01_prcfg
+  value_checkpoint: null
+
+datasets:
+  parent_episodes: 0
+
+parent_policy:
+  # Empty checkpoint = collect and train start from the SFT base model.
+  checkpoint: ""
+  label: SFT
+
+tags:
+  returns: fail300_d0
+  merged_base: multitask_d0_base_v0
+  child_fused: multitask_d0_fused_v0
+
+collect:
+  num_episodes: 40
+  parallel: 2
+  seed: 20260721
+  fps: 10
+  action_chunk: 5
+  num_steps: 5
+  num_steps_wait: 10
+  model_type: openpi
+  openpi_config_name: pi05_libero
+  warmup_before_env: true
+  guidance_type: positive
+  positive_only_conditional: true
+  guidance_scale: 1.0
+  negative_guidance_scale: 0.0
+  visualize: true
+
+returns:
+  failure_reward: -300.0
+  gamma: 1.0
+  global_min: -900.0
+  global_max: 0.0
+  num_workers: 64
+
+value:
+  # Multi-task joint critic trains the full VLM backbone (user decision);
+  # set true to go back to the frozen-VLM ablation.
+  freeze_vlm: false
+  steps: 1200
+  save_interval: 600
+  micro_batch_size: 16
+  global_batch_size: 64
+  lr: 1.0e-5
+  value_lr: 1.0e-4
+  lr_warmup_steps: 100
+  action_dim: 7
+  action_horizon: 10
+  critic_expert_variant: gemma_1m
+
+revalue:
+  label_name: phase_progress_multitask
+  num_phases: 4
+  success_phase: 3
+  seed: 42
+  lookahead_step: 10
+  positive_quantile: 0.3
+  zp_head_type: temporal_local_stage_gated
+  zp_use_class_weights: false
+  zp_max_epochs: 100
+  zp_early_stop_patience: 10
+  fusion_max_epochs: 100
+  fusion_early_stop_patience: 10
+  fusion_alpha: 1.0
+  extract_batch_size: 16
+  train_batch_size: 256

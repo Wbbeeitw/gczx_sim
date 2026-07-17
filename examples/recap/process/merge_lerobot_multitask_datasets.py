@@ -150,6 +150,7 @@ def merge_multitask_datasets(
 
     merged_episodes: list[dict[str, Any]] = []
     merged_stats: list[dict[str, Any]] = []
+    phase_frames: list[pd.DataFrame] = []
     summary_rows: list[dict[str, Any]] = []
     total_frames = 0
     total_videos = 0
@@ -221,6 +222,8 @@ def merge_multitask_datasets(
                     frame["episode_index"].astype("int64") + episode_offset
                 )
             frame.to_parquet(output_path / "meta" / name, index=False)
+            if name.startswith("phase_progress_"):
+                phase_frames.append(frame)
         for name in _audit_names(path):
             frame = pd.read_csv(path / "meta" / name)
             if "episode_index" in frame.columns:
@@ -244,6 +247,19 @@ def merge_multitask_datasets(
                 "success_rate": summary.get("success_rate"),
                 "task": [record["task"] for record in _read_jsonl(path / "meta" / "tasks.jsonl")],
             }
+        )
+
+    if phase_frames:
+        combined = pd.concat(phase_frames, ignore_index=True)
+        sort_columns = [
+            column
+            for column in ("episode_index", "frame_index")
+            if column in combined.columns
+        ]
+        if sort_columns:
+            combined = combined.sort_values(sort_columns).reset_index(drop=True)
+        combined.to_parquet(
+            output_path / "meta" / "phase_progress_multitask.parquet", index=False
         )
 
     _write_jsonl(output_path / "meta" / "episodes.jsonl", merged_episodes)
