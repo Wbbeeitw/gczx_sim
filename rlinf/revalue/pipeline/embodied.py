@@ -602,7 +602,9 @@ def _load_rollout_policy(cfg: LiberoRolloutCollectionConfig):
 
 def warmup_libero_rollout_policy(policy, task_description: str) -> None:
     """Compile a rollout policy with production input shapes before EGL starts."""
-    if not hasattr(policy, "predict_action_batch"):
+    use_cfg_call = hasattr(policy, "predict_action_batch")
+    use_openpi_call = hasattr(policy, "infer")
+    if not use_cfg_call and not use_openpi_call:
         return
 
     import time
@@ -617,20 +619,35 @@ def warmup_libero_rollout_policy(policy, task_description: str) -> None:
     cuda_rng_states = (
         torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
     )
-    dummy_observation = {
-        "main_images": torch.zeros(
-            (1, LIBERO_ENV_RESOLUTION, LIBERO_ENV_RESOLUTION, 3),
-            dtype=torch.uint8,
-        ),
-        "wrist_images": torch.zeros(
-            (1, LIBERO_ENV_RESOLUTION, LIBERO_ENV_RESOLUTION, 3),
-            dtype=torch.uint8,
-        ),
-        "states": torch.zeros((1, LIBERO_STATE_DIM), dtype=torch.float32),
-        "task_descriptions": [str(task_description)],
-    }
     try:
-        policy.predict_action_batch(dummy_observation, mode="eval")
+        if use_cfg_call:
+            dummy_observation = {
+                "main_images": torch.zeros(
+                    (1, LIBERO_ENV_RESOLUTION, LIBERO_ENV_RESOLUTION, 3),
+                    dtype=torch.uint8,
+                ),
+                "wrist_images": torch.zeros(
+                    (1, LIBERO_ENV_RESOLUTION, LIBERO_ENV_RESOLUTION, 3),
+                    dtype=torch.uint8,
+                ),
+                "states": torch.zeros((1, LIBERO_STATE_DIM), dtype=torch.float32),
+                "task_descriptions": [str(task_description)],
+            }
+            policy.predict_action_batch(dummy_observation, mode="eval")
+        else:
+            dummy_observation = {
+                "observation/image": np.zeros(
+                    (LIBERO_ENV_RESOLUTION, LIBERO_ENV_RESOLUTION, 3),
+                    dtype=np.uint8,
+                ),
+                "observation/wrist_image": np.zeros(
+                    (LIBERO_ENV_RESOLUTION, LIBERO_ENV_RESOLUTION, 3),
+                    dtype=np.uint8,
+                ),
+                "observation/state": np.zeros(LIBERO_STATE_DIM, dtype=np.float32),
+                "prompt": str(task_description),
+            }
+            policy.infer(dummy_observation)
         if torch.cuda.is_available():
             torch.cuda.synchronize()
     finally:

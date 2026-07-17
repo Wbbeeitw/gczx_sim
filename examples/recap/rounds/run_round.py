@@ -70,7 +70,12 @@ STAGE_ORDER = [
     "train_policy",
     "eval_policy",
 ]
-KNOWN_STAGES = [*STAGE_ORDER, "fit_value", "build_child_base"]
+KNOWN_STAGES = [
+    *STAGE_ORDER,
+    "fit_value",
+    "build_child_base",
+    "export_bootstrap",
+]
 
 
 def _stage_dependencies(ctx: dict, stage: str) -> list[str]:
@@ -210,6 +215,9 @@ def _build_ctx(cfg: dict) -> dict[str, Any]:
     merged_ds = str(_require(cfg, "paths.merged_dataset"))
     child_ds = str(_require(cfg, "paths.child_dataset"))
     parent_ds = str(_require(cfg, "paths.parent_dataset"))
+    bootstrap = bool(_get(cfg, "bootstrap", False))
+    if bootstrap:
+        merged_ds = child_ds
     parent_episodes = int(_require(cfg, "datasets.parent_episodes"))
     child_episodes = int(_get(cfg, "collect.num_episodes"))
     merged_episodes = parent_episodes + child_episodes
@@ -244,6 +252,7 @@ def _build_ctx(cfg: dict) -> dict[str, Any]:
         "parent_episodes": parent_episodes,
         "child_episodes": child_episodes,
         "merged_episodes": merged_episodes,
+        "bootstrap": bootstrap,
         "base_model": str(_require(cfg, "paths.base_model")),
         "parent_checkpoint": str(_get(cfg, "parent_policy.checkpoint") or ""),
         "parent_label": str(_get(cfg, "parent_policy.label", "parent")),
@@ -473,6 +482,8 @@ def _steps_fit_value(ctx: dict) -> list[Step]:
             artifacts=[ctx["value_ckpt"]],
         ),
     ]
+    if ctx.get("bootstrap"):
+        steps = [step for step in steps if step.name != "merge_datasets"]
     return steps
 
 
@@ -899,11 +910,47 @@ def _steps_eval_policy(ctx: dict) -> list[Step]:
     return steps
 
 
+def _steps_export_bootstrap(ctx: dict) -> list[Step]:
+    """Export fused advantages onto the bootstrap dataset itself (no slicing).
+
+    Bootstrap rounds train the critic and the policy on the same freshly
+    collected dataset, so the export covers every episode instead of a
+    re-indexed child slice of a merged dataset.
+    """
+    cfg = ctx["cfg"]
+    revalue = cfg.get("revalue", {})
+    returns = cfg.get("returns", {})
+    return [
+        _step_prepare_child_manifest(ctx),
+        Step(
+            name="export_fused_advantages",
+            argv=_revalue_entry(
+                "export",
+                [
+                    *_data_overrides(ctx, ctx["merged_ds"]),
+                    f"recap.source_advantages_path={ctx['merged_base_adv']}",
+                    f"recap.output_tag={ctx['child_fused_tag']}",
+                    f"recap.lookahead_step={revalue.get('lookahead_step', 10)}",
+                    f"recap.gamma={returns['gamma']}",
+                    "recap.positive_quantile="
+                    f"{revalue.get('positive_quantile', 0.3)}",
+                    "recap.discount_next_value=true",
+                    "recap.export_split=null",
+                    f"output.root={ctx['revalue_root']}",
+                    f"output.predictions_path={ctx['predictions']}",
+                ],
+            ),
+            artifacts=[ctx["child_fused_adv"]],
+        ),
+    ]
+
+
 _STAGE_BUILDERS = {
     "collect": _steps_collect,
     "fit_value": _steps_fit_value,
     "fit_critic": _steps_fit_critic,
     "build_child_base": _steps_build_child_base,
+    "export_bootstrap": _steps_export_bootstrap,
     "export_policy_data": _steps_export_policy_data,
     "train_policy": _steps_train_policy,
     "eval_policy": _steps_eval_policy,
