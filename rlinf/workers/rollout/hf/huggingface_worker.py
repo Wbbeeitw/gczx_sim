@@ -179,6 +179,7 @@ class MultiStepRolloutWorker(Worker):
             "wrist_images": torch.zeros(
                 (batch_size, height, width, 3), dtype=torch.uint8
             ),
+            "extra_view_images": None,
             "states": torch.zeros((batch_size, 8), dtype=torch.float32),
             "task_descriptions": [str(task_description)] * batch_size,
         }
