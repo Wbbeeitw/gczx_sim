@@ -104,6 +104,7 @@ class PolicyEvaluationConfig:
     python_bin: str | None = None
     extra_overrides: list[str] = field(default_factory=list)
     negative_guidance_scale: float = 0.0
+    warmup_before_env: bool = False
 
 
 @dataclass
@@ -132,7 +133,6 @@ class LiberoRolloutCollectionConfig:
     positive_only_conditional: bool = True
     guidance_scale: float = 1.0
     negative_guidance_scale: float = 0.0
-    warmup_before_env: bool = False
     failure_reward: float | None = None
     semantic_trace: bool = False
     semantic_trace_task: str = "task1"
@@ -614,7 +614,9 @@ def warmup_libero_rollout_policy(policy, task_description: str) -> None:
     if hasattr(policy, "reset"):
         policy.reset()
     cpu_rng_state = torch.random.get_rng_state()
-    cuda_rng_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    cuda_rng_states = (
+        torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    )
     dummy_observation = {
         "main_images": torch.zeros(
             (1, LIBERO_ENV_RESOLUTION, LIBERO_ENV_RESOLUTION, 3),
@@ -628,8 +630,7 @@ def warmup_libero_rollout_policy(policy, task_description: str) -> None:
         "task_descriptions": [str(task_description)],
     }
     try:
-        with torch.inference_mode():
-            policy.predict_action_batch(dummy_observation, mode="eval")
+        policy.predict_action_batch(dummy_observation, mode="eval")
         if torch.cuda.is_available():
             torch.cuda.synchronize()
     finally:

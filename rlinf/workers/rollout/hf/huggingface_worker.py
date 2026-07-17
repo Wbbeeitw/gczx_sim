@@ -149,6 +149,12 @@ class MultiStepRolloutWorker(Worker):
                 self.total_num_eval_envs // self.num_pipeline_stages
             )
 
+        self.log_info(f"Rollout worker initialized with dst_ranks: {self.dst_ranks}")
+        self.log_info(f"Rollout worker initialized with src_ranks: {self.src_ranks}")
+        self.setup_sample_params()
+        if self.enable_offload:
+            self.offload_model()
+
     def warmup_eval_policy(self):
         """Compile CFG inference before LIBERO workers create EGL contexts."""
         if not self.cfg.rollout.get("warmup_before_env", False):
@@ -187,8 +193,7 @@ class MultiStepRolloutWorker(Worker):
             torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
         )
         try:
-            with torch.inference_mode():
-                self.hf_model.predict_action_batch(env_obs=env_obs, mode="eval")
+            self.hf_model.predict_action_batch(env_obs=env_obs, mode="eval")
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
         finally:
@@ -199,12 +204,6 @@ class MultiStepRolloutWorker(Worker):
             self.hf_model.reset()
         self.log_info("CFG eval policy warmup completed")
         return {"batch_size": batch_size, "task_id": task_id}
-
-        self.log_info(f"Rollout worker initialized with dst_ranks: {self.dst_ranks}")
-        self.log_info(f"Rollout worker initialized with src_ranks: {self.src_ranks}")
-        self.setup_sample_params()
-        if self.enable_offload:
-            self.offload_model()
 
     def setup_sample_params(self):
         # length parameters for rollout
