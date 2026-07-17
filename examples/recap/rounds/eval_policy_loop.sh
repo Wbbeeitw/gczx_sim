@@ -23,7 +23,9 @@ source switch_env openpi
 export REPO_PATH="$PWD" PYTHONPATH="$PWD"
 unset RAY_ADDRESS || true
 
-LOG_ROOT="/workspace/results/sft_base_probe"
+LOG_ROOT="${LOG_ROOT:-/workspace/results/sft_base_probe}"
+NUM_ENVS="${NUM_ENVS:-4}"
+EPOCHS="${EPOCHS:-2}"
 mkdir -p "$LOG_ROOT"
 
 for T in "${TASK_IDS[@]}"; do
@@ -37,8 +39,8 @@ for T in "${TASK_IDS[@]}"; do
     policy_eval.log_dir="$LOG_ROOT/task$T" \
     policy_eval.config_name=libero_10_pi05_sft_eval \
     policy_eval.openpi_config_name=pi05_libero \
-    policy_eval.eval_rollout_epoch=2 \
-    policy_eval.total_num_envs=4 \
+    policy_eval.eval_rollout_epoch="$EPOCHS" \
+    policy_eval.total_num_envs="$NUM_ENVS" \
     policy_eval.task_suite_name=libero_10 \
     policy_eval.task_id_filter="[$T]" \
     policy_eval.save_video=false \
