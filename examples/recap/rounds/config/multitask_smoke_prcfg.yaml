@@ -1,0 +1,101 @@
+# SMOKE variant of multitask_round1_prcfg.yaml.
+# Purpose: verify the multi-task round pipeline MECHANICALLY with tiny runs
+# (2 episodes per task, 20 value steps, 2 z/p and fusion epochs). Metrics are
+# meaningless; only artifacts matter. Full config: multitask_round1_prcfg.yaml.
+
+round_id: 1
+task: multitask
+task_id: 0
+task_suite_name: libero_10
+method: prcfg
+repo_root: /workspace/RLinf
+bootstrap: false
+pipeline:
+  - collect_multitask
+  - fit_critic_multitask
+  - task_heads
+  - predict_multitask
+  - export_multitask
+tasks: [task0, task1, task2, task3, task4, task5, task6, task7, task8, task9]
+
+gpu:
+  cuda_visible_devices: "0"
+  gpu_id: 0
+
+paths:
+  base_model: /workspace/models/RLinf-Pi05-LIBERO-SFT
+  siglip: /workspace/models/siglip2-so400m-patch14-224
+  gemma3: /workspace/models/gemma-3-270m
+  tokenizer: /workspace/models/gemma-3-270m
+  parent_dataset: /data/libero_long/smoke/multitask_d0_20
+  child_pattern: /data/libero_long/smoke/{task}_d0_2
+  merged_dataset: /data/libero_long/smoke/multitask_d0_20
+  exp_root: /data/libero_long/smoke/exp_iter01
+  results_root: /workspace/results/smoke/iter01
+  value_checkpoint: null
+
+datasets:
+  parent_episodes: 0
+
+parent_policy:
+  checkpoint: ""
+  label: SFT
+
+tags:
+  returns: fail300_d0
+  merged_base: multitask_d0_base_v0
+  child_fused: multitask_d0_fused_v0
+
+collect:
+  num_episodes: 2
+  parallel: 2
+  seed: 20260721
+  fps: 10
+  action_chunk: 5
+  num_steps: 5
+  num_steps_wait: 10
+  model_type: openpi
+  openpi_config_name: pi05_libero
+  warmup_before_env: true
+  guidance_type: positive
+  positive_only_conditional: true
+  guidance_scale: 1.0
+  negative_guidance_scale: 0.0
+  visualize: false
+
+returns:
+  failure_reward: -300.0
+  gamma: 1.0
+  global_min: -900.0
+  global_max: 0.0
+  num_workers: 64
+
+value:
+  freeze_vlm: false
+  steps: 20
+  save_interval: 20
+  micro_batch_size: 4
+  global_batch_size: 64
+  lr: 1.0e-5
+  value_lr: 1.0e-4
+  lr_warmup_steps: 10
+  action_dim: 7
+  action_horizon: 10
+  critic_expert_variant: gemma_1m
+
+revalue:
+  label_name: phase_progress_multitask
+  num_phases: 4
+  success_phase: 3
+  seed: 42
+  lookahead_step: 10
+  positive_quantile: 0.3
+  zp_head_type: temporal_local_stage_gated
+  zp_use_class_weights: false
+  zp_max_epochs: 2
+  zp_early_stop_patience: 1
+  fusion_max_epochs: 2
+  fusion_early_stop_patience: 1
+  fusion_alpha: 1.0
+  extract_batch_size: 16
+  train_batch_size: 256
