@@ -18,7 +18,7 @@ FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates git libgl1 libegl1 libgles2 libglib2.0-0 \
+        ca-certificates git openssh-server libgl1 libegl1 libgles2 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY slim_export/.python /opt/venv/.python
