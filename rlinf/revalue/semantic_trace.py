@@ -17,8 +17,10 @@ import numpy as np
 import pandas as pd
 
 
+NUM_TASK0_PHASES = 4
 NUM_TASK1_PHASES = 4
-FAILED_TERMINAL_PHASE_PROGRESS_CAP = 0.3
+FAILED_TERMINAL_PHASE_PROGRESS_CAP = 0.15
+TASK0_SUCCESS_PHASE = 3
 TASK1_SUCCESS_PHASE = 3
 NUM_TASK2_PHASES = 4
 TASK2_SUCCESS_PHASE = 3
@@ -534,6 +536,30 @@ class Task1SemanticTraceRecorder:
             if values is not None:
                 return float(np.abs(np.asarray(values, dtype=np.float32)).sum())
         return float("inf")
+
+
+class Task0SemanticTraceRecorder(Task1SemanticTraceRecorder):
+    """Extract task0 state while reusing task1's two-object basket contract."""
+
+    def __init__(self, env: Any, config: Task1SemanticTraceConfig | None = None):
+        super().__init__(
+            env,
+            config
+            or Task1SemanticTraceConfig(
+                object_a_alias="alphabet_soup",
+                object_b_alias="tomato_sauce",
+                basket_alias="basket",
+            ),
+        )
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        """Return the resolved trace schema for reproducibility."""
+        return {
+            "version": "task0_semantic_trace_v1",
+            "config": asdict(self.config),
+            "bodies": asdict(self.bodies),
+        }
 
 
 class Task7SemanticTraceRecorder(Task1SemanticTraceRecorder):
@@ -2760,6 +2786,40 @@ def write_task7_semantic_artifacts(dataset_path: str | Path, records: list[dict[
     audit_path, metadata_path = meta_dir / f"{output_name}_audit.csv", meta_dir / f"{output_name}_metadata.json"
     trace.to_parquet(raw_path, index=False); labels.to_parquet(labels_path, index=False); audit.to_csv(audit_path, index=False)
     with open(metadata_path, "w", encoding="utf-8") as file: json.dump(metadata, file, indent=2, ensure_ascii=False)
+    return {"raw_trace": str(raw_path), "phase_labels": str(labels_path), "audit": str(audit_path), "metadata": str(metadata_path)}
+
+
+def write_task0_semantic_artifacts(dataset_path: str | Path, records: list[dict[str, Any]], metadata: dict[str, Any], *, output_name: str = "semantic_trace_task0", stable_frames: int = 5) -> dict[str, str]:
+    """Write Task0 raw trace, two-object basket labels, audit, and metadata."""
+    dataset_path = Path(dataset_path)
+    meta_dir = dataset_path / "meta"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    trace = pd.DataFrame(records).sort_values(["episode_index", "frame_index"])
+    labels, audit = build_task1_phase_labels(trace, stable_frames=stable_frames)
+    raw_path, labels_path = meta_dir / f"{output_name}.parquet", meta_dir / f"phase_progress_{output_name}.parquet"
+    audit_path, metadata_path = meta_dir / f"{output_name}_audit.csv", meta_dir / f"{output_name}_metadata.json"
+    trace.to_parquet(raw_path, index=False)
+    labels.to_parquet(labels_path, index=False)
+    audit.to_csv(audit_path, index=False)
+    with open(metadata_path, "w", encoding="utf-8") as file:
+        json.dump(metadata, file, indent=2, ensure_ascii=False)
+    return {"raw_trace": str(raw_path), "phase_labels": str(labels_path), "audit": str(audit_path), "metadata": str(metadata_path)}
+
+
+def write_task8_semantic_artifacts(dataset_path: str | Path, records: list[dict[str, Any]], metadata: dict[str, Any], *, output_name: str = "semantic_trace_task8", stable_frames: int = 3) -> dict[str, str]:
+    """Write Task8 raw trace, two-object stove-placement labels, audit, metadata."""
+    dataset_path = Path(dataset_path)
+    meta_dir = dataset_path / "meta"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    trace = pd.DataFrame(records).sort_values(["episode_index", "frame_index"])
+    labels, audit = build_task7_phase_labels(trace, stable_frames=stable_frames)
+    raw_path, labels_path = meta_dir / f"{output_name}.parquet", meta_dir / f"phase_progress_{output_name}.parquet"
+    audit_path, metadata_path = meta_dir / f"{output_name}_audit.csv", meta_dir / f"{output_name}_metadata.json"
+    trace.to_parquet(raw_path, index=False)
+    labels.to_parquet(labels_path, index=False)
+    audit.to_csv(audit_path, index=False)
+    with open(metadata_path, "w", encoding="utf-8") as file:
+        json.dump(metadata, file, indent=2, ensure_ascii=False)
     return {"raw_trace": str(raw_path), "phase_labels": str(labels_path), "audit": str(audit_path), "metadata": str(metadata_path)}
 
 

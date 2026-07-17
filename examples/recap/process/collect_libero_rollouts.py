@@ -55,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--semantic_trace", action="store_true")
     parser.add_argument(
         "--semantic_trace_task",
-        choices=("task1", "task2", "task3", "task4", "task5", "task6", "task7", "task8", "task9"),
+        choices=("task0", "task1", "task2", "task3", "task4", "task5", "task6", "task7", "task8", "task9"),
         default="task1",
         help="Task-specific privileged semantic trace to record.",
     )

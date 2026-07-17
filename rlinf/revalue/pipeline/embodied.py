@@ -701,6 +701,7 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
     semantic_trace_records: list[dict[str, Any]] = []
     if cfg.semantic_trace:
         from rlinf.revalue.semantic_trace import (
+            Task0SemanticTraceRecorder,
             Task1SemanticTraceRecorder,
             Task2SemanticTraceRecorder,
             Task3SemanticTraceRecorder,
@@ -710,6 +711,7 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
             Task7SemanticTraceRecorder,
             Task8SemanticTraceRecorder,
             Task9SemanticTraceRecorder,
+            write_task0_semantic_artifacts,
             write_task1_semantic_artifacts,
             write_task2_semantic_artifacts,
             write_task3_semantic_artifacts,
@@ -717,10 +719,16 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
             write_task5_semantic_artifacts,
             write_task6_semantic_artifacts,
             write_task7_semantic_artifacts,
+            write_task8_semantic_artifacts,
             write_task9_semantic_artifacts,
         )
 
         semantic_trace_specs = {
+            "task0": (
+                0,
+                Task0SemanticTraceRecorder,
+                write_task0_semantic_artifacts,
+            ),
             "task1": (
                 1,
                 Task1SemanticTraceRecorder,
@@ -759,7 +767,7 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
             "task8": (
                 8,
                 Task8SemanticTraceRecorder,
-                write_task7_semantic_artifacts,
+                write_task8_semantic_artifacts,
             ),
             "task9": (9, Task9SemanticTraceRecorder, write_task9_semantic_artifacts),
         }
