@@ -183,6 +183,7 @@ def main() -> None:
 
     writer = LeRobotDatasetWriter()
     summary: dict[str, Any] = {"dataset": str(dataset), "out": str(out), "tasks": {}}
+    pending_artifacts: list[tuple] = []
     for task_text, episode_indices in sorted(groups.items()):
         task_id, recorder_cls, writer_fn, trace_name = _match_spec(task_text)
         task = task_suite.get_task(task_id)
@@ -245,21 +246,45 @@ def main() -> None:
                 ordinal + 1,
             )
         env.close()
+        pending_artifacts.append(
+            (
+                writer_fn,
+                trace_name,
+                task_trace_records,
+                recorder.metadata,
+                recorder.config.stable_frames,
+                task_id,
+                task_description,
+                len(episode_indices),
+                successes,
+            )
+        )
+
+    writer.finalize()
+    for (
+        writer_fn,
+        trace_name,
+        task_trace_records,
+        recorder_metadata,
+        stable_frames,
+        task_id,
+        task_description,
+        num_episodes,
+        successes,
+    ) in pending_artifacts:
         artifacts = writer_fn(
             out,
             task_trace_records,
-            recorder.metadata,
+            recorder_metadata,
             output_name=trace_name,
-            stable_frames=recorder.config.stable_frames,
+            stable_frames=stable_frames,
         )
         summary["tasks"][str(task_id)] = {
             "task": task_description,
-            "episodes": len(episode_indices),
+            "episodes": num_episodes,
             "replayed_success": successes,
             "trace_artifacts": artifacts,
         }
-
-    writer.finalize()
     out.mkdir(parents=True, exist_ok=True)
     with (out / "replay_summary.json").open("w", encoding="utf-8") as file:
         json.dump(summary, file, indent=2, ensure_ascii=False)
