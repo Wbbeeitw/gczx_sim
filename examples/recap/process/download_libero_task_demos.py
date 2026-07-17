@@ -33,6 +33,44 @@ import json
 import os
 from pathlib import Path
 import shutil
+import time
+
+
+def _download_with_retry(
+    repo: str,
+    relpath: str,
+    out: Path,
+    endpoint: str | None,
+    position: int,
+    total: int,
+    attempts: int = 8,
+) -> None:
+    """Download one repo file, backing off politely on HTTP 429."""
+    from huggingface_hub import hf_hub_download
+    from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
+
+    delay = 5.0
+    for attempt in range(1, attempts + 1):
+        try:
+            hf_hub_download(
+                repo_id=repo,
+                repo_type="dataset",
+                filename=relpath,
+                local_dir=out,
+                endpoint=endpoint,
+            )
+            print(f"  [{position}/{total}] {relpath}")
+            return
+        except (HfHubHTTPError, LocalEntryNotFoundError) as exc:
+            is_rate_limit = "429" in str(exc)
+            if not is_rate_limit or attempt == attempts:
+                raise
+            print(
+                f"  [{position}/{total}] rate limited, "
+                f"retry {attempt}/{attempts} in {delay:.0f}s"
+            )
+            time.sleep(delay)
+            delay = min(delay * 2.0, 120.0)
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -52,6 +90,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", required=True)
     parser.add_argument("--keywords", nargs="+", required=True)
     parser.add_argument("--limit-per-task", type=int, default=0)
+    parser.add_argument(
+        "--pause",
+        type=float,
+        default=2.0,
+        help="seconds to wait between episode downloads (rate-limit politeness)",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -111,20 +155,15 @@ def main() -> None:
         if index in selected_indices:
             wanted.append(relpath)
     print(f"downloading {len(wanted)} episode files ...")
-    for relpath in wanted:
+    for position, relpath in enumerate(wanted, 1):
         target = out / relpath
         if target.exists():
             continue
         if args.dry_run:
             print("  [dry-run]", relpath)
             continue
-        hf_hub_download(
-            repo_id=args.repo,
-            repo_type="dataset",
-            filename=relpath,
-            local_dir=out,
-            endpoint=endpoint,
-        )
+        _download_with_retry(args.repo, relpath, out, endpoint, position, len(wanted))
+        time.sleep(args.pause)
 
     if args.dry_run:
         print("dry-run finished; metadata left untouched")
