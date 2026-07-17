@@ -62,7 +62,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gpu_id", type=int, default=0)
     parser.add_argument("--fps", type=int, default=0, help="0 = keep source fps")
     parser.add_argument("--num_steps_wait", type=int, default=10)
-    parser.add_argument("--max_episodes", type=int, default=0)
+    parser.add_argument("--max_episodes", "--max-episodes", dest="max_episodes", type=int, default=0)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
