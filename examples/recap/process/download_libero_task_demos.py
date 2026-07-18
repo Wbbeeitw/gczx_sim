@@ -86,17 +86,19 @@ def _reindex_episodes(
     """
     mapping = {old: new for new, old in enumerate(selected_indices)}
     for directory, pattern in (
-        (out / "data", "**/episode_*.parquet"),
-        (out / "videos", "**/episode_*.mp4"),
+        (out / "data", "**/episode_0*.parquet"),
+        (out / "videos", "**/episode_0*.mp4"),
     ):
         if not directory.exists():
             continue
-        for file in directory.rglob(pattern):
+        # Materialize before renaming: rglob is lazy and would otherwise
+        # re-match the episode_tmp_* files produced by this loop.
+        for file in list(directory.rglob(pattern)):
             old_index = int(file.stem.removeprefix("episode_"))
             if old_index not in mapping:
                 continue
             file.rename(file.with_name(f"episode_tmp_{mapping[old_index]:06d}{file.suffix}"))
-        for file in directory.rglob("episode_tmp_*"):
+        for file in list(directory.rglob("episode_tmp_*")):
             new_index = int(file.stem.removeprefix("episode_tmp_"))
             file.rename(file.with_name(f"episode_{new_index:06d}{file.suffix}"))
     for episode in pruned_episodes:
