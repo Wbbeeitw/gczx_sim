@@ -227,18 +227,36 @@ def _build_ctx(cfg: dict) -> dict[str, Any]:
     tasks = [str(task) for task in (_get(cfg, "tasks") or [])]
     task_datasets: dict[str, str] = {}
     task_ranges: dict[str, tuple[int, int]] = {}
+    demo_counts: dict[str, int] = {}
     if not tasks and not child_ds:
         raise ValueError("paths.child_dataset is required for single-task rounds")
     if tasks:
         child_pattern = _get(cfg, "paths.child_pattern")
         if not child_pattern:
             raise ValueError("paths.child_pattern is required when tasks: is set")
+        demo_cfg = _get(cfg, "demo_datasets") or {}
         start = 0
         per_task = int(_get(cfg, "collect.num_episodes"))
         for task in tasks:
             task_datasets[task] = str(child_pattern).format(task=task)
-            task_ranges[task] = (start, start + per_task)
-            start += per_task
+            demo_path = demo_cfg.get(task)
+            demo_count = 0
+            if demo_path:
+                demo_meta = (
+                    Path(demo_path) / "meta" / "episodes.jsonl"
+                )
+                if not demo_meta.exists():
+                    raise ValueError(
+                        f"demo_datasets[{task}] missing episodes.jsonl: {demo_meta}"
+                    )
+                demo_count = sum(
+                    1
+                    for _ in open(demo_meta, "r", encoding="utf-8")
+                    if _.strip()
+                )
+            demo_counts[task] = demo_count
+            task_ranges[task] = (start, start + per_task + demo_count)
+            start += per_task + demo_count
         merged_episodes = start
     parent_episodes = int(_require(cfg, "datasets.parent_episodes"))
     child_episodes = int(_get(cfg, "collect.num_episodes"))
@@ -281,6 +299,7 @@ def _build_ctx(cfg: dict) -> dict[str, Any]:
         "tasks": tasks,
         "task_datasets": task_datasets,
         "task_ranges": task_ranges,
+        "demo_datasets": demo_cfg if tasks else {},
         "multitask": bool(tasks),
         "base_model": str(_require(cfg, "paths.base_model")),
         "parent_checkpoint": str(_get(cfg, "parent_policy.checkpoint") or ""),
@@ -691,15 +710,17 @@ def _steps_fit_critic(ctx: dict) -> list[Step]:
 def _step_prepare_child_manifest(ctx: dict) -> Step:
     revalue = ctx["cfg"].get("revalue", {})
     policy_data_root = ctx["policy_data_root"]
+    manifest_dataset = ctx["merged_ds"] if ctx.get("multitask") else ctx["child_ds"]
     return Step(
         name="prepare_child_manifest",
         argv=_revalue_entry(
             "prepare_data",
             [
-                f"data.dataset_path={ctx['child_ds']}",
+                f"data.dataset_path={manifest_dataset}",
                 f"data.label_name={revalue['label_name']}",
                 f"data.seed={revalue.get('seed', 42)}",
-                f"manifest.num_episodes={ctx['child_episodes']}",
+                "manifest.num_episodes="
+                f"{ctx['merged_episodes'] if ctx.get('multitask') else ctx['child_episodes']}",
                 "manifest.success_ratio=0.5",
                 "manifest.val_episode_ratio=0.0",
                 "manifest.test_episode_ratio=0.0",
@@ -980,13 +1001,19 @@ def _steps_export_bootstrap(ctx: dict) -> list[Step]:
 
 
 def _step_merge_multitask(ctx: dict) -> Step:
+    inputs: list[str] = []
+    demo_cfg = ctx.get("demo_datasets") or {}
+    for task in ctx["tasks"]:
+        inputs.append(ctx["task_datasets"][task])
+        if task in demo_cfg:
+            inputs.append(demo_cfg[task])
     return Step(
         name="merge_datasets",
         argv=_script_entry(
             "examples/recap/process/merge_lerobot_multitask_datasets.py",
             [
                 "--datasets",
-                *[ctx["task_datasets"][task] for task in ctx["tasks"]],
+                *inputs,
                 f"--output_dataset={ctx['merged_ds']}",
             ],
         ),
@@ -1252,7 +1279,7 @@ def _steps_export_multitask(ctx: dict) -> list[Step]:
                         "data.label_name="
                         f"phase_progress_semantic_trace_{task}",
                         f"data.seed={revalue.get('seed', 42)}",
-                        f"manifest.num_episodes={ctx['child_episodes']}",
+                        f"manifest.num_episodes={ctx['merged_episodes'] if ctx.get('multitask') else ctx['child_episodes']}",
                         "manifest.success_ratio=0.5",
                         "manifest.val_episode_ratio=0.0",
                         "manifest.test_episode_ratio=0.0",
