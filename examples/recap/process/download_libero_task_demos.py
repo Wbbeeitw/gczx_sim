@@ -97,10 +97,16 @@ def _reindex_episodes(
             old_index = int(file.stem.removeprefix("episode_"))
             if old_index not in mapping:
                 continue
-            file.rename(file.with_name(f"episode_tmp_{mapping[old_index]:06d}{file.suffix}"))
+            target = file.with_name(f"episode_tmp_{mapping[old_index]:06d}{file.suffix}")
+            if target.exists():
+                target.unlink()
+            file.rename(target)
         for file in list(directory.rglob("episode_tmp_*")):
             new_index = int(file.stem.removeprefix("episode_tmp_"))
-            file.rename(file.with_name(f"episode_{new_index:06d}{file.suffix}"))
+            target = file.with_name(f"episode_{new_index:06d}{file.suffix}")
+            if target.exists():
+                target.unlink()
+            file.rename(target)
     for episode in pruned_episodes:
         episode["episode_index"] = mapping[int(episode["episode_index"])]
     for record in pruned_stats:
