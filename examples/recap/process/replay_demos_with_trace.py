@@ -96,10 +96,6 @@ def _episode_first_frame(dataset: Path, episode_index: int) -> np.ndarray:
     return image.astype(np.float32)
 
 
-def _render_frame(env) -> np.ndarray:
-    return np.ascontiguousarray(env._get_observations()["agentview_image"][::-1, ::-1]).astype(np.float32)
-
-
 def _render_init_candidates(env, init_states, num_steps_wait) -> list[np.ndarray]:
     """Render the settled first frame of every candidate init state once."""
     candidates = []
@@ -108,7 +104,11 @@ def _render_init_candidates(env, init_states, num_steps_wait) -> list[np.ndarray
         obs = env.set_init_state(init_state)
         for _ in range(num_steps_wait):
             obs, _, _, _ = env.step(LIBERO_DUMMY_ACTION)
-        candidates.append(_render_frame(env))
+        candidates.append(
+            np.ascontiguousarray(obs["agentview_image"][::-1, ::-1]).astype(
+                np.float32
+            )
+        )
     return candidates
 
 
