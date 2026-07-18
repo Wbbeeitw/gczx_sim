@@ -71,7 +71,7 @@ actor:
   fsdp_config:
     strategy: "fsdp"
     sharding_strategy: "no_shard"
-    use_orig_params: true # flat params (False) hit a view/inplace autograd error with openpi on torch 2.7, please do not change this value
+    use_orig_params: false # flat params are fine here since task58 BC is full-parameter FT (train_expert_only: False); freezing the VLM under flat params is what broke on torch 2.7
     gradient_checkpointing: False # for openpi, gradient checkpointing is not supported, please do not change this value
     mixed_precision:
       param_dtype: ${actor.model.precision}
