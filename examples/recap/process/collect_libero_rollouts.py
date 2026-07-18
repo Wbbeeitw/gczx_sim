@@ -51,11 +51,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model_type", default="openpi")
     parser.add_argument("--checkpoint_path", default=None)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--warmup_before_env",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Warm up policy inference before creating the EGL environment.",
+    )
     parser.add_argument("--failure_reward", type=float, default=None)
     parser.add_argument("--semantic_trace", action="store_true")
     parser.add_argument(
         "--semantic_trace_task",
-        choices=("task0", "task1", "task2", "task3", "task4", "task5", "task6", "task7", "task8", "task9"),
+        choices=tuple(f"task{task_id}" for task_id in range(10)),
         default="task1",
         help="Task-specific privileged semantic trace to record.",
     )
@@ -90,6 +96,7 @@ def main() -> None:
             gpu_id=args.gpu_id,
             fps=args.fps,
             overwrite=args.overwrite,
+            warmup_before_env=args.warmup_before_env,
             failure_reward=args.failure_reward,
             semantic_trace=args.semantic_trace,
             semantic_trace_task=args.semantic_trace_task,
