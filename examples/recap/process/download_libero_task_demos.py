@@ -91,6 +91,14 @@ def _reindex_episodes(
     ):
         if not directory.exists():
             continue
+        for stale in directory.rglob("episode_tmp_*"):
+            stale.unlink()
+    for directory, pattern in (
+        (out / "data", "**/episode_0*.parquet"),
+        (out / "videos", "**/episode_0*.mp4"),
+    ):
+        if not directory.exists():
+            continue
         # Materialize before renaming: rglob is lazy and would otherwise
         # re-match the episode_tmp_* files produced by this loop.
         for file in list(directory.rglob(pattern)):
