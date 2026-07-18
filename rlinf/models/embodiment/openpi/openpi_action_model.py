@@ -318,22 +318,6 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         outputs["actions"] = outputs["actions"][:, : self.config.action_chunk]
         return outputs
 
-    def gradient_checkpointing_disable(self):
-        super().gradient_checkpointing_disable()
-        # The gemma_pytorch in some openpi builds force-enables per-layer
-        # gradient checkpointing in training mode whenever gemma_expert.model
-        # has a `gradient_checkpointing` attribute, which breaks on torch>=2.7
-        # (non-reentrant checkpoint view/inplace version-counter error) and
-        # overrides the explicit disable above. Drop the attribute so the
-        # joint forward runs without checkpointing, matching the upstream
-        # RLinf openpi path (checkpointing is unsupported for openpi).
-        expert_model = self.paligemma_with_expert.gemma_expert.model
-        if hasattr(expert_model, "gradient_checkpointing"):
-            delattr(expert_model, "gradient_checkpointing")
-        backbone = self.paligemma_with_expert
-        if hasattr(backbone, "gradient_checkpointing"):
-            delattr(backbone, "gradient_checkpointing")
-
     def forward(self, forward_type=ForwardType.DEFAULT, **kwargs):
         if forward_type == ForwardType.SFT:
             return self.sft_forward(**kwargs)
