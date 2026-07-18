@@ -57,6 +57,20 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _decode_image(value) -> np.ndarray:
+    """Decode a LeRobot image cell (ndarray or {bytes, path} dict) to uint8."""
+    if isinstance(value, dict):
+        payload = value.get("bytes")
+        if payload is not None:
+            from io import BytesIO
+
+            from PIL import Image
+
+            return np.array(Image.open(BytesIO(payload)).convert("RGB"))
+        raise ValueError(f"image dict has no bytes: {sorted(value.keys())}")
+    return np.asarray(value)
+
+
 def _demo_first_frame(dataset: Path, episode_index: int) -> np.ndarray:
     matches = sorted(dataset.glob(f"data/**/episode_{episode_index:06d}.parquet"))
     if len(matches) != 1:
@@ -69,7 +83,7 @@ def _demo_first_frame(dataset: Path, episode_index: int) -> np.ndarray:
     ]
     if not image_columns:
         raise ValueError(f"no image column in {matches[0]}: {list(frame.columns)}")
-    image = np.asarray(frame[image_columns[0]].iloc[0])
+    image = _decode_image(frame[image_columns[0]].iloc[0])
     if image.dtype != np.uint8:
         image = image.astype(np.uint8)
     return image
