@@ -239,6 +239,15 @@ def _build_ctx(cfg: dict) -> dict[str, Any]:
         per_task = int(_get(cfg, "collect.num_episodes"))
         for task in tasks:
             task_datasets[task] = str(child_pattern).format(task=task)
+            child_meta = (
+                Path(task_datasets[task]) / "meta" / "episodes.jsonl"
+            )
+            if child_meta.exists():
+                per_task = sum(
+                    1
+                    for _ in open(child_meta, "r", encoding="utf-8")
+                    if _.strip()
+                )
             demo_path = demo_cfg.get(task)
             demo_count = 0
             if demo_path:
