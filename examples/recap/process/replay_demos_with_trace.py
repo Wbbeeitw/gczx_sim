@@ -64,8 +64,71 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=int, default=0, help="0 = keep source fps")
     parser.add_argument("--num_steps_wait", type=int, default=10)
     parser.add_argument("--max_episodes", "--max-episodes", dest="max_episodes", type=int, default=0)
+    parser.add_argument("--task_ids", type=int, nargs="*", default=None)
+    parser.add_argument("--no_match_init", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
+
+
+def _decode_image(value) -> np.ndarray:
+    """Decode a LeRobot image cell (ndarray or {bytes, path} dict) to uint8."""
+    if isinstance(value, dict):
+        payload = value.get("bytes")
+        if payload is not None:
+            from io import BytesIO
+
+            from PIL import Image
+
+            return np.array(Image.open(BytesIO(payload)).convert("RGB"))
+        raise ValueError(f"image dict has no bytes: {sorted(value.keys())}")
+    return np.asarray(value)
+
+
+def _episode_first_frame(dataset: Path, episode_index: int) -> np.ndarray:
+    matches = sorted(dataset.glob(f"data/**/episode_{episode_index:06d}.parquet"))
+    frame = pd.read_parquet(matches[0])
+    column = next(
+        column
+        for column in frame.columns
+        if "image" in column and "wrist" not in column and "hand" not in column
+    )
+    image = _decode_image(frame[column].iloc[0])
+    return image.astype(np.float32)
+
+
+def _render_frame(env) -> np.ndarray:
+    return np.ascontiguousarray(env._get_observations()["agentview_image"][::-1, ::-1]).astype(np.float32)
+
+
+def _render_init_candidates(env, init_states, num_steps_wait) -> list[np.ndarray]:
+    """Render the settled first frame of every candidate init state once."""
+    candidates = []
+    for init_state in init_states:
+        env.reset()
+        obs = env.set_init_state(init_state)
+        for _ in range(num_steps_wait):
+            obs, _, _, _ = env.step(LIBERO_DUMMY_ACTION)
+        candidates.append(_render_frame(env))
+    return candidates
+
+
+def _match_init_index(reference: np.ndarray, candidates: list[np.ndarray]) -> tuple[int, float, float]:
+    """Pick the init candidate closest to the demo first frame.
+
+    The 90th-percentile pixel difference emphasizes object placement over
+    background similarity. Returns (index, score, score/median).
+    """
+    if reference.shape != candidates[0].shape:
+        raise ValueError(
+            f"shape mismatch: demo {reference.shape} vs env {candidates[0].shape}"
+        )
+    scores = []
+    for candidate in candidates:
+        diff = np.abs(candidate - reference)
+        scores.append(float(np.percentile(diff, 90)))
+    best = int(np.argmin(scores))
+    median = float(np.median(scores))
+    return best, scores[best], scores[best] / max(median, 1e-6)
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -177,12 +240,22 @@ def main() -> None:
     fps = args.fps or int(info.get("fps", 20))
 
     groups = _task_groups(episodes)
+    if args.task_ids is not None:
+        wanted = set(args.task_ids)
+        groups = {
+            task_text: indices
+            for task_text, indices in groups.items()
+            if _match_spec(task_text)[0] in wanted
+        }
+        if not groups:
+            raise SystemExit(f"no episodes matched task_ids={args.task_ids}")
     benchmark_dict = benchmark.get_benchmark_dict()
     task_suite = benchmark_dict[args.task_suite_name]()
 
     writer = LeRobotDatasetWriter()
     summary: dict[str, Any] = {"dataset": str(dataset), "out": str(out), "tasks": {}}
     pending_artifacts: list[tuple] = []
+    mapping_report: list[dict[str, Any]] = []
     for task_text, episode_indices in sorted(groups.items()):
         task_id, recorder_cls, writer_fn, trace_name = _match_spec(task_text)
         task = task_suite.get_task(task_id)
@@ -191,12 +264,38 @@ def main() -> None:
             task, LIBERO_ENV_RESOLUTION, args.seed, args.gpu_id
         )
         recorder = recorder_cls(env)
+        init_candidates = None
+        if not args.no_match_init:
+            init_candidates = _render_init_candidates(
+                env, init_states, args.num_steps_wait
+            )
+            logger.info(
+                "task%d: rendered %d init candidates for first-frame matching",
+                task_id,
+                len(init_candidates),
+            )
         task_trace_records: list[dict[str, Any]] = []
         successes = 0
         for ordinal, episode_index in enumerate(sorted(episode_indices)):
             actions = _episode_actions(dataset, episode_index)
+            if init_candidates is not None:
+                reference = _episode_first_frame(dataset, episode_index)
+                chosen_index, score, ratio = _match_init_index(
+                    reference, init_candidates
+                )
+                mapping_report.append(
+                    {
+                        "task_id": task_id,
+                        "episode_index": episode_index,
+                        "init_index": chosen_index,
+                        "score": score,
+                        "ratio": ratio,
+                    }
+                )
+            else:
+                chosen_index = ordinal % len(init_states)
             env.reset()
-            obs = env.set_init_state(init_states[ordinal % len(init_states)])
+            obs = env.set_init_state(init_states[chosen_index])
             frames, trace_records, is_success = _replay_episode(
                 env, recorder, actions, episode_index, args.num_steps_wait
             )
@@ -309,6 +408,9 @@ def main() -> None:
             "trace_artifacts": artifacts,
         }
     out.mkdir(parents=True, exist_ok=True)
+    if mapping_report:
+        with (out / "init_mapping_report.json").open("w", encoding="utf-8") as file:
+            json.dump(mapping_report, file, indent=2)
     with (out / "replay_summary.json").open("w", encoding="utf-8") as file:
         json.dump(summary, file, indent=2, ensure_ascii=False)
     logger.info("replay summary: %s", json.dumps(summary["tasks"], ensure_ascii=False))
