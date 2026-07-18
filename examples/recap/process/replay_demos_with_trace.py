@@ -30,6 +30,7 @@ from collections import defaultdict
 import json
 import logging
 from pathlib import Path
+import shutil
 import sys
 from typing import Any
 
@@ -167,8 +168,6 @@ def main() -> None:
     if out.exists():
         if not args.overwrite:
             raise FileExistsError(f"output exists: {out}; use --overwrite")
-        import shutil
-
         shutil.rmtree(out)
 
     episodes = _read_jsonl(dataset / "meta" / "episodes.jsonl")
