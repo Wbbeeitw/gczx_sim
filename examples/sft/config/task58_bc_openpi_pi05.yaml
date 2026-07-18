@@ -49,6 +49,10 @@ actor:
       config_name: "pi05_libero"
       detach_critic_input: True
       num_images_in_input: 2
+      # Full-parameter FT. The inherited pi0_5 default train_expert_only=True
+      # freezes the VLM; frozen+trainable params under FSDP flat params
+      # (use_orig_params: False) hit a view/inplace autograd error on torch 2.7.
+      train_expert_only: False
 
   optim:
     lr: 1.0e-5

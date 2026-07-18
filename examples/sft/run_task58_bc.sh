@@ -8,4 +8,5 @@ export EMBODIED_PATH=/workspace/RLinf/examples/embodiment
 export REPO_PATH=/workspace/RLinf
 export PYTHONPATH=/workspace/RLinf
 unset RAY_ADDRESS
-exec python examples/sft/train_vla_sft.py --config-name task58_bc_openpi_pi05
+set -o pipefail
+python examples/sft/train_vla_sft.py --config-name task58_bc_openpi_pi05 2>&1 | tee /workspace/results/boost_sft/task58_bc_driver.log
