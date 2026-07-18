@@ -374,12 +374,12 @@ def main() -> None:
 
     writer.finalize()
     staging_dir = out.parent / f"{out.name}_trace_staging"
-    for staged_file in sorted(staging_dir.rglob("*")):
+    staging_meta = staging_dir / "meta"
+    for staged_file in sorted(staging_meta.rglob("*")):
         if staged_file.is_file():
-            shutil.copy2(
-                staged_file,
-                out / "meta" / staged_file.relative_to(staging_dir),
-            )
+            target = out / "meta" / staged_file.relative_to(staging_meta)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(staged_file, target)
     for (
         writer_fn,
         trace_name,
@@ -392,7 +392,7 @@ def main() -> None:
         successes,
     ) in pending_artifacts:
         artifacts = {
-            key: str(out / "meta" / Path(value).relative_to(staging_dir))
+            key: str(out / "meta" / Path(value).relative_to(staging_dir / "meta"))
             for key, value in writer_fn(
                 staging_dir,
                 task_trace_records,
