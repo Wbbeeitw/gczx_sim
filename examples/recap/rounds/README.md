@@ -1,6 +1,7 @@
 # Iterated ReCap rounds
 
-`run_round.py` turns one pinned YAML file into a resumable LIBERO round:
+`run_round.py` turns one reusable baseline YAML plus command-line overrides
+into a resumable LIBERO round:
 
 ```text
 collect -> human audit -> fit critic -> export child view -> train -> evaluate
@@ -21,8 +22,8 @@ container:
 cd /workspace/RLinf
 source switch_env openpi
 
-TASKS="0 1 2 3 4 5 6 7 8 9" NUM_EPISODES=1 \
-OUTPUT_ROOT=/data/libero_long/smk_test/d0_step450_all10_1ep \
+CHECKPOINT="" TASKS="0 1 2 3 4 5 6 7 8 9" NUM_EPISODES=1 \
+OUTPUT_ROOT=/data/libero_long/smk_test/d0_base_all10_1ep \
 bash examples/recap/rounds/collect_d0.sh smoke
 ```
 
@@ -89,11 +90,13 @@ metrics. Formal runs must collect at least two episodes per task and set
 `revalue.allow_single_episode_overlap=false` so train and validation episodes
 remain disjoint.
 
-After the smoke passes, collect the normal 10-task D0 pool sequentially on one
-healthy GPU:
+After the smoke passes, collect the normal Base-policy D0 pool. The command
+keeps exactly 40 raw rollout episodes per task; weak-task expert replacement is
+performed in a separate materialization step:
 
 ```bash
-OUTPUT_ROOT=/data/libero_long/d0_step450_40ep \
+CHECKPOINT="" NUM_EPISODES=40 NUM_ENVS=1 \
+OUTPUT_ROOT=/data/libero_long/d0_base_raw_40ep \
 bash examples/recap/rounds/collect_d0.sh batch
 ```
 
@@ -114,44 +117,255 @@ bash examples/recap/rounds/collect_d0.sh smoke
 ```bash
 python examples/recap/process/validate_libero_rollout_collection.py \
   --expected-episodes 40 \
-  /data/libero_long/d0_step450_40ep/task*_40ep
+  /data/libero_long/d0_base_raw_40ep/task*_40ep
 ```
 
-## Run Round 2
+## Fixed 40-episode Round-1 pools
 
-Inside the RLinf OpenPI container:
+Build the actual Round-1 training pool only after reviewing the raw success
+counts. Every rollout success is preserved. Expert slices replace the
+lowest-value failures, ranked by maximum phase and progress, and every output
+task remains exactly 40 episodes. The example below inserts 15 task5 demos and
+9 task8 demos from the validated shared replay dataset; adjust only those
+slices if the observed Base success distribution calls for a different mix:
+
+```bash
+cd /workspace/RLinf
+source switch_env openpi
+
+python examples/recap/process/build_fixed_multitask_train_pools.py \
+  --tasks task0 task1 task2 task3 task4 task5 task6 task7 task8 task9 \
+  --rollout-pattern '/data/libero_long/d0_base_raw_40ep/{task}_40ep' \
+  --output-pattern '/data/libero_long/d0_base_fixed_40ep/{task}_40ep' \
+  --episodes-per-task 40 \
+  --expert 'task5=/data/libero_long/libero_task58_replayed_merged::0:15' \
+  --expert 'task8=/data/libero_long/libero_task58_replayed_merged::41:50' \
+  --report-path /data/libero_long/d0_base_fixed_40ep/fixed_pool_report.json
+```
+
+The builder refuses to overwrite an existing output by default. Each fixed
+dataset writes `meta/episode_provenance.jsonl`; D1 uses it to report rollout
+versus expert frame counts and the fraction selected by per-task top-30%
+fused advantage.
+
+## D-stage smoke test
+
+The following command runs the smallest complete C-to-D loop from the original
+SFT Base: one episode per task, two Value steps, two policy steps, and one
+evaluation trajectory per task. Every smoke artifact path contains
+`smk_test`. It uses the existing baseline YAML only for stable model defaults;
+all round-specific paths, stages, tags, steps, batches, and result labels are
+command-line overrides.
 
 ```bash
 cd /workspace/RLinf
 source switch_env openpi
 
 python examples/recap/rounds/run_round.py \
-  --config examples/recap/rounds/config/task1_iter02_prcfg.yaml \
-  --stage all
+  --config examples/recap/rounds/config/multitask_smoke_demos_prcfg.yaml \
+  --stage all \
+  --set 'pipeline=["fit_critic_multitask","task_heads","predict_multitask","export_multitask","train_policy","eval_policy"]' \
+  --set 'tasks=["task0","task1","task2","task3","task4","task5","task6","task7","task8","task9"]' \
+  --set 'demo_datasets={}' \
+  --set paths.base_model=/workspace/models/RLinf-Pi05-LIBERO-SFT \
+  --set paths.parent_dataset=/data/libero_long/smk_test/d_round1/unused_parent \
+  --set 'paths.child_pattern=/data/libero_long/smk_test/d0_base_all10_1ep/{task}_1ep' \
+  --set paths.merged_dataset=/data/libero_long/smk_test/d_round1/merged_10ep \
+  --set paths.exp_root=/workspace/RLinf/persistent_results/smk_test/d_round1/exp \
+  --set paths.results_root=/workspace/RLinf/persistent_results/smk_test/d_round1/checkpoints \
+  --set parent_policy.checkpoint='' \
+  --set parent_policy.label=SFT-Base \
+  --set collect.num_episodes=1 \
+  --set tags.returns=smk_test_d0_returns \
+  --set tags.merged_base=smk_test_d0_base \
+  --set tags.child_fused=smk_test_d0_fused \
+  --set returns.num_workers=2 \
+  --set value.steps=2 \
+  --set value.save_interval=2 \
+  --set value.micro_batch_size=1 \
+  --set value.global_batch_size=8 \
+  --set value.lr_warmup_steps=1 \
+  --set revalue.extract_batch_size=1 \
+  --set revalue.train_batch_size=16 \
+  --set revalue.zp_max_epochs=1 \
+  --set revalue.zp_early_stop_patience=1 \
+  --set revalue.fusion_max_epochs=1 \
+  --set revalue.fusion_early_stop_patience=1 \
+  --set revalue.task_val_episode_ratio=0.2 \
+  --set revalue.allow_single_episode_overlap=true \
+  --set policy.strategy=csa_residual \
+  --set policy.guidance_type=positive \
+  --set policy.positive_only_conditional=false \
+  --set policy.guidance_scale=1.0 \
+  --set policy.negative_guidance_scale=0.0 \
+  --set policy.positive_residual_alpha=0.5 \
+  --set policy.positive_quantile=0.3 \
+  --set policy.unconditional_prob=0.1 \
+  --set policy.csa_bottom_quantile=0.15 \
+  --set policy.csa_bottom_negative_prob=0.5 \
+  --set policy.csa_positive_prompt_prob=0.85 \
+  --set policy.csa_weight_lambda=0.2 \
+  --set policy.max_steps=2 \
+  --set policy.save_interval=2 \
+  --set policy.lr_warmup_steps=1 \
+  --set policy.global_batch_size=8 \
+  --set policy.micro_batch_size=1 \
+  --set 'policy.extra_overrides=["actor.model.openpi.train_expert_only=false","actor.fsdp_config.use_orig_params=true"]' \
+  --set eval.eval_rollout_epoch=1 \
+  --set eval.total_num_envs=1 \
+  --set eval.warmup_before_env=true \
+  --set eval.save_video=false \
+  --set results.enabled=true \
+  --set results.round_index=1 \
+  --set results.policy_label=Policy1-smk-test \
+  --set results.critic_label=Value1-smk-test \
+  --set results.output_dir=/workspace/RLinf/persistent_results/smk_test/d_round1/results \
+  --set results.output_name=round1_smk_test
 ```
 
-The first invocation collects the new rollouts, renders the requested phase
-visualizations, and stops. Review `collection_summary.json`, the simulator
-semantic trace, its audit CSV, and the visualizations. Then resume with the
-same command plus the audit confirmation:
+Append `--dry-run` first to inspect all generated commands. The eval stage is
+strictly sequential across task0--task9. Each task uses the requested env count
+independently; the orchestrator forces `actor.model.add_value_head=false`, fixed
+ordered reset states, and video off.
+
+## Formal Round 1 C-to-D
+
+B collection and fixed-pool materialization happen outside the orchestrator.
+The formal command therefore begins at C and trains Policy1 for 500 steps from
+the original Base. D1 computes an independent top-30% threshold for every
+task, D2 jointly trains on all ten 40-episode datasets, D3 evaluates each task
+with `10 envs x 5 epochs = 50 trajectories`, and D4 records the four policy
+metrics plus Critic diagnostics and macro/micro aggregates.
 
 ```bash
+cd /workspace/RLinf
+source switch_env openpi
+
 python examples/recap/rounds/run_round.py \
-  --config examples/recap/rounds/config/task1_iter02_prcfg.yaml \
+  --config examples/recap/rounds/config/multitask_round1_prcfg.yaml \
   --stage all \
-  --confirm-audit
+  --set 'pipeline=["fit_critic_multitask","task_heads","predict_multitask","export_multitask","train_policy","eval_policy"]' \
+  --set 'paths.child_pattern=/data/libero_long/d0_base_fixed_40ep/{task}_40ep' \
+  --set paths.merged_dataset=/data/libero_long/multitask_d0_base_fixed_400ep \
+  --set paths.exp_root=/workspace/RLinf/persistent_results/round1_base_prcfg/exp \
+  --set paths.results_root=/workspace/RLinf/persistent_results/round1_base_prcfg/checkpoints \
+  --set parent_policy.checkpoint='' \
+  --set parent_policy.label=SFT-Base \
+  --set collect.num_episodes=40 \
+  --set tags.returns=round1_base_returns \
+  --set tags.merged_base=round1_base_adv \
+  --set tags.child_fused=round1_fused_top30 \
+  --set value.steps=1200 \
+  --set value.save_interval=600 \
+  --set policy.strategy=csa_residual \
+  --set policy.guidance_type=positive \
+  --set policy.positive_only_conditional=false \
+  --set policy.guidance_scale=1.0 \
+  --set policy.negative_guidance_scale=0.0 \
+  --set policy.positive_residual_alpha=0.5 \
+  --set policy.positive_quantile=0.3 \
+  --set policy.unconditional_prob=0.1 \
+  --set policy.csa_bottom_quantile=0.15 \
+  --set policy.csa_bottom_negative_prob=0.5 \
+  --set policy.csa_positive_prompt_prob=0.85 \
+  --set policy.csa_weight_lambda=0.2 \
+  --set policy.max_steps=500 \
+  --set policy.save_interval=500 \
+  --set policy.lr_warmup_steps=50 \
+  --set policy.global_batch_size=64 \
+  --set policy.micro_batch_size=8 \
+  --set 'policy.extra_overrides=["actor.model.openpi.train_expert_only=false","actor.fsdp_config.use_orig_params=true"]' \
+  --set eval.eval_rollout_epoch=5 \
+  --set eval.total_num_envs=10 \
+  --set eval.warmup_before_env=true \
+  --set eval.save_video=false \
+  --set results.enabled=true \
+  --set results.round_index=1 \
+  --set results.policy_label=Policy1-PR-CFG \
+  --set results.critic_label=Value1-fused \
+  --set results.output_dir=/workspace/RLinf/persistent_results/round1_base_prcfg/results \
+  --set results.output_name=round1_policy1_value1
 ```
 
-The second invocation skips current steps and runs the remaining critic,
-policy-data export, policy training, evaluation, and result-recording steps.
-Each step has its own command fingerprint and report, so changing a relevant
-YAML value invalidates only the affected stage instead of silently accepting
-an existing file.
+## Round 2 cumulative Critic and fresh-only Policy
 
-The final result JSON exposes three primary experiment metrics under
-`primary_metrics`: fused critic frame MAE, policy success rate, and mean ACT of
-successful episodes. Phase/progress and fusion validation metrics remain in
-the same record as diagnostic metrics.
+Round 2 rolls out Policy1 for 40 fresh episodes per task. The Critic pool is
+cumulative (`D0 40 + R1 40 = 80/task`), while Policy2 trains only on the fresh
+R1 range (`40/task`) and initializes from Policy1. The first invocation below
+stops after collection for the audit gate:
+
+```bash
+cd /workspace/RLinf
+source switch_env openpi
+
+POLICY1=/workspace/RLinf/persistent_results/round1_base_prcfg/checkpoints/policy/policy1_prcfg/checkpoints/global_step_500/actor/model_state_dict/full_weights.pt
+
+python examples/recap/rounds/run_round.py \
+  --config examples/recap/rounds/config/multitask_round1_prcfg.yaml \
+  --stage all \
+  --set round_id=2 \
+  --set 'pipeline=["collect_multitask","build_multitask_critic_pool","fit_critic_multitask","task_heads","predict_multitask","export_multitask","train_policy","eval_policy"]' \
+  --set 'paths.parent_pattern=/data/libero_long/d0_base_fixed_40ep/{task}_40ep' \
+  --set 'paths.child_pattern=/data/libero_long/round2_policy1_raw_40ep/{task}_40ep' \
+  --set 'paths.policy_pattern=/data/libero_long/round2_policy1_raw_40ep/{task}_40ep' \
+  --set 'paths.critic_pattern=/data/libero_long/round2_critic80/{task}_80ep' \
+  --set paths.merged_dataset=/data/libero_long/round2_critic_pool_800ep \
+  --set paths.exp_root=/workspace/RLinf/persistent_results/round2_policy1_prcfg/exp \
+  --set paths.results_root=/workspace/RLinf/persistent_results/round2_policy1_prcfg/checkpoints \
+  --set datasets.parent_episodes_per_task=40 \
+  --set parent_policy.checkpoint="$POLICY1" \
+  --set parent_policy.label=Policy1-PR-CFG \
+  --set collect.num_episodes=40 \
+  --set collect.visualize=false \
+  --set tags.returns=round2_cumulative_returns \
+  --set tags.merged_base=round2_cumulative_base \
+  --set tags.child_fused=round2_fresh_fused_top30 \
+  --set value.steps=1200 \
+  --set value.save_interval=600 \
+  --set policy.strategy=csa_residual \
+  --set policy.guidance_type=positive \
+  --set policy.positive_only_conditional=false \
+  --set policy.guidance_scale=1.0 \
+  --set policy.negative_guidance_scale=0.0 \
+  --set policy.positive_residual_alpha=0.5 \
+  --set policy.positive_quantile=0.3 \
+  --set policy.unconditional_prob=0.1 \
+  --set policy.csa_bottom_quantile=0.15 \
+  --set policy.csa_bottom_negative_prob=0.5 \
+  --set policy.csa_positive_prompt_prob=0.85 \
+  --set policy.csa_weight_lambda=0.2 \
+  --set policy.max_steps=500 \
+  --set policy.save_interval=500 \
+  --set policy.lr_warmup_steps=50 \
+  --set policy.global_batch_size=64 \
+  --set policy.micro_batch_size=8 \
+  --set 'policy.extra_overrides=["actor.model.openpi.train_expert_only=false","actor.fsdp_config.use_orig_params=true"]' \
+  --set eval.eval_rollout_epoch=5 \
+  --set eval.total_num_envs=10 \
+  --set eval.warmup_before_env=true \
+  --set eval.save_video=false \
+  --set results.enabled=true \
+  --set results.round_index=2 \
+  --set results.policy_label=Policy2-PR-CFG \
+  --set results.critic_label=Value2-fused \
+  --set results.output_dir=/workspace/RLinf/persistent_results/round2_policy1_prcfg/results \
+  --set results.output_name=round2_policy2_value2
+```
+
+After auditing the ten new datasets, repeat the identical command with
+`--confirm-audit`. The `build_multitask_critic_pool` stage then materializes
+80 episodes per task. D1 slices episodes 40--79 from each task's cumulative
+range back onto the fresh dataset, so Policy2 never retrains on D0.
+
+Each step has its own command fingerprint and report. Changing a CLI override
+invalidates only the affected stage instead of silently accepting an existing
+artifact.
+
+The final result JSON and CSV preserve the four policy metrics per task:
+`success_rate`, `success_episode_act_mean`, `success_episode_act_std`, and
+`num_trajectories`. The JSON also records macro/micro success rates, pooled
+successful-episode action statistics, fused Critic frame MAE, per-task z/p and
+fusion validation metrics, and policy-data source statistics.
 
 Within `fit_critic`, execution remains strictly ordered: returns and Value
 training finish first, then frozen Value/VLM features and base advantages are
@@ -178,9 +392,10 @@ requires `--overwrite-datasets`; verify the YAML paths before using it.
 
 ## Later CFG/FACD rounds
 
-Clone the previous YAML and update all round-specific paths, tags, episode
-counts, parent checkpoint, and result labels. Training, collection, and
-evaluation expose the same CFG controls:
+Reuse the same baseline YAML and update round-specific paths, tags, episode
+counts, parent checkpoint, and result labels with `--set`; do not clone a YAML
+for each round. Training, collection, and evaluation expose the same CFG
+controls:
 
 ```yaml
 policy:

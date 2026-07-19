@@ -76,6 +76,7 @@ KNOWN_STAGES = [
     "build_child_base",
     "export_bootstrap",
     "collect_multitask",
+    "build_multitask_critic_pool",
     "fit_critic_multitask",
     "task_heads",
     "predict_multitask",
@@ -95,9 +96,13 @@ def _stage_dependencies(ctx: dict, stage: str) -> list[str]:
 def _audit_gate_stage(ctx: dict) -> str | None:
     """First stage after collect; it requires the human audit confirmation."""
     pipeline = ctx["pipeline"]
-    if "collect" not in pipeline:
+    collect_stage = next(
+        (stage for stage in ("collect", "collect_multitask") if stage in pipeline),
+        None,
+    )
+    if collect_stage is None:
         return None
-    index = pipeline.index("collect")
+    index = pipeline.index(collect_stage)
     if index + 1 < len(pipeline):
         return pipeline[index + 1]
     return None
@@ -203,6 +208,14 @@ def _normalize_demo_dataset(task: str, value: Any) -> dict[str, Any]:
     }
 
 
+def _episode_count(dataset_path: str) -> int | None:
+    episodes_path = Path(dataset_path) / "meta" / "episodes.jsonl"
+    if not episodes_path.exists():
+        return None
+    with episodes_path.open("r", encoding="utf-8") as file:
+        return sum(1 for line in file if line.strip())
+
+
 def _apply_overrides(cfg: dict, overrides: list[str]) -> dict:
     """Apply ``--set key=value`` overrides onto the round config.
 
@@ -277,7 +290,12 @@ def _build_ctx(cfg: dict) -> dict[str, Any]:
         merged_ds = child_ds
     tasks = [str(task) for task in (_get(cfg, "tasks") or [])]
     task_datasets: dict[str, str] = {}
+    policy_task_datasets: dict[str, str] = {}
+    parent_task_datasets: dict[str, str] = {}
     task_ranges: dict[str, tuple[int, int]] = {}
+    policy_task_ranges: dict[str, tuple[int, int]] = {}
+    task_episode_counts: dict[str, int] = {}
+    policy_episode_counts: dict[str, int] = {}
     demo_counts: dict[str, int] = {}
     normalized_demo_cfg: dict[str, dict[str, Any]] = {}
     if not tasks and not child_ds:
@@ -286,20 +304,44 @@ def _build_ctx(cfg: dict) -> dict[str, Any]:
         child_pattern = _get(cfg, "paths.child_pattern")
         if not child_pattern:
             raise ValueError("paths.child_pattern is required when tasks: is set")
+        policy_pattern = _get(cfg, "paths.policy_pattern") or child_pattern
+        critic_pattern = _get(cfg, "paths.critic_pattern")
+        parent_pattern = _get(cfg, "paths.parent_pattern")
+        if critic_pattern and not parent_pattern:
+            raise ValueError(
+                "paths.parent_pattern is required when paths.critic_pattern is set"
+            )
         demo_cfg = _get(cfg, "demo_datasets") or {}
+        if critic_pattern and demo_cfg:
+            raise ValueError(
+                "demo_datasets cannot be combined with paths.critic_pattern; "
+                "materialize demos into the fixed per-task parent pool first"
+            )
         start = 0
         configured_per_task = int(_get(cfg, "collect.num_episodes"))
+        configured_parent_per_task = int(
+            _get(cfg, "datasets.parent_episodes_per_task", 0)
+        )
         for task in tasks:
-            task_datasets[task] = str(child_pattern).format(task=task)
-            child_meta = (
-                Path(task_datasets[task]) / "meta" / "episodes.jsonl"
+            policy_task_datasets[task] = str(policy_pattern).format(task=task)
+            if parent_pattern:
+                parent_task_datasets[task] = str(parent_pattern).format(task=task)
+            task_datasets[task] = str(
+                critic_pattern or child_pattern
+            ).format(task=task)
+
+            policy_count = (
+                _episode_count(policy_task_datasets[task]) or configured_per_task
             )
-            per_task = configured_per_task
-            if child_meta.exists():
-                per_task = sum(
-                    1
-                    for _ in open(child_meta, "r", encoding="utf-8")
-                    if _.strip()
+            parent_count = configured_parent_per_task
+            if task in parent_task_datasets:
+                parent_count = (
+                    _episode_count(parent_task_datasets[task]) or parent_count
+                )
+            critic_count = _episode_count(task_datasets[task])
+            if critic_count is None:
+                critic_count = (
+                    parent_count + policy_count if critic_pattern else policy_count
                 )
             demo_path = demo_cfg.get(task)
             demo_count = 0
@@ -308,8 +350,21 @@ def _build_ctx(cfg: dict) -> dict[str, Any]:
                 normalized_demo_cfg[task] = normalized_demo
                 demo_count = int(normalized_demo["episodes"])
             demo_counts[task] = demo_count
-            task_ranges[task] = (start, start + per_task + demo_count)
-            start += per_task + demo_count
+            critic_count += demo_count
+            if parent_count + policy_count > critic_count:
+                raise ValueError(
+                    f"{task}: parent episodes ({parent_count}) + policy episodes "
+                    f"({policy_count}) exceed critic episodes ({critic_count})"
+                )
+            task_episode_counts[task] = critic_count
+            policy_episode_counts[task] = policy_count
+            task_ranges[task] = (start, start + critic_count)
+            policy_start = start + parent_count
+            policy_task_ranges[task] = (
+                policy_start,
+                policy_start + policy_count,
+            )
+            start += critic_count
         merged_episodes = start
     parent_episodes = int(_require(cfg, "datasets.parent_episodes"))
     child_episodes = int(_get(cfg, "collect.num_episodes"))
@@ -351,7 +406,12 @@ def _build_ctx(cfg: dict) -> dict[str, Any]:
         "bootstrap": bootstrap,
         "tasks": tasks,
         "task_datasets": task_datasets,
+        "policy_task_datasets": policy_task_datasets,
+        "parent_task_datasets": parent_task_datasets,
         "task_ranges": task_ranges,
+        "policy_task_ranges": policy_task_ranges,
+        "task_episode_counts": task_episode_counts,
+        "policy_episode_counts": policy_episode_counts,
         "demo_datasets": normalized_demo_cfg,
         "multitask": bool(tasks),
         "base_model": str(_require(cfg, "paths.base_model")),
@@ -389,8 +449,14 @@ def _build_ctx(cfg: dict) -> dict[str, Any]:
     )
     ctx["child_fused_adv"] = (
         f"{child_ds}/meta/advantages_{ctx['child_fused_tag']}.parquet"
+        if child_ds
+        else ""
     )
-    ctx["child_manifest"] = f"{ctx['policy_data_root']}/episode_manifest.json"
+    ctx["child_manifest"] = (
+        f"{ctx['policy_data_root']}/multitask_episode_manifest.json"
+        if tasks
+        else f"{ctx['policy_data_root']}/episode_manifest.json"
+    )
     return ctx
 
 
@@ -438,6 +504,27 @@ def _value_model_overrides(ctx: dict, checkpoint: str | None) -> list[str]:
 
 def _list_override(key: str, values: list[str]) -> str:
     return f"{key}=[{','.join(json.dumps(str(v)) for v in values)}]"
+
+
+def _hydra_container_value(value: Any) -> str:
+    if isinstance(value, dict):
+        return "{" + ",".join(
+            f"{key}:{_hydra_container_value(item)}"
+            for key, item in value.items()
+        ) + "}"
+    if isinstance(value, list):
+        return "[" + ",".join(_hydra_container_value(item) for item in value) + "]"
+    if isinstance(value, str):
+        return json.dumps(value)
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return str(value).lower()
+    return str(value)
+
+
+def _json_override(key: str, value: Any) -> str:
+    return f"{key}={_hydra_container_value(value)}"
 
 
 def _steps_collect(ctx: dict) -> list[Step]:
@@ -763,7 +850,9 @@ def _steps_fit_critic(ctx: dict) -> list[Step]:
 def _step_prepare_child_manifest(ctx: dict) -> Step:
     revalue = ctx["cfg"].get("revalue", {})
     policy_data_root = ctx["policy_data_root"]
-    manifest_dataset = ctx["merged_ds"] if ctx.get("multitask") else ctx["child_ds"]
+    manifest_dataset = (
+        ctx["merged_ds"] if ctx.get("multitask") else ctx["child_ds"]
+    )
     return Step(
         name="prepare_child_manifest",
         argv=_revalue_entry(
@@ -888,9 +977,27 @@ def _steps_export_policy_data(ctx: dict) -> list[Step]:
 def _steps_train_policy(ctx: dict) -> list[Step]:
     cfg = ctx["cfg"]
     policy = cfg.get("policy", {})
+    policy_dataset = ctx["child_ds"]
+    extra_overrides = list(policy.get("extra_overrides", []))
+    if ctx.get("multitask"):
+        policy_dataset = ctx["policy_task_datasets"][ctx["tasks"][0]]
+        train_data_paths = [
+            {
+                "dataset_path": ctx["policy_task_datasets"][task],
+                "type": "rollout",
+                "weight": 1.0,
+            }
+            for task in ctx["tasks"]
+        ]
+        extra_overrides.extend(
+            [
+                _json_override("data.train_data_paths", train_data_paths),
+                "data.balance_dataset_weights=false",
+            ]
+        )
     overrides = [
         "cfg_train.enabled=true",
-        f"cfg_train.dataset_path={ctx['child_ds']}",
+        f"cfg_train.dataset_path={policy_dataset}",
         f"cfg_train.base_model_path={ctx['base_model']}",
         f"cfg_train.advantage_tag={ctx['child_fused_tag']}",
         f"cfg_train.episode_split_path={ctx['child_manifest']}",
@@ -921,7 +1028,7 @@ def _steps_train_policy(ctx: dict) -> list[Step]:
         f"cfg_train.global_batch_size={policy.get('global_batch_size')}",
         f"cfg_train.micro_batch_size={policy.get('micro_batch_size')}",
         _list_override(
-            "cfg_train.extra_overrides", policy.get("extra_overrides", [])
+            "cfg_train.extra_overrides", extra_overrides
         ),
         f"output.root={ctx['revalue_root']}",
     ]
@@ -945,48 +1052,121 @@ def _steps_eval_policy(ctx: dict) -> list[Step]:
     default_guidance = policy.get("guidance_type", "positive")
     default_neg_scale = policy.get("negative_guidance_scale", 0.0)
     results = cfg.get("results", {})
-    steps = [
-        Step(
-            name="eval_policy",
-            argv=_revalue_entry(
-                "eval_policy",
-                [
-                    "policy_eval.enabled=true",
-                    f"policy_eval.model_path={ctx['base_model']}",
-                    "policy_eval.model_type=cfg_model",
-                    f"policy_eval.checkpoint_path={ctx['policy_ckpt']}",
-                    f"policy_eval.experiment_name={ctx['eval_exp']}",
-                    f"policy_eval.log_dir={ctx['exp_root']}/eval",
-                    "policy_eval.config_name=libero_10_pi05_sft_eval",
-                    "policy_eval.openpi_config_name="
-                    f"{_get(cfg, 'collect.openpi_config_name')}",
-                    "policy_eval.guidance_type="
-                    f"{eval_cfg.get('guidance_type', default_guidance)}",
-                    "policy_eval.positive_only_conditional="
-                    f"{eval_cfg.get('positive_only_conditional', True)}",
-                    "policy_eval.negative_guidance_scale="
-                    f"{eval_cfg.get('negative_guidance_scale', default_neg_scale)}",
-                    "policy_eval.warmup_before_env="
-                    f"{eval_cfg.get('warmup_before_env', True)}",
-                    _list_override(
-                        "policy_eval.extra_overrides",
+    task_ids = (
+        [(task, int(task.removeprefix("task"))) for task in ctx["tasks"]]
+        if ctx["multitask"]
+        else [(ctx["task"], ctx["task_id"])]
+    )
+    eval_summaries: dict[str, str] = {}
+    steps: list[Step] = []
+    for task, task_id in task_ids:
+        log_dir = (
+            f"{ctx['exp_root']}/eval/{task}"
+            if ctx["multitask"]
+            else f"{ctx['exp_root']}/eval"
+        )
+        experiment_name = (
+            f"{ctx['eval_exp']}_{task}" if ctx["multitask"] else ctx["eval_exp"]
+        )
+        summary_path = f"{log_dir}/eval_policy_summary.json"
+        eval_summaries[task] = summary_path
+        steps.append(
+            Step(
+                name=f"eval_policy_{task}" if ctx["multitask"] else "eval_policy",
+                argv=_revalue_entry(
+                    "eval_policy",
+                    [
+                        "policy_eval.enabled=true",
+                        f"policy_eval.model_path={ctx['base_model']}",
+                        "policy_eval.model_type=cfg_model",
+                        f"policy_eval.checkpoint_path={ctx['policy_ckpt']}",
+                        f"policy_eval.experiment_name={experiment_name}",
+                        f"policy_eval.log_dir={log_dir}",
+                        "policy_eval.config_name=libero_10_pi05_sft_eval",
+                        "policy_eval.openpi_config_name="
+                        f"{_get(cfg, 'collect.openpi_config_name')}",
+                        "policy_eval.guidance_type="
+                        f"{eval_cfg.get('guidance_type', default_guidance)}",
+                        "policy_eval.positive_only_conditional="
+                        f"{eval_cfg.get('positive_only_conditional', True)}",
+                        "policy_eval.negative_guidance_scale="
+                        f"{eval_cfg.get('negative_guidance_scale', default_neg_scale)}",
+                        "policy_eval.warmup_before_env="
+                        f"{eval_cfg.get('warmup_before_env', True)}",
+                        _list_override(
+                            "policy_eval.extra_overrides",
+                            [
+                                "+actor.model.openpi.cfgrl_guidance_scale="
+                                f"{eval_cfg.get('guidance_scale', 1.0)}",
+                                "actor.model.add_value_head=false",
+                                "env.eval.is_eval=true",
+                                "env.eval.use_fixed_reset_state_ids=true",
+                                "+env.eval.use_ordered_reset_state_ids=true",
+                                "env.eval.video_cfg.save_video=false",
+                            ],
+                        ),
+                        "policy_eval.eval_rollout_epoch="
+                        f"{eval_cfg['eval_rollout_epoch']}",
+                        f"policy_eval.total_num_envs={eval_cfg['total_num_envs']}",
+                        f"policy_eval.task_suite_name={ctx['task_suite_name']}",
+                        f"policy_eval.task_id_filter=[{task_id}]",
+                        f"policy_eval.save_video={eval_cfg.get('save_video', False)}",
+                        f"output.root={ctx['revalue_root']}",
+                    ],
+                ),
+                artifacts=[summary_path],
+            )
+        )
+    if results.get("enabled", True):
+        if ctx["multitask"]:
+            policy_data_report = (
+                f"{ctx['policy_data_root']}/multitask_policy_data_report.json"
+            )
+            steps.append(
+                Step(
+                    name="record_multitask_round_results",
+                    argv=_script_entry(
+                        "examples/recap/process/record_multitask_round_results.py",
                         [
-                            "+actor.model.openpi.cfgrl_guidance_scale="
-                            f"{eval_cfg.get('guidance_scale', 1.0)}"
+                            f"--round={results['round_index']}",
+                            f"--policy-label={results['policy_label']}",
+                            f"--critic-label={results['critic_label']}",
+                            f"--checkpoint-path={ctx['policy_ckpt']}",
+                            *[
+                                argument
+                                for task, (start, end) in ctx["task_ranges"].items()
+                                for argument in (
+                                    "--task-range",
+                                    f"{task}={start}:{end}",
+                                )
+                            ],
+                            *[
+                                argument
+                                for task in ctx["tasks"]
+                                for argument in (
+                                    "--eval-summary",
+                                    f"{task}={eval_summaries[task]}",
+                                    "--zp-metrics",
+                                    f"{task}={ctx['revalue_root']}/zp_head/"
+                                    f"{task}/metrics.json",
+                                    "--fusion-metrics",
+                                    f"{task}={ctx['revalue_root']}/fusion/"
+                                    f"{task}/metrics.json",
+                                )
+                            ],
+                            f"--comparison={ctx['comparison']}",
+                            f"--policy-data-report={policy_data_report}",
+                            f"--output-dir={results['output_dir']}",
+                            f"--output-name={results['output_name']}",
                         ],
                     ),
-                    f"policy_eval.eval_rollout_epoch={eval_cfg['eval_rollout_epoch']}",
-                    f"policy_eval.total_num_envs={eval_cfg['total_num_envs']}",
-                    f"policy_eval.task_suite_name={ctx['task_suite_name']}",
-                    f"policy_eval.task_id_filter=[{ctx['task_id']}]",
-                    f"policy_eval.save_video={eval_cfg.get('save_video', False)}",
-                    f"output.root={ctx['revalue_root']}",
-                ],
-            ),
-            artifacts=[f"{ctx['exp_root']}/eval/eval_policy_summary.json"],
-        )
-    ]
-    if results.get("enabled", True):
+                    artifacts=[
+                        f"{results['output_dir']}/{results['output_name']}.json",
+                        f"{results['output_dir']}/{results['output_name']}.csv",
+                    ],
+                )
+            )
+            return steps
         steps.append(
             Step(
                 name="record_round_results",
@@ -1084,7 +1264,7 @@ def _steps_collect_multitask(ctx: dict) -> list[Step]:
     collect = cfg.get("collect", {})
     steps: list[Step] = []
     for task in ctx["tasks"]:
-        dataset = ctx["task_datasets"][task]
+        dataset = ctx["policy_task_datasets"][task]
         task_id = int(task.replace("task", ""))
         overrides = [
             "rollout_collect.enabled=true",
@@ -1151,6 +1331,34 @@ def _steps_collect_multitask(ctx: dict) -> list[Step]:
                     artifacts=[f"{ctx['exp_root']}/collection/visualizations/{task}"],
                 )
             )
+    return steps
+
+
+def _steps_build_multitask_critic_pool(ctx: dict) -> list[Step]:
+    """Merge each task's prior critic pool with its fresh policy rollouts."""
+    if not ctx["parent_task_datasets"]:
+        raise ValueError(
+            "build_multitask_critic_pool requires paths.parent_pattern"
+        )
+    steps: list[Step] = []
+    for task in ctx["tasks"]:
+        output_dataset = ctx["task_datasets"][task]
+        steps.append(
+            Step(
+                name=f"build_critic_pool_{task}",
+                argv=_script_entry(
+                    "examples/recap/process/merge_lerobot_multitask_datasets.py",
+                    [
+                        "--datasets",
+                        ctx["parent_task_datasets"][task],
+                        ctx["policy_task_datasets"][task],
+                        f"--output_dataset={output_dataset}",
+                    ],
+                ),
+                artifacts=[f"{output_dataset}/meta/info.json"],
+                dataset_path=output_dataset,
+            )
+        )
     return steps
 
 
@@ -1332,20 +1540,24 @@ def _steps_export_multitask(ctx: dict) -> list[Step]:
     revalue = cfg.get("revalue", {})
     policy_data_root = ctx["policy_data_root"]
     steps: list[Step] = []
+    manifest_paths: dict[str, str] = {}
     for task in ctx["tasks"]:
-        start, end = ctx["task_ranges"][task]
+        start, end = ctx["policy_task_ranges"][task]
+        policy_dataset = ctx["policy_task_datasets"][task]
+        policy_episodes = ctx["policy_episode_counts"][task]
         task_root = f"{policy_data_root}/{task}"
+        manifest_paths[task] = f"{task_root}/episode_manifest.json"
         steps.append(
             Step(
                 name=f"prepare_manifest_{task}",
                 argv=_revalue_entry(
                     "prepare_data",
                     [
-                        f"data.dataset_path={ctx['task_datasets'][task]}",
+                        f"data.dataset_path={policy_dataset}",
                         "data.label_name="
                         f"phase_progress_semantic_trace_{task}",
                         f"data.seed={revalue.get('seed', 42)}",
-                        f"manifest.num_episodes={ctx['merged_episodes'] if ctx.get('multitask') else ctx['child_episodes']}",
+                        f"manifest.num_episodes={policy_episodes}",
                         "manifest.success_ratio=0.5",
                         "manifest.val_episode_ratio=0.0",
                         "manifest.test_episode_ratio=0.0",
@@ -1358,7 +1570,6 @@ def _steps_export_multitask(ctx: dict) -> list[Step]:
                 artifacts=[f"{task_root}/episode_manifest.json"],
             )
         )
-        fused_tag = f"{task}_d{ctx['round_id'] - 1}_fused_v{ctx['round_id'] - 1}"
         steps.append(
             Step(
                 name=f"export_dataset_view_{task}",
@@ -1369,8 +1580,8 @@ def _steps_export_multitask(ctx: dict) -> list[Step]:
                         f"{ctx['merged_base_adv']}",
                         f"export_view.predictions_path={ctx['predictions']}",
                         "export_view.child_dataset_path="
-                        f"{ctx['task_datasets'][task]}",
-                        f"export_view.output_tag={fused_tag}",
+                        f"{policy_dataset}",
+                        f"export_view.output_tag={ctx['child_fused_tag']}",
                         f"export_view.source_episode_start={start}",
                         f"export_view.source_episode_end={end}",
                         f"export_view.child_episode_offset=-{start}",
@@ -1380,18 +1591,49 @@ def _steps_export_multitask(ctx: dict) -> list[Step]:
                         "export_view.positive_quantile="
                         f"{revalue.get('positive_quantile', 0.3)}",
                         "export_view.discount_next_value=true",
-                        f"export_view.expected_episodes={ctx['child_episodes']}",
+                        f"export_view.expected_episodes={policy_episodes}",
                         f"export_view.report_path={task_root}/export_report.json",
                         f"output.root={task_root}",
                     ],
                 ),
                 artifacts=[
-                    f"{ctx['task_datasets'][task]}/meta/advantages_"
-                    f"{fused_tag}.parquet",
+                    f"{policy_dataset}/meta/advantages_"
+                    f"{ctx['child_fused_tag']}.parquet",
                     f"{task_root}/export_report.json",
                 ],
             )
         )
+    report_path = f"{policy_data_root}/multitask_policy_data_report.json"
+    steps.append(
+        Step(
+            name="summarize_multitask_policy_data",
+            argv=_script_entry(
+                "examples/recap/process/summarize_multitask_policy_data.py",
+                [
+                    *[
+                        argument
+                        for task in ctx["tasks"]
+                        for argument in (
+                            "--task-dataset",
+                            f"{task}={ctx['policy_task_datasets'][task]}",
+                        )
+                    ],
+                    *[
+                        argument
+                        for task in ctx["tasks"]
+                        for argument in (
+                            "--manifest",
+                            f"{task}={manifest_paths[task]}",
+                        )
+                    ],
+                    f"--advantage-tag={ctx['child_fused_tag']}",
+                    f"--report-path={report_path}",
+                    f"--combined-manifest-path={ctx['child_manifest']}",
+                ],
+            ),
+            artifacts=[report_path, ctx["child_manifest"]],
+        )
+    )
     return steps
 
 
@@ -1402,6 +1644,7 @@ _STAGE_BUILDERS = {
     "build_child_base": _steps_build_child_base,
     "export_bootstrap": _steps_export_bootstrap,
     "collect_multitask": _steps_collect_multitask,
+    "build_multitask_critic_pool": _steps_build_multitask_critic_pool,
     "fit_critic_multitask": _steps_fit_critic_multitask,
     "task_heads": _steps_task_heads,
     "predict_multitask": _steps_predict_multitask,
@@ -1481,9 +1724,17 @@ def _execution_step(step: Step, overwrite_datasets: bool) -> Step:
     argv = list(step.argv)
     if overwrite_datasets and step.name.startswith("collect_rollouts"):
         argv.append("rollout_collect.overwrite=true")
-    if overwrite_datasets and step.name == "merge_datasets":
+    if overwrite_datasets and (
+        step.name == "merge_datasets"
+        or step.name.startswith("build_critic_pool_")
+    ):
         argv.append("--overwrite")
-    return Step(name=step.name, argv=argv, artifacts=list(step.artifacts))
+    return Step(
+        name=step.name,
+        argv=argv,
+        artifacts=list(step.artifacts),
+        dataset_path=step.dataset_path,
+    )
 
 
 def _dataset_output_exists(ctx: dict, step: Step) -> bool:
@@ -1825,11 +2076,24 @@ def main() -> None:
     cfg = _apply_overrides(cfg, args.overrides)
     ctx = _build_ctx(cfg)
     if args.stage == "all" and args.confirm_audit:
-        collect_steps = _STAGE_BUILDERS["collect"](ctx)
-        if not _stage_is_current(ctx, "collect", collect_steps):
+        collect_stage = next(
+            (
+                stage
+                for stage in ("collect", "collect_multitask")
+                if stage in ctx["pipeline"]
+            ),
+            None,
+        )
+        if collect_stage is None:
+            raise RuntimeError(
+                "--confirm-audit requires collect or collect_multitask in pipeline"
+            )
+        collect_steps = _STAGE_BUILDERS[collect_stage](ctx)
+        if not _stage_is_current(ctx, collect_stage, collect_steps):
             raise RuntimeError(
                 "--stage all --confirm-audit requires a previously completed "
-                "collect stage; run --stage all once, audit the new rollouts, "
+                f"{collect_stage} stage; run --stage all once, audit the new "
+                "rollouts, "
                 "then repeat the command with --confirm-audit"
             )
     stages = ctx["pipeline"] if args.stage == "all" else [args.stage]
