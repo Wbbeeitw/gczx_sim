@@ -630,6 +630,9 @@ def warmup_libero_rollout_policy(policy, task_description: str) -> None:
                     (1, LIBERO_ENV_RESOLUTION, LIBERO_ENV_RESOLUTION, 3),
                     dtype=torch.uint8,
                 ),
+                # openpi's obs_processor requires the key to exist (None when
+                # unused), mirroring huggingface_worker.py's warmup env_obs.
+                "extra_view_images": None,
                 "states": torch.zeros((1, LIBERO_STATE_DIM), dtype=torch.float32),
                 "task_descriptions": [str(task_description)],
             }
