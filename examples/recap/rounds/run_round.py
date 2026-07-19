@@ -1396,7 +1396,7 @@ def _steps_fit_critic_multitask(ctx: dict) -> list[Step]:
 
 
 def _steps_score_critic_multitask(ctx: dict) -> list[Step]:
-    """Score a multi-task pool with an externally supplied Value model."""
+    """Score an existing multi-task pool with an external Value model."""
     if not ctx["value_ckpt_external"]:
         raise ValueError(
             "score_critic_multitask requires paths.value_checkpoint; use "
@@ -1405,7 +1405,7 @@ def _steps_score_critic_multitask(ctx: dict) -> list[Step]:
     return [
         step
         for step in _steps_fit_critic_multitask(ctx)
-        if step.name != "value_sft"
+        if step.name not in {"merge_datasets", "value_sft"}
     ]
 
 
@@ -2124,6 +2124,14 @@ def run_stage(stage: str, ctx: dict, args: argparse.Namespace) -> None:
     ):
         raise RuntimeError(
             f"value checkpoint not found: {ctx['value_ckpt']}"
+        )
+    if stage == "score_critic_multitask" and not (
+        Path(ctx["merged_ds"]) / "meta" / "info.json"
+    ).exists():
+        raise RuntimeError(
+            "score_critic_multitask requires an existing merged dataset at "
+            f"{ctx['merged_ds']}; run build_multitask_critic_pool first or "
+            "use fit_critic_multitask to build the pool and train Value"
         )
 
     started = datetime.now(timezone.utc).isoformat()

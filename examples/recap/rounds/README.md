@@ -354,11 +354,13 @@ identical and replace the pipeline and checkpoint settings with:
   --set paths.value_checkpoint=/absolute/path/to/value/checkpoint/global_step_N
 ```
 
-`score_critic_multitask` still merges the ten inputs, computes returns,
-extracts Value features, and builds raw advantages. It requires
-`paths.value_checkpoint` and never launches `value_sft`. The same scoring stage
-can also feed the existing fused branch by following it with `task_heads`,
-`predict_multitask`, and `export_multitask`.
+`score_critic_multitask` consumes the existing `paths.merged_dataset`, computes
+returns, extracts Value features, and builds raw advantages. It requires both
+an existing merged dataset (including `meta/info.json`) and
+`paths.value_checkpoint`; it never launches dataset merge or `value_sft`. Run
+`build_multitask_critic_pool` first if the merged dataset has not been built.
+The same scoring stage can also feed the existing fused branch by following it
+with `task_heads`, `predict_multitask`, and `export_multitask`.
 
 ## Round 2 cumulative Critic and fresh-only Policy
 

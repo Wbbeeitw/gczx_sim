@@ -202,7 +202,6 @@ def test_external_value_scores_multitask_pool_without_value_training(
 
     assert "value_sft" not in names
     assert names == [
-        "merge_datasets",
         "compute_returns",
         "prepare_data",
         "extract_features",
