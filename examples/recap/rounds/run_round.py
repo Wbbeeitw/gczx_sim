@@ -152,6 +152,57 @@ def _require(cfg: dict, dotted: str) -> Any:
     return value
 
 
+def _normalize_demo_dataset(task: str, value: Any) -> dict[str, Any]:
+    if isinstance(value, str):
+        path = value
+        start = None
+        end = None
+    elif isinstance(value, dict):
+        path = str(value.get("path") or "")
+        start = value.get("start")
+        end = value.get("end")
+    else:
+        raise ValueError(
+            f"demo_datasets[{task}] must be a path or mapping, got {type(value)!r}"
+        )
+    if not path:
+        raise ValueError(f"demo_datasets[{task}] is missing path")
+    episodes_path = Path(path) / "meta" / "episodes.jsonl"
+    if not episodes_path.exists():
+        raise ValueError(
+            f"demo_datasets[{task}] missing episodes.jsonl: {episodes_path}"
+        )
+    total_episodes = sum(
+        1
+        for line in open(episodes_path, "r", encoding="utf-8")
+        if line.strip()
+    )
+    if start is None and end is None:
+        return {
+            "path": path,
+            "input": path,
+            "episodes": total_episodes,
+        }
+    if start is None or end is None:
+        raise ValueError(
+            f"demo_datasets[{task}] must provide both start and end"
+        )
+    start = int(start)
+    end = int(end)
+    if start < 0 or end <= start or end > total_episodes:
+        raise ValueError(
+            f"demo_datasets[{task}] invalid slice {start}:{end} for "
+            f"total_episodes={total_episodes}"
+        )
+    return {
+        "path": path,
+        "input": f"{path}::{start}:{end}",
+        "episodes": end - start,
+        "start": start,
+        "end": end,
+    }
+
+
 def _apply_overrides(cfg: dict, overrides: list[str]) -> dict:
     """Apply ``--set key=value`` overrides onto the round config.
 
@@ -228,6 +279,7 @@ def _build_ctx(cfg: dict) -> dict[str, Any]:
     task_datasets: dict[str, str] = {}
     task_ranges: dict[str, tuple[int, int]] = {}
     demo_counts: dict[str, int] = {}
+    normalized_demo_cfg: dict[str, dict[str, Any]] = {}
     if not tasks and not child_ds:
         raise ValueError("paths.child_dataset is required for single-task rounds")
     if tasks:
@@ -236,12 +288,13 @@ def _build_ctx(cfg: dict) -> dict[str, Any]:
             raise ValueError("paths.child_pattern is required when tasks: is set")
         demo_cfg = _get(cfg, "demo_datasets") or {}
         start = 0
-        per_task = int(_get(cfg, "collect.num_episodes"))
+        configured_per_task = int(_get(cfg, "collect.num_episodes"))
         for task in tasks:
             task_datasets[task] = str(child_pattern).format(task=task)
             child_meta = (
                 Path(task_datasets[task]) / "meta" / "episodes.jsonl"
             )
+            per_task = configured_per_task
             if child_meta.exists():
                 per_task = sum(
                     1
@@ -251,18 +304,9 @@ def _build_ctx(cfg: dict) -> dict[str, Any]:
             demo_path = demo_cfg.get(task)
             demo_count = 0
             if demo_path:
-                demo_meta = (
-                    Path(demo_path) / "meta" / "episodes.jsonl"
-                )
-                if not demo_meta.exists():
-                    raise ValueError(
-                        f"demo_datasets[{task}] missing episodes.jsonl: {demo_meta}"
-                    )
-                demo_count = sum(
-                    1
-                    for _ in open(demo_meta, "r", encoding="utf-8")
-                    if _.strip()
-                )
+                normalized_demo = _normalize_demo_dataset(task, demo_path)
+                normalized_demo_cfg[task] = normalized_demo
+                demo_count = int(normalized_demo["episodes"])
             demo_counts[task] = demo_count
             task_ranges[task] = (start, start + per_task + demo_count)
             start += per_task + demo_count
@@ -308,7 +352,7 @@ def _build_ctx(cfg: dict) -> dict[str, Any]:
         "tasks": tasks,
         "task_datasets": task_datasets,
         "task_ranges": task_ranges,
-        "demo_datasets": demo_cfg if tasks else {},
+        "demo_datasets": normalized_demo_cfg,
         "multitask": bool(tasks),
         "base_model": str(_require(cfg, "paths.base_model")),
         "parent_checkpoint": str(_get(cfg, "parent_policy.checkpoint") or ""),
@@ -1015,7 +1059,7 @@ def _step_merge_multitask(ctx: dict) -> Step:
     for task in ctx["tasks"]:
         inputs.append(ctx["task_datasets"][task])
         if task in demo_cfg:
-            inputs.append(demo_cfg[task])
+            inputs.append(demo_cfg[task]["input"])
     return Step(
         name="merge_datasets",
         argv=_script_entry(
@@ -1117,6 +1161,27 @@ def _steps_fit_critic_multitask(ctx: dict) -> list[Step]:
     return critic_steps
 
 
+def _task_feature_split_args(ctx: dict) -> list[str]:
+    cfg = ctx["cfg"]
+    revalue = cfg.get("revalue", {})
+    revalue_root = ctx["revalue_root"]
+    split_args = [
+        f"--features_dir={revalue_root}/features",
+        "--ranges",
+        *[
+            f"{task}={start}-{end}"
+            for task, (start, end) in ctx["task_ranges"].items()
+        ],
+        f"--out_dir={revalue_root}/features",
+        "--val_episode_ratio="
+        f"{revalue.get('task_val_episode_ratio', 0.2)}",
+        f"--seed={revalue.get('seed', 42)}",
+    ]
+    if revalue.get("allow_single_episode_overlap", False):
+        split_args.append("--allow_single_episode_overlap")
+    return split_args
+
+
 def _steps_task_heads(ctx: dict) -> list[Step]:
     """Split features by task and train one z/p head and one fusion per task."""
     cfg = ctx["cfg"]
@@ -1129,15 +1194,7 @@ def _steps_task_heads(ctx: dict) -> list[Step]:
             name="split_features_by_task",
             argv=_script_entry(
                 "examples/recap/process/split_feature_cache_by_task.py",
-                [
-                    f"--features_dir={revalue_root}/features",
-                    "--ranges",
-                    *[
-                        f"{task}={start}-{end}"
-                        for task, (start, end) in ctx["task_ranges"].items()
-                    ],
-                    f"--out_dir={revalue_root}/features",
-                ],
+                _task_feature_split_args(ctx),
             ),
             artifacts=[f"{revalue_root}/features/{first_task}/train.pt"],
         )
