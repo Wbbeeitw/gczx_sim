@@ -57,6 +57,7 @@ def _predict_action_chunk(policy, observation, task_description):
             "wrist_images": torch.from_numpy(
                 np.stack([observation["wrist_image"]])
             ),
+            "extra_view_images": None,
             "states": torch.from_numpy(np.stack([observation["state"]])),
             "task_descriptions": [str(task_description)],
         },

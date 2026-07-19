@@ -836,6 +836,7 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
                     env_obs = {
                         "main_images": torch.from_numpy(np.stack([img])),
                         "wrist_images": torch.from_numpy(np.stack([wrist_img])),
+                        "extra_view_images": None,
                         "states": torch.from_numpy(np.stack([state])),
                         "task_descriptions": [str(task_description)],
                     }
