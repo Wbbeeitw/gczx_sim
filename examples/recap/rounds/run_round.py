@@ -1117,7 +1117,7 @@ def _steps_eval_policy(ctx: dict) -> list[Step]:
                                 "actor.model.add_value_head=false",
                                 "env.eval.is_eval=true",
                                 "env.eval.use_fixed_reset_state_ids=true",
-                                "+env.eval.use_ordered_reset_state_ids=true",
+                                "++env.eval.use_ordered_reset_state_ids=true",
                                 "env.eval.video_cfg.save_video=false",
                             ],
                         ),
