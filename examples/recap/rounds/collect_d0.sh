@@ -3,7 +3,7 @@ set -euo pipefail
 
 MODE="${1:-smoke}"
 MODEL_PATH="${MODEL_PATH:-/workspace/models/RLinf-Pi05-LIBERO-SFT}"
-CHECKPOINT="${CHECKPOINT:-/workspace/RLinf/persistent_results/task58_bc_h200_2gpu_20260719/checkpoints/global_step_450/actor/model_state_dict/full_weights.pt}"
+CHECKPOINT="${CHECKPOINT-/workspace/RLinf/persistent_results/task58_bc_h200_2gpu_20260719/checkpoints/global_step_450/actor/model_state_dict/full_weights.pt}"
 GPU_ID="${GPU_ID:-0}"
 SEED="${SEED:-20260719}"
 RESUME="${RESUME:-false}"
@@ -42,7 +42,7 @@ if [[ ! -d "$MODEL_PATH" ]]; then
   echo "base model not found: $MODEL_PATH" >&2
   exit 1
 fi
-if [[ ! -f "$CHECKPOINT" ]]; then
+if [[ -n "$CHECKPOINT" && ! -f "$CHECKPOINT" ]]; then
   echo "checkpoint not found: $CHECKPOINT" >&2
   exit 1
 fi
@@ -82,7 +82,7 @@ mkdir -p "$OUTPUT_ROOT/logs"
 echo "mode=$MODE"
 echo "tasks=${task_ids[*]}"
 echo "episodes_per_task=$NUM_EPISODES"
-echo "checkpoint=$CHECKPOINT"
+echo "checkpoint=${CHECKPOINT:-<base-model-only>}"
 echo "output_root=$OUTPUT_ROOT"
 echo "cuda_visible_devices=$CUDA_VISIBLE_DEVICES gpu_id=$GPU_ID"
 
@@ -99,24 +99,29 @@ for index in "${!task_ids[@]}"; do
     echo "validating existing task${task_id} dataset before resume"
   else
     echo "collecting task${task_id}: $dataset"
+    collect_args=(
+      --pretrained_path "$MODEL_PATH"
+      --output_dir "$dataset"
+      --task_suite_name libero_10
+      --task_id "$task_id"
+      --num_episodes "$NUM_EPISODES"
+      --seed "$SEED"
+      --gpu_id "$GPU_ID"
+      --config_name pi05_libero
+      --model_type openpi
+      --action_chunk 5
+      --num_steps 5
+      --num_steps_wait 10
+      --warmup_before_env
+      --semantic_trace
+      --semantic_trace_task "task${task_id}"
+      --semantic_trace_output_name "semantic_trace_task${task_id}"
+    )
+    if [[ -n "$CHECKPOINT" ]]; then
+      collect_args+=(--checkpoint_path "$CHECKPOINT")
+    fi
     python examples/recap/process/collect_libero_rollouts.py \
-      --pretrained_path "$MODEL_PATH" \
-      --checkpoint_path "$CHECKPOINT" \
-      --output_dir "$dataset" \
-      --task_suite_name libero_10 \
-      --task_id "$task_id" \
-      --num_episodes "$NUM_EPISODES" \
-      --seed "$SEED" \
-      --gpu_id "$GPU_ID" \
-      --config_name pi05_libero \
-      --model_type openpi \
-      --action_chunk 5 \
-      --num_steps 5 \
-      --num_steps_wait 10 \
-      --warmup_before_env \
-      --semantic_trace \
-      --semantic_trace_task "task${task_id}" \
-      --semantic_trace_output_name "semantic_trace_task${task_id}" \
+      "${collect_args[@]}" \
       2>&1 | tee "$log_path"
   fi
 

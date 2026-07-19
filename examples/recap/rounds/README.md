@@ -48,6 +48,15 @@ Override `TASKS`, `NUM_EPISODES`, `CHECKPOINT`, `MODEL_PATH`, `GPU_ID`, or
 still enforces all structural and phase-boundary invariants. The validator is
 read-only and can also audit one or more existing task datasets directly:
 
+Set `CHECKPOINT=""` to collect directly from `MODEL_PATH` without overlaying a
+trained checkpoint. For example, an original-SFT smoke uses:
+
+```bash
+CHECKPOINT="" \
+OUTPUT_ROOT=/data/libero_long/smk_test/d0_original_sft_all10_1ep \
+bash examples/recap/rounds/collect_d0.sh smoke
+```
+
 ```bash
 python examples/recap/process/validate_libero_rollout_collection.py \
   --expected-episodes 40 \
