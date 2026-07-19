@@ -219,6 +219,7 @@ rollout_collect:
   failure_reward: null
 
 export_view:
+  mode: fused
   source_advantages_path: null
   predictions_path: null
   child_dataset_path: null

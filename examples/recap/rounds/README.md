@@ -287,6 +287,79 @@ python examples/recap/rounds/run_round.py \
   --set results.output_name=round1_policy1_value1
 ```
 
+## Multi-task raw Value + Pure-CFG baseline
+
+The raw baseline bypasses the task z/p heads and fusion. It slices the joint
+Value advantage table back onto each task dataset, recomputes the top-30%
+boolean threshold independently per task, and trains the same ten-task policy
+loader with the legacy `binary` Pure-CFG strategy. The existing fused stages
+and their default behavior are unchanged.
+
+Train a new joint Value model and then run the complete raw baseline:
+
+```bash
+python examples/recap/rounds/run_round.py \
+  --config examples/recap/rounds/config/multitask_round1_prcfg.yaml \
+  --stage all \
+  --set method=raw_purecfg \
+  --set 'pipeline=["fit_critic_multitask","export_multitask_raw","train_policy","eval_policy"]' \
+  --set 'paths.child_pattern=/data/libero_long/d0_base_fixed_40ep/{task}_40ep' \
+  --set paths.merged_dataset=/data/libero_long/multitask_d0_base_fixed_400ep \
+  --set paths.exp_root=/workspace/RLinf/persistent_results/round1_raw_purecfg/exp \
+  --set paths.results_root=/workspace/RLinf/persistent_results/round1_raw_purecfg/checkpoints \
+  --set paths.value_checkpoint=null \
+  --set parent_policy.checkpoint='' \
+  --set collect.num_episodes=40 \
+  --set tags.returns=round1_raw_returns \
+  --set tags.merged_base=round1_raw_base \
+  --set tags.policy_advantage=round1_raw_top30 \
+  --set value.freeze_vlm=false \
+  --set value.steps=2000 \
+  --set value.save_interval=1000 \
+  --set policy.advantage_source=raw \
+  --set policy.strategy=binary \
+  --set policy.guidance_type=positive \
+  --set policy.positive_only_conditional=true \
+  --set policy.guidance_scale=1.0 \
+  --set policy.negative_guidance_scale=0.0 \
+  --set policy.positive_quantile=0.3 \
+  --set policy.unconditional_prob=0.1 \
+  --set policy.max_steps=1000 \
+  --set policy.save_interval=500 \
+  --set policy.lr_warmup_steps=50 \
+  --set policy.global_batch_size=64 \
+  --set policy.micro_batch_size=8 \
+  --set 'policy.extra_overrides=["actor.model.openpi.train_expert_only=false","actor.fsdp_config.use_orig_params=true"]' \
+  --set eval.eval_rollout_epoch=5 \
+  --set eval.total_num_envs=10 \
+  --set eval.guidance_type=positive \
+  --set eval.positive_only_conditional=true \
+  --set eval.guidance_scale=1.0 \
+  --set eval.negative_guidance_scale=0.0 \
+  --set eval.warmup_before_env=true \
+  --set eval.save_video=false \
+  --set results.enabled=true \
+  --set results.round_index=1 \
+  --set results.policy_label=Policy1-Pure-CFG \
+  --set results.critic_label=Value1-raw \
+  --set results.output_dir=/workspace/RLinf/persistent_results/round1_raw_purecfg/results \
+  --set results.output_name=round1_policy1_purecfg_value1_raw
+```
+
+To reuse an existing upstream Value checkpoint, keep the remaining overrides
+identical and replace the pipeline and checkpoint settings with:
+
+```bash
+  --set 'pipeline=["score_critic_multitask","export_multitask_raw","train_policy","eval_policy"]' \
+  --set paths.value_checkpoint=/absolute/path/to/value/checkpoint/global_step_N
+```
+
+`score_critic_multitask` still merges the ten inputs, computes returns,
+extracts Value features, and builds raw advantages. It requires
+`paths.value_checkpoint` and never launches `value_sft`. The same scoring stage
+can also feed the existing fused branch by following it with `task_heads`,
+`predict_multitask`, and `export_multitask`.
+
 ## Round 2 cumulative Critic and fresh-only Policy
 
 Round 2 rolls out Policy1 for 40 fresh episodes per task. The Critic pool is

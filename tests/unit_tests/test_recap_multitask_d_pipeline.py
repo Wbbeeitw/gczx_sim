@@ -14,13 +14,23 @@ from examples.recap.process.build_fixed_multitask_train_pools import (
 from examples.recap.process.record_multitask_round_results import (
     record_multitask_results,
 )
+from examples.recap.process.record_round_results import (
+    _episode_error_metrics,
+    _error_metrics,
+    _load_comparison_frame,
+)
 from examples.recap.process.summarize_multitask_policy_data import (
     summarize_policy_data,
+)
+from examples.recap.process.write_raw_value_comparison import (
+    write_raw_value_comparison,
 )
 from examples.recap.rounds.run_round import (
     _build_ctx,
     _steps_eval_policy,
     _steps_export_multitask,
+    _steps_export_multitask_raw,
+    _steps_score_critic_multitask,
     _steps_train_policy,
 )
 
@@ -65,8 +75,24 @@ def _round_cfg(tmp_path: Path, *, round_two: bool = False) -> dict:
             "child_fused": "fused",
         },
         "collect": {"num_episodes": 40, "openpi_config_name": "pi05_libero"},
-        "returns": {"gamma": 1.0},
-        "value": {"steps": 1200},
+        "returns": {
+            "gamma": 1.0,
+            "failure_reward": -300.0,
+            "global_min": -900.0,
+            "global_max": 0.0,
+        },
+        "value": {
+            "steps": 1200,
+            "save_interval": 600,
+            "micro_batch_size": 8,
+            "global_batch_size": 64,
+            "lr": 1.0e-5,
+            "value_lr": 1.0e-4,
+            "lr_warmup_steps": 50,
+            "action_dim": 7,
+            "action_horizon": 10,
+            "critic_expert_variant": "gemma_1m",
+        },
         "revalue": {
             "label_name": "phase_progress_multitask",
             "positive_quantile": 0.3,
@@ -162,6 +188,83 @@ def test_multitask_export_and_training_use_fresh_fixed_pools(tmp_path: Path) -> 
     assert 'data.train_data_paths=[{dataset_path:' in extra_override
     assert f'{tmp_path.as_posix()}/fresh/task0' in extra_override
     assert f'{tmp_path.as_posix()}/fresh/task1' in extra_override
+
+
+def test_external_value_scores_multitask_pool_without_value_training(
+    tmp_path: Path,
+) -> None:
+    cfg = _round_cfg(tmp_path)
+    cfg["paths"]["value_checkpoint"] = "/checkpoints/value1"
+    ctx = _build_ctx(cfg)
+
+    steps = _steps_score_critic_multitask(ctx)
+    names = [step.name for step in steps]
+
+    assert "value_sft" not in names
+    assert names == [
+        "merge_datasets",
+        "compute_returns",
+        "prepare_data",
+        "extract_features",
+        "build_base_from_cache",
+    ]
+    extract_command = next(
+        step.argv for step in steps if step.name == "extract_features"
+    )
+    assert "value.checkpoint=/checkpoints/value1" in extract_command
+
+
+def test_external_value_scoring_requires_checkpoint(tmp_path: Path) -> None:
+    ctx = _build_ctx(_round_cfg(tmp_path))
+    try:
+        _steps_score_critic_multitask(ctx)
+    except ValueError as error:
+        assert "paths.value_checkpoint" in str(error)
+    else:
+        raise AssertionError("missing external Value checkpoint was accepted")
+
+
+def test_multitask_raw_export_bypasses_predictions_and_trains_binary_cfg(
+    tmp_path: Path,
+) -> None:
+    cfg = _round_cfg(tmp_path, round_two=True)
+    cfg["pipeline"] = [
+        "score_critic_multitask",
+        "export_multitask_raw",
+        "train_policy",
+        "eval_policy",
+    ]
+    cfg["paths"]["value_checkpoint"] = "/checkpoints/value1"
+    cfg["tags"]["policy_advantage"] = "raw_top30"
+    cfg["policy"]["strategy"] = "binary"
+    cfg["policy"]["advantage_source"] = "raw"
+    ctx = _build_ctx(cfg)
+
+    export_steps = _steps_export_multitask_raw(ctx)
+    export_commands = [
+        step.argv
+        for step in export_steps
+        if step.name.startswith("export_raw_dataset_view")
+    ]
+    assert len(export_commands) == 2
+    assert all("export_view.mode=raw" in command for command in export_commands)
+    assert all(
+        not any("predictions_path" in argument for argument in command)
+        for command in export_commands
+    )
+    assert "export_view.source_episode_start=40" in export_commands[0]
+    assert "export_view.source_episode_start=120" in export_commands[1]
+    assert any(
+        step.name == "write_raw_value_comparison" for step in export_steps
+    )
+
+    train_command = _steps_train_policy(ctx)[0].argv
+    assert "cfg_train.strategy=binary" in train_command
+    assert "cfg_train.advantage_tag=raw_top30" in train_command
+
+    record_command = _steps_eval_policy(ctx)[-1].argv
+    assert not any("--zp-metrics" in argument for argument in record_command)
+    assert not any("--fusion-metrics" in argument for argument in record_command)
 
 
 def test_multitask_eval_is_sequential_per_task_and_disables_value_head(
@@ -361,3 +464,31 @@ def test_policy_data_summary_audits_expert_selection(tmp_path: Path) -> None:
 
     assert report["tasks"]["task5"]["positive_ratio"] == 0.75
     assert report["tasks"]["task5"]["sources"]["expert"]["positive_ratio"] == 1.0
+
+
+def test_raw_comparison_reports_only_base_value_error(tmp_path: Path) -> None:
+    advantages = tmp_path / "raw.parquet"
+    pd.DataFrame(
+        {
+            "episode_index": [0, 0],
+            "frame_index": [0, 1],
+            "return": [-100.0, -50.0],
+            "value_current": [-0.5, -0.25],
+        }
+    ).to_parquet(advantages)
+    comparison_path = tmp_path / "raw_comparison.json"
+    comparison = write_raw_value_comparison(
+        advantages_path=advantages,
+        output_path=comparison_path,
+        return_min=-200.0,
+        return_max=0.0,
+    )
+
+    frame = _load_comparison_frame(comparison)
+    metrics = _error_metrics(frame)
+    episode_metrics = _episode_error_metrics(frame)
+
+    assert metrics["base_mae"] == 0.0
+    assert "fused_mae" not in metrics
+    assert episode_metrics["mean_base_mae"] == 0.0
+    assert "mean_fused_mae" not in episode_metrics

@@ -728,13 +728,18 @@ def run_revalue(cfg: RevalueConfig) -> None:
                 )
             view_out = export_dataset_view(
                 ExportDatasetViewConfig(
+                    mode=cfg.export_view.mode,
                     source_advantages_path=(
                         cfg.export_view.source_advantages_path
                         or str(source_advantages)
                     ),
                     predictions_path=(
-                        cfg.export_view.predictions_path
-                        or str(paths["predictions"])
+                        None
+                        if cfg.export_view.mode == "raw"
+                        else (
+                            cfg.export_view.predictions_path
+                            or str(paths["predictions"])
+                        )
                     ),
                     child_dataset_path=cfg.export_view.child_dataset_path,
                     output_tag=cfg.export_view.output_tag,

@@ -167,6 +167,10 @@ def record_multitask_results(
         result["critic"].get("fused_mae") for result in task_results.values()
     ]
     fused_mae = [value for value in fused_mae if value is not None]
+    raw_mae = [
+        result["critic"].get("base_mae") for result in task_results.values()
+    ]
+    raw_mae = [value for value in raw_mae if value is not None]
     aggregate = {
         "tasks": len(task_results),
         "num_trajectories": total_trajectories,
@@ -179,6 +183,9 @@ def record_multitask_results(
         ),
         "success_episode_act_mean": success_act_mean,
         "success_episode_act_std": success_act_std,
+        "macro_raw_frame_mae": (
+            float(np.mean(raw_mae)) if raw_mae else None
+        ),
         "macro_fused_frame_mae": (
             float(np.mean(fused_mae)) if fused_mae else None
         ),
@@ -199,6 +206,7 @@ def record_multitask_results(
                 "success_episode_act_mean"
             ],
             "success_episode_act_std": aggregate["success_episode_act_std"],
+            "macro_raw_frame_mae": aggregate["macro_raw_frame_mae"],
             "macro_fused_frame_mae": aggregate["macro_fused_frame_mae"],
         },
         "source_paths": {

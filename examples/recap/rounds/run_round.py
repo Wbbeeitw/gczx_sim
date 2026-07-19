@@ -78,9 +78,11 @@ KNOWN_STAGES = [
     "collect_multitask",
     "build_multitask_critic_pool",
     "fit_critic_multitask",
+    "score_critic_multitask",
     "task_heads",
     "predict_multitask",
     "export_multitask",
+    "export_multitask_raw",
 ]
 
 
@@ -419,7 +421,10 @@ def _build_ctx(cfg: dict) -> dict[str, Any]:
         "parent_label": str(_get(cfg, "parent_policy.label", "parent")),
         "returns_tag": str(_require(cfg, "tags.returns")),
         "merged_base_tag": str(_require(cfg, "tags.merged_base")),
-        "child_fused_tag": str(_require(cfg, "tags.child_fused")),
+        "child_fused_tag": str(
+            _get(cfg, "tags.policy_advantage")
+            or _require(cfg, "tags.child_fused")
+        ),
         "value_exp": value_exp,
         "value_ckpt": (
             str(_get(cfg, "paths.value_checkpoint") or "")
@@ -438,6 +443,15 @@ def _build_ctx(cfg: dict) -> dict[str, Any]:
         "eval_exp": f"{policy_exp}_eval{eval_episodes}",
         "revalue_root": f"{exp_root}/revalue",
         "policy_data_root": f"{exp_root}/policy_data",
+        "advantage_source": str(
+            _get(cfg, "policy.advantage_source")
+            or (
+                "raw"
+                if "export_multitask_raw"
+                in (_get(cfg, "pipeline") or STAGE_ORDER)
+                else "fused"
+            )
+        ),
     }
     ctx["predictions"] = f"{ctx['revalue_root']}/predictions.parquet"
     ctx["comparison"] = str(
@@ -457,6 +471,8 @@ def _build_ctx(cfg: dict) -> dict[str, Any]:
         if tasks
         else f"{ctx['policy_data_root']}/episode_manifest.json"
     )
+    if ctx["advantage_source"] not in {"raw", "fused"}:
+        raise ValueError("policy.advantage_source must be 'raw' or 'fused'")
     return ctx
 
 
@@ -1146,14 +1162,24 @@ def _steps_eval_policy(ctx: dict) -> list[Step]:
                                 for argument in (
                                     "--eval-summary",
                                     f"{task}={eval_summaries[task]}",
-                                    "--zp-metrics",
-                                    f"{task}={ctx['revalue_root']}/zp_head/"
-                                    f"{task}/metrics.json",
-                                    "--fusion-metrics",
-                                    f"{task}={ctx['revalue_root']}/fusion/"
-                                    f"{task}/metrics.json",
                                 )
                             ],
+                            *(
+                                [
+                                    argument
+                                    for task in ctx["tasks"]
+                                    for argument in (
+                                        "--zp-metrics",
+                                        f"{task}={ctx['revalue_root']}/zp_head/"
+                                        f"{task}/metrics.json",
+                                        "--fusion-metrics",
+                                        f"{task}={ctx['revalue_root']}/fusion/"
+                                        f"{task}/metrics.json",
+                                    )
+                                ]
+                                if ctx["advantage_source"] == "fused"
+                                else []
+                            ),
                             f"--comparison={ctx['comparison']}",
                             f"--policy-data-report={policy_data_report}",
                             f"--output-dir={results['output_dir']}",
@@ -1367,6 +1393,20 @@ def _steps_fit_critic_multitask(ctx: dict) -> list[Step]:
     critic_steps = _steps_fit_value(ctx)
     critic_steps += _steps_fit_critic(ctx)[3:6]
     return critic_steps
+
+
+def _steps_score_critic_multitask(ctx: dict) -> list[Step]:
+    """Score a multi-task pool with an externally supplied Value model."""
+    if not ctx["value_ckpt_external"]:
+        raise ValueError(
+            "score_critic_multitask requires paths.value_checkpoint; use "
+            "fit_critic_multitask when Value training is part of this run"
+        )
+    return [
+        step
+        for step in _steps_fit_critic_multitask(ctx)
+        if step.name != "value_sft"
+    ]
 
 
 def _task_feature_split_args(ctx: dict) -> list[str]:
@@ -1637,6 +1677,127 @@ def _steps_export_multitask(ctx: dict) -> list[Step]:
     return steps
 
 
+def _steps_export_multitask_raw(ctx: dict) -> list[Step]:
+    """Export per-task raw Value advantages without z/p or fusion."""
+    if ctx["advantage_source"] != "raw":
+        raise ValueError(
+            "export_multitask_raw requires policy.advantage_source=raw"
+        )
+    cfg = ctx["cfg"]
+    revalue = cfg.get("revalue", {})
+    returns = cfg.get("returns", {})
+    policy_data_root = ctx["policy_data_root"]
+    steps: list[Step] = []
+    manifest_paths: dict[str, str] = {}
+    for task in ctx["tasks"]:
+        start, end = ctx["policy_task_ranges"][task]
+        policy_dataset = ctx["policy_task_datasets"][task]
+        policy_episodes = ctx["policy_episode_counts"][task]
+        task_root = f"{policy_data_root}/{task}"
+        manifest_paths[task] = f"{task_root}/episode_manifest.json"
+        steps.append(
+            Step(
+                name=f"prepare_raw_manifest_{task}",
+                argv=_revalue_entry(
+                    "prepare_data",
+                    [
+                        f"data.dataset_path={policy_dataset}",
+                        "data.label_name="
+                        f"phase_progress_semantic_trace_{task}",
+                        f"data.seed={revalue.get('seed', 42)}",
+                        f"manifest.num_episodes={policy_episodes}",
+                        "manifest.success_ratio=0.5",
+                        "manifest.val_episode_ratio=0.0",
+                        "manifest.test_episode_ratio=0.0",
+                        f"manifest.success_phase={revalue.get('success_phase', 3)}",
+                        f"manifest.num_phases={revalue.get('num_phases', 4)}",
+                        "manifest.overwrite=true",
+                        f"output.root={task_root}",
+                    ],
+                ),
+                artifacts=[f"{task_root}/episode_manifest.json"],
+            )
+        )
+        steps.append(
+            Step(
+                name=f"export_raw_dataset_view_{task}",
+                argv=_revalue_entry(
+                    "export_dataset_view",
+                    [
+                        "export_view.mode=raw",
+                        "export_view.source_advantages_path="
+                        f"{ctx['merged_base_adv']}",
+                        "export_view.child_dataset_path="
+                        f"{policy_dataset}",
+                        f"export_view.output_tag={ctx['child_fused_tag']}",
+                        f"export_view.source_episode_start={start}",
+                        f"export_view.source_episode_end={end}",
+                        f"export_view.child_episode_offset=-{start}",
+                        "export_view.positive_quantile="
+                        f"{revalue.get('positive_quantile', 0.3)}",
+                        f"export_view.expected_episodes={policy_episodes}",
+                        f"export_view.report_path={task_root}/raw_export_report.json",
+                        f"output.root={task_root}",
+                    ],
+                ),
+                artifacts=[
+                    f"{policy_dataset}/meta/advantages_"
+                    f"{ctx['child_fused_tag']}.parquet",
+                    f"{task_root}/raw_export_report.json",
+                ],
+            )
+        )
+    steps.append(
+        Step(
+            name="write_raw_value_comparison",
+            argv=_script_entry(
+                "examples/recap/process/write_raw_value_comparison.py",
+                [
+                    f"--advantages-path={ctx['merged_base_adv']}",
+                    f"--output-path={ctx['comparison']}",
+                    f"--return-min={returns['global_min']}",
+                    f"--return-max={returns['global_max']}",
+                    "--value-min=-1.0",
+                    "--value-max=0.0",
+                ],
+            ),
+            artifacts=[ctx["comparison"]],
+        )
+    )
+    report_path = f"{policy_data_root}/multitask_policy_data_report.json"
+    steps.append(
+        Step(
+            name="summarize_multitask_raw_policy_data",
+            argv=_script_entry(
+                "examples/recap/process/summarize_multitask_policy_data.py",
+                [
+                    *[
+                        argument
+                        for task in ctx["tasks"]
+                        for argument in (
+                            "--task-dataset",
+                            f"{task}={ctx['policy_task_datasets'][task]}",
+                        )
+                    ],
+                    *[
+                        argument
+                        for task in ctx["tasks"]
+                        for argument in (
+                            "--manifest",
+                            f"{task}={manifest_paths[task]}",
+                        )
+                    ],
+                    f"--advantage-tag={ctx['child_fused_tag']}",
+                    f"--report-path={report_path}",
+                    f"--combined-manifest-path={ctx['child_manifest']}",
+                ],
+            ),
+            artifacts=[report_path, ctx["child_manifest"]],
+        )
+    )
+    return steps
+
+
 _STAGE_BUILDERS = {
     "collect": _steps_collect,
     "fit_value": _steps_fit_value,
@@ -1646,9 +1807,11 @@ _STAGE_BUILDERS = {
     "collect_multitask": _steps_collect_multitask,
     "build_multitask_critic_pool": _steps_build_multitask_critic_pool,
     "fit_critic_multitask": _steps_fit_critic_multitask,
+    "score_critic_multitask": _steps_score_critic_multitask,
     "task_heads": _steps_task_heads,
     "predict_multitask": _steps_predict_multitask,
     "export_multitask": _steps_export_multitask,
+    "export_multitask_raw": _steps_export_multitask_raw,
     "export_policy_data": _steps_export_policy_data,
     "train_policy": _steps_train_policy,
     "eval_policy": _steps_eval_policy,
@@ -1955,15 +2118,12 @@ def run_stage(stage: str, ctx: dict, args: argparse.Namespace) -> None:
             "fresh rollouts before building critic data on top of them"
         )
     if (
-        stage == "build_child_base"
+        stage in {"build_child_base", "score_critic_multitask"}
         and ctx.get("value_ckpt_external")
         and not Path(ctx["value_ckpt"]).exists()
     ):
         raise RuntimeError(
-            f"value checkpoint not found: {ctx['value_ckpt']}; run the "
-            "fused track's fit_critic first, or switch to separate-critic "
-            "mode (pipeline: [collect, fit_value, build_child_base, ...] "
-            "with paths.value_checkpoint: null)"
+            f"value checkpoint not found: {ctx['value_ckpt']}"
         )
 
     started = datetime.now(timezone.utc).isoformat()

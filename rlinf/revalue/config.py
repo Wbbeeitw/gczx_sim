@@ -279,8 +279,9 @@ class RevalueRolloutCollectConfig:
 
 @dataclass
 class RevalueExportViewConfig:
-    """Child-dataset view export settings (re-indexed fused advantages)."""
+    """Child-dataset view export settings for raw or fused advantages."""
 
+    mode: str = "fused"
     source_advantages_path: str | None = None
     predictions_path: str | None = None
     child_dataset_path: str | None = None

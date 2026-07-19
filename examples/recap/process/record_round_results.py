@@ -149,14 +149,24 @@ def _policy_summary(path: Path) -> dict[str, Any]:
 
 def _load_comparison_frame(comparison: dict[str, Any]) -> pd.DataFrame:
     advantages = pd.read_parquet(comparison["advantages_path"])
-    predictions = pd.read_parquet(comparison["predictions_path"])
-    merged = predictions[
-        ["episode_index", "frame_index", "value_fused"]
-    ].merge(
-        advantages[["episode_index", "frame_index", "return", "value_current"]],
-        on=["episode_index", "frame_index"],
-        how="inner",
-    )
+    advantage_columns = [
+        "episode_index",
+        "frame_index",
+        "return",
+        "value_current",
+    ]
+    predictions_path = comparison.get("predictions_path")
+    if predictions_path:
+        predictions = pd.read_parquet(predictions_path)
+        merged = predictions[
+            ["episode_index", "frame_index", "value_fused"]
+        ].merge(
+            advantages[advantage_columns],
+            on=["episode_index", "frame_index"],
+            how="inner",
+        )
+    else:
+        merged = advantages[advantage_columns].copy()
     if merged.empty:
         raise ValueError("No overlapping frames in comparison inputs.")
 
@@ -168,45 +178,58 @@ def _load_comparison_frame(comparison: dict[str, Any]) -> pd.DataFrame:
     merged["base_pred_return"] = (
         (merged["value_current"] - value_min) * scale + return_min
     )
-    merged["fused_pred_return"] = (
-        (merged["value_fused"] - value_min) * scale + return_min
-    )
     merged["base_abs_error"] = (
         merged["base_pred_return"] - merged["return"]
-    ).abs()
-    merged["fused_abs_error"] = (
-        merged["fused_pred_return"] - merged["return"]
     ).abs()
     merged["base_squared_error"] = (
         merged["base_pred_return"] - merged["return"]
     ) ** 2
-    merged["fused_squared_error"] = (
-        merged["fused_pred_return"] - merged["return"]
-    ) ** 2
+    if "value_fused" in merged.columns:
+        merged["fused_pred_return"] = (
+            (merged["value_fused"] - value_min) * scale + return_min
+        )
+        merged["fused_abs_error"] = (
+            merged["fused_pred_return"] - merged["return"]
+        ).abs()
+        merged["fused_squared_error"] = (
+            merged["fused_pred_return"] - merged["return"]
+        ) ** 2
     return merged
 
 
 def _error_metrics(frame: pd.DataFrame) -> dict[str, Any]:
     if frame.empty:
         return {"frames": 0, "episodes": 0}
-    return {
+    metrics = {
         "frames": int(len(frame)),
         "episodes": int(frame["episode_index"].nunique()),
         "base_mae": float(frame["base_abs_error"].mean()),
-        "fused_mae": float(frame["fused_abs_error"].mean()),
         "base_rmse": float(np.sqrt(frame["base_squared_error"].mean())),
-        "fused_rmse": float(np.sqrt(frame["fused_squared_error"].mean())),
         "base_bias": float(
             (frame["base_pred_return"] - frame["return"]).mean()
         ),
-        "fused_bias": float(
-            (frame["fused_pred_return"] - frame["return"]).mean()
-        ),
-        "mae_improvement_pct": float(
-            100.0
-            * (1.0 - frame["fused_abs_error"].mean() / frame["base_abs_error"].mean())
-        ),
     }
+    if "fused_abs_error" in frame.columns:
+        metrics.update(
+            {
+                "fused_mae": float(frame["fused_abs_error"].mean()),
+                "fused_rmse": float(
+                    np.sqrt(frame["fused_squared_error"].mean())
+                ),
+                "fused_bias": float(
+                    (frame["fused_pred_return"] - frame["return"]).mean()
+                ),
+                "mae_improvement_pct": float(
+                    100.0
+                    * (
+                        1.0
+                        - frame["fused_abs_error"].mean()
+                        / frame["base_abs_error"].mean()
+                    )
+                ),
+            }
+        )
+    return metrics
 
 
 def _episode_error_metrics(frame: pd.DataFrame) -> dict[str, Any]:
@@ -214,14 +237,20 @@ def _episode_error_metrics(frame: pd.DataFrame) -> dict[str, Any]:
         return {"episodes": 0}
     grouped = frame.groupby("episode_index")
     base_mae = grouped["base_abs_error"].mean()
-    fused_mae = grouped["fused_abs_error"].mean()
-    return {
+    metrics = {
         "episodes": int(len(grouped)),
         "mean_base_mae": float(base_mae.mean()),
-        "mean_fused_mae": float(fused_mae.mean()),
-        "mean_mae_gain": float((base_mae - fused_mae).mean()),
-        "episodes_improved_mae": int((base_mae > fused_mae).sum()),
     }
+    if "fused_abs_error" in frame.columns:
+        fused_mae = grouped["fused_abs_error"].mean()
+        metrics.update(
+            {
+                "mean_fused_mae": float(fused_mae.mean()),
+                "mean_mae_gain": float((base_mae - fused_mae).mean()),
+                "episodes_improved_mae": int((base_mae > fused_mae).sum()),
+            }
+        )
+    return metrics
 
 
 def _load_zp_metrics(path: Path | None) -> dict[str, Any] | None:
