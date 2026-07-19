@@ -352,24 +352,25 @@ def merge_multitask_datasets(
         if stats_path.exists():
             all_stats = _read_jsonl(stats_path)
             if len(all_stats) == len(all_episodes):
-                selected_positions = [
-                    position
+                # episodes_stats.jsonl is positionally aligned with
+                # episodes.jsonl, but a stats record's own episode_index field
+                # may carry stale numbering from a previous merge; remap using
+                # the episode record's index, not the stats record's field.
+                selected_stats = [
+                    (all_stats[position], int(record["episode_index"]))
                     for position, record in enumerate(all_episodes)
                     if int(record["episode_index"]) in episode_index_map
                 ]
-                selected_stats = [all_stats[index] for index in selected_positions]
             else:
                 selected_stats = [
-                    record
+                    (record, int(record["episode_index"]))
                     for record in all_stats
                     if int(record.get("episode_index", -1)) in episode_index_map
                 ]
-            for record in selected_stats:
+            for record, local_index in selected_stats:
                 shifted = dict(record)
                 if "episode_index" in shifted:
-                    shifted["episode_index"] = episode_index_map[
-                        int(shifted["episode_index"])
-                    ]
+                    shifted["episode_index"] = episode_index_map[local_index]
                 merged_stats.append(shifted)
 
         selected_successes: dict[int, bool] = {}
