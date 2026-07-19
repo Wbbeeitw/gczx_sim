@@ -39,6 +39,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task_suite_name", default="libero_10")
     parser.add_argument("--task_id", type=int, default=0)
     parser.add_argument("--num_episodes", type=int, default=64)
+    parser.add_argument(
+        "--num_envs",
+        type=int,
+        default=1,
+        help="Number of LIBERO envs stepped in parallel within this process.",
+    )
     parser.add_argument("--noise_scale", type=float, default=0.0)
     parser.add_argument("--noise_clip", type=float, default=0.3)
     parser.add_argument("--action_chunk", type=int, default=5)
@@ -87,6 +93,7 @@ def main() -> None:
             task_suite_name=args.task_suite_name,
             task_id=args.task_id,
             num_episodes=args.num_episodes,
+            num_envs=args.num_envs,
             noise_scale=args.noise_scale,
             noise_clip=args.noise_clip,
             action_chunk=args.action_chunk,

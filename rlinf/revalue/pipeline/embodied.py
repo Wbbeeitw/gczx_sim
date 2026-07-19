@@ -119,6 +119,7 @@ class LiberoRolloutCollectionConfig:
     task_suite_name: str = "libero_10"
     task_id: int = 0
     num_episodes: int = 64
+    num_envs: int = 1  # envs stepped in parallel per process; >1 batches policy inference across envs
     noise_scale: float = 0.0
     noise_clip: float = 0.3
     action_chunk: int = 5
@@ -803,7 +804,221 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
     all_returns = []
     episode_lengths = []
 
-    for ep_idx in range(cfg.num_episodes):
+    def _write_finished_episode(
+        ep_idx: int,
+        frames: list[dict[str, Any]],
+        rewards: list[float],
+        episode_trace_records: list[dict[str, Any]],
+        is_success: bool,
+    ) -> None:
+        """Finalize and write one finished episode (shared episode tail logic)."""
+        ep_len = len(frames)
+        if ep_len == 0:
+            logger.warning("episode %d empty, skipping", ep_idx)
+            return
+        returns = _compute_returns(rewards, gamma=1.0)
+        for frame_idx, frame in enumerate(frames):
+            frame["is_success"] = np.array([is_success], dtype=bool)
+            frame["return"] = np.array([returns[frame_idx]], dtype=np.float32)
+        for trace_record in episode_trace_records:
+            trace_record["is_success"] = is_success
+        semantic_trace_records.extend(episode_trace_records)
+        frames[-1]["done"] = np.array([True], dtype=bool)
+
+        if writer.dataset is None:
+            first = frames[0]
+            writer.create(
+                repo_id=str(output_path),
+                robot_type="franka_panda",
+                fps=cfg.fps,
+                features=_build_features(
+                    first["image"].shape,
+                    int(first["state"].shape[-1]),
+                    int(first["actions"].shape[-1]),
+                ),
+                image_shape=first["image"].shape,
+                state_dim=int(first["state"].shape[-1]),
+                action_dim=int(first["actions"].shape[-1]),
+                has_image=True,
+                wrist_image_keys={"wrist_image": first["wrist_image"].shape},
+                has_intervene_flag=False,
+            )
+
+        writer.add_episode(frames)
+        all_returns.append(float(returns[0]) if len(returns) > 0 else 0.0)
+        episode_lengths.append(ep_len)
+        logger.info(
+            "episode %d: len=%d success=%s return=%.2f total_success=%d/%d",
+            ep_idx,
+            ep_len,
+            is_success,
+            float(returns[0]) if len(returns) > 0 else 0.0,
+            successes,
+            cfg.num_episodes,
+        )
+
+    def _extract_obs_arrays(obs):
+        img = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
+        wrist_img = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1, ::-1])
+        state = np.concatenate(
+            (
+                obs["robot0_eef_pos"],
+                _quat2axisangle(obs["robot0_eef_quat"]),
+                obs["robot0_gripper_qpos"],
+            )
+        ).astype(np.float32)
+        return img, wrist_img, state
+
+    def _start_episode(env, ep_idx):
+        if hasattr(policy, "reset"):
+            policy.reset()
+        env.reset()
+        obs = env.set_init_state(initial_states[ep_idx % len(initial_states)])
+        for _ in range(cfg.num_steps_wait):
+            obs, _, _, _ = env.step(LIBERO_DUMMY_ACTION)
+        return obs
+
+    if cfg.num_envs > 1:
+        # Parallel collection: step cfg.num_envs envs in lockstep and batch
+        # policy inference across them. Episodes are handed out from a shared
+        # counter; per-episode outputs match the serial path.
+        envs = [env]
+        for env_idx in range(1, cfg.num_envs):
+            extra_env, _ = _get_libero_env(
+                task, LIBERO_ENV_RESOLUTION, cfg.seed + env_idx, cfg.gpu_id
+            )
+            envs.append(extra_env)
+        if semantic_trace_recorder is not None:
+            recorders = [semantic_trace_recorder] + [
+                recorder_type(env_i) for env_i in envs[1:]
+            ]
+        else:
+            recorders = [None] * len(envs)
+        try:
+            next_ep_idx = 0
+            active: list[dict[str, Any]] = []
+            for env_idx, env_i in enumerate(envs):
+                if next_ep_idx >= cfg.num_episodes:
+                    break
+                active.append(
+                    {
+                        "env": env_i,
+                        "recorder": recorders[env_idx],
+                        "ep_idx": next_ep_idx,
+                        "obs": _start_episode(env_i, next_ep_idx),
+                        "frames": [],
+                        "rewards": [],
+                        "trace": [],
+                        "plan": [],
+                    }
+                )
+                next_ep_idx += 1
+
+            while active:
+                for st in active:
+                    st["img"], st["wrist_img"], st["state"] = _extract_obs_arrays(
+                        st["obs"]
+                    )
+
+                refill = [st for st in active if not st["plan"]]
+                if refill:
+                    if hasattr(policy, "predict_action_batch"):
+                        import torch
+
+                        env_obs = {
+                            "main_images": torch.from_numpy(
+                                np.stack([st["img"] for st in refill])
+                            ),
+                            "wrist_images": torch.from_numpy(
+                                np.stack([st["wrist_img"] for st in refill])
+                            ),
+                            "extra_view_images": None,
+                            "states": torch.from_numpy(
+                                np.stack([st["state"] for st in refill])
+                            ),
+                            "task_descriptions": [str(task_description)] * len(refill),
+                        }
+                        chunk_out, _ = policy.predict_action_batch(
+                            env_obs, mode="eval"
+                        )
+                        if hasattr(chunk_out, "detach"):
+                            chunk_out = chunk_out.detach().cpu().numpy()
+                        chunk_out = np.asarray(chunk_out, dtype=np.float32)
+                        if chunk_out.ndim == 2:
+                            chunk_out = chunk_out[None]
+                        for st, chunk in zip(refill, chunk_out):
+                            st["plan"] = list(chunk[: cfg.action_chunk])
+                    else:
+                        for st in refill:
+                            observation = {
+                                "observation/image": st["img"],
+                                "observation/wrist_image": st["wrist_img"],
+                                "observation/state": st["state"],
+                                "prompt": str(task_description),
+                            }
+                            chunk = policy.infer(observation)["actions"]
+                            st["plan"] = list(chunk[: cfg.action_chunk])
+
+                for st in active[:]:
+                    action = np.asarray(st["plan"].pop(0), dtype=np.float32)
+                    if cfg.noise_scale > 0:
+                        noise = np.random.randn(*action.shape) * cfg.noise_scale
+                        noise = np.clip(noise, -cfg.noise_clip, cfg.noise_clip)
+                        action = action + noise
+
+                    obs, reward, done, _ = st["env"].step(action.tolist())
+                    st["obs"] = obs
+                    if st["recorder"] is not None:
+                        st["trace"].append(
+                            st["recorder"].capture(
+                                st["env"],
+                                st["ep_idx"],
+                                len(st["frames"]),
+                                observation=obs,
+                            )
+                        )
+                    reward_value = float(reward)
+                    if cfg.failure_reward is not None and done is False:
+                        reward_value = reward_value
+                    st["rewards"].append(reward_value)
+                    st["frames"].append(
+                        {
+                            "image": st["img"],
+                            "wrist_image": st["wrist_img"],
+                            "state": st["state"],
+                            "actions": action.astype(np.float32),
+                            "reward": np.array([reward_value], dtype=np.float32),
+                            "task": str(task_description),
+                            "done": np.array([False], dtype=bool),
+                            "is_success": np.array([False], dtype=bool),
+                        }
+                    )
+
+                    if done or len(st["frames"]) >= max_steps:
+                        if done:
+                            successes += 1
+                        _write_finished_episode(
+                            st["ep_idx"],
+                            st["frames"],
+                            st["rewards"],
+                            st["trace"],
+                            bool(done),
+                        )
+                        if next_ep_idx < cfg.num_episodes:
+                            st["ep_idx"] = next_ep_idx
+                            next_ep_idx += 1
+                            st["obs"] = _start_episode(st["env"], st["ep_idx"])
+                            st["frames"] = []
+                            st["rewards"] = []
+                            st["trace"] = []
+                            st["plan"] = []
+                        else:
+                            active.remove(st)
+        finally:
+            for env_i in envs[1:]:
+                env_i.close()
+
+    for ep_idx in range(cfg.num_episodes if cfg.num_envs <= 1 else 0):
         if hasattr(policy, "reset"):
             policy.reset()
         env.reset()
