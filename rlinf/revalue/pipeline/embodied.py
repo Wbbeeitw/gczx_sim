@@ -860,7 +860,7 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
             is_success,
             float(returns[0]) if len(returns) > 0 else 0.0,
             successes,
-            cfg.num_episodes,
+            cfg.target_successes if cfg.success_only else cfg.num_episodes,
         )
 
     def _extract_obs_arrays(obs):
