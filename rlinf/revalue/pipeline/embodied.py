@@ -807,6 +807,7 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
         semantic_trace_recorder = recorder_type(env)
 
     successes = 0
+    episodes_written = 0
     all_returns = []
     episode_lengths = []
 
@@ -851,6 +852,8 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
             )
 
         writer.add_episode(frames)
+        nonlocal episodes_written
+        episodes_written += 1
         all_returns.append(float(returns[0]) if len(returns) > 0 else 0.0)
         episode_lengths.append(ep_len)
         logger.info(
@@ -1005,13 +1008,12 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
                             active.remove(st)
                             continue
                         if done or not cfg.success_only:
+                            # Episodes are written in completion order while
+                            # trace records carry the attempt index; align them
+                            # with the written (completion-order) index.
+                            for trace_record in st["trace"]:
+                                trace_record["episode_index"] = episodes_written
                             if done:
-                                if cfg.success_only:
-                                    # Written episodes are renumbered sequentially
-                                    # in the output dataset, so align trace records
-                                    # with the written index instead of the attempt index.
-                                    for trace_record in st["trace"]:
-                                        trace_record["episode_index"] = successes
                                 successes += 1
                             _write_finished_episode(
                                 st["ep_idx"],
