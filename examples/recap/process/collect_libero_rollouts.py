@@ -64,6 +64,9 @@ def parse_args() -> argparse.Namespace:
         help="Warm up policy inference before creating the EGL environment.",
     )
     parser.add_argument("--failure_reward", type=float, default=None)
+    parser.add_argument("--success_only", action="store_true")
+    parser.add_argument("--target_successes", type=int, default=0)
+    parser.add_argument("--max_attempts", type=int, default=0)
     parser.add_argument("--semantic_trace", action="store_true")
     parser.add_argument(
         "--semantic_trace_task",
@@ -105,6 +108,9 @@ def main() -> None:
             overwrite=args.overwrite,
             warmup_before_env=args.warmup_before_env,
             failure_reward=args.failure_reward,
+            success_only=args.success_only,
+            target_successes=args.target_successes,
+            max_attempts=args.max_attempts,
             semantic_trace=args.semantic_trace,
             semantic_trace_task=args.semantic_trace_task,
             semantic_trace_output_name=args.semantic_trace_output_name,

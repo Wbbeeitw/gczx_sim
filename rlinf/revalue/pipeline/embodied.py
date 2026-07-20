@@ -120,6 +120,9 @@ class LiberoRolloutCollectionConfig:
     task_id: int = 0
     num_episodes: int = 64
     num_envs: int = 1  # envs stepped in parallel per process; >1 batches policy inference across envs
+    success_only: bool = False  # only successful episodes are written to the dataset
+    target_successes: int = 0  # success_only: stop once this many successes are saved
+    max_attempts: int = 0  # success_only: cap on episode attempts; 0 = unlimited
     noise_scale: float = 0.0
     noise_clip: float = 0.3
     action_chunk: int = 5
@@ -687,6 +690,9 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
             )
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    if cfg.success_only and cfg.target_successes <= 0:
+        raise ValueError("success_only requires target_successes > 0")
+
     benchmark_dict = benchmark.get_benchmark_dict()
     task_suite = benchmark_dict[cfg.task_suite_name]()
     task = task_suite.get_task(cfg.task_id)
@@ -878,7 +884,7 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
             obs, _, _, _ = env.step(LIBERO_DUMMY_ACTION)
         return obs
 
-    if cfg.num_envs > 1:
+    if cfg.num_envs > 1 or cfg.success_only:
         # Parallel collection: step cfg.num_envs envs in lockstep and batch
         # policy inference across them. Episodes are handed out from a shared
         # counter; per-episode outputs match the serial path.
@@ -995,16 +1001,28 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
                     )
 
                     if done or len(st["frames"]) >= max_steps:
-                        if done:
-                            successes += 1
-                        _write_finished_episode(
-                            st["ep_idx"],
-                            st["frames"],
-                            st["rewards"],
-                            st["trace"],
-                            bool(done),
-                        )
-                        if next_ep_idx < cfg.num_episodes:
+                        if cfg.success_only and successes >= cfg.target_successes:
+                            active.remove(st)
+                            continue
+                        if done or not cfg.success_only:
+                            if done:
+                                successes += 1
+                            _write_finished_episode(
+                                st["ep_idx"],
+                                st["frames"],
+                                st["rewards"],
+                                st["trace"],
+                                bool(done),
+                            )
+                        if cfg.success_only:
+                            stop_env = successes >= cfg.target_successes or (
+                                0 < cfg.max_attempts <= next_ep_idx
+                            )
+                        else:
+                            stop_env = next_ep_idx >= cfg.num_episodes
+                        if stop_env:
+                            active.remove(st)
+                        else:
                             st["ep_idx"] = next_ep_idx
                             next_ep_idx += 1
                             st["obs"] = _start_episode(st["env"], st["ep_idx"])
@@ -1012,8 +1030,6 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
                             st["rewards"] = []
                             st["trace"] = []
                             st["plan"] = []
-                        else:
-                            active.remove(st)
         finally:
             for env_i in envs[1:]:
                 env_i.close()
