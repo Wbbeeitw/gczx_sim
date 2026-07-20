@@ -354,6 +354,47 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False, model_type=None):
         return functools.partial(_or_policy, policies=policies)
 
 
+class _Fsdp2RootWrapper(torch.nn.Module):
+    """Plain-module passthrough for models fully_shard cannot reclass.
+
+    fully_shard swaps ``__class__`` on the wrapped module, which fails for
+    models with ABC/multi-inheritance layouts (e.g. the CFG openpi model).
+    Wrapping such a model in a plain ``nn.Module`` lets the root shard go
+    through while the state_dict hooks below keep checkpoint keys identical
+    to the unwrapped model (no ``model.`` prefix leakage).
+    """
+
+    def __init__(self, model: torch.nn.Module):
+        super().__init__()
+        self.model = model
+
+    def forward(self, *args, **kwargs):
+        return self.model(*args, **kwargs)
+
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        self.model._save_to_state_dict(destination, prefix, keep_vars)
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        return self.model._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
+
+
 def apply_fsdp2_to_model(
     module,
     config: dict,
@@ -477,7 +518,14 @@ def apply_fsdp2_to_model(
             stacklevel=2,
         )
 
-    return fully_shard(module, **root_kwargs)
+    try:
+        return fully_shard(module, **root_kwargs)
+    except TypeError as exc:
+        if "__class__ assignment" not in str(exc):
+            raise
+        # Some model classes (ABC or multi-inheritance layouts) cannot be
+        # reclassed by fully_shard; shard them inside a plain wrapper instead.
+        return fully_shard(_Fsdp2RootWrapper(module), **root_kwargs)
 
 
 def get_fsdp2_full_state_dict_all_ranks(
