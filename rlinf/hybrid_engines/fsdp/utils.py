@@ -371,6 +371,15 @@ class _Fsdp2RootWrapper(torch.nn.Module):
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
 
+    def state_dict(self, *args, **kwargs):
+        # Delegate entirely so checkpoint keys match the unwrapped model;
+        # nn.Module.state_dict would otherwise recurse into self.model and
+        # add a "model." prefix to every key.
+        return self.model.state_dict(*args, **kwargs)
+
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        return self.model.load_state_dict(state_dict, strict=strict, assign=assign)
+
     def _save_to_state_dict(self, destination, prefix, keep_vars):
         self.model._save_to_state_dict(destination, prefix, keep_vars)
 
