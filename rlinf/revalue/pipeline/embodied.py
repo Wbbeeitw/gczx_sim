@@ -1006,6 +1006,12 @@ def collect_libero_rollouts(cfg: LiberoRolloutCollectionConfig) -> dict[str, Any
                             continue
                         if done or not cfg.success_only:
                             if done:
+                                if cfg.success_only:
+                                    # Written episodes are renumbered sequentially
+                                    # in the output dataset, so align trace records
+                                    # with the written index instead of the attempt index.
+                                    for trace_record in st["trace"]:
+                                        trace_record["episode_index"] = successes
                                 successes += 1
                             _write_finished_episode(
                                 st["ep_idx"],
