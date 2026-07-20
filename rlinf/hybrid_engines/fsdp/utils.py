@@ -372,12 +372,13 @@ class _Fsdp2RootWrapper(torch.nn.Module):
         return self.model(*args, **kwargs)
 
     def __getattr__(self, name):
-        # Delegate attribute access to the wrapped model so that
-        # torch.distributed.checkpoint's FQN resolution (getattr chains
-        # mirroring state_dict keys) works on the wrapper.
-        if name == "model":
-            raise AttributeError(name)
-        return getattr(self.model, name)
+        # nn.Module resolves registered submodules (including "model")
+        # via _modules; delegate everything else to the wrapped model so
+        # torch.distributed.checkpoint's FQN getattr chains still work.
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.model, name)
 
     def state_dict(self, *args, **kwargs):
         # Delegate entirely so checkpoint keys match the unwrapped model;
