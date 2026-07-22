@@ -507,9 +507,12 @@ expert-only binary policy, and evaluates steps 500 and 1000.
 
 The quality gates require expert episodes 20--29 to be successful and
 trainable, require exact source provenance and full frame coverage, and stop
-Policy training unless every expert frame is positive, rollout positives fill
-the per-task top-30% budget, and failed rollout positives remain at or below
-20% of selected rollout positives.
+Policy training unless every expert frame is positive and failed rollout
+positives remain at or below 20% of selected rollout positives. Each task
+fills its rollout top-30% budget when that budget is mathematically feasible;
+otherwise it must select the exact maximum feasible count under the same 20%
+failure cap and record the target, selected count, shortfall, and
+`insufficient_success_frames_under_failure_cap` reason explicitly.
 
 After constructing the ten audited 30-episode task pools, run:
 

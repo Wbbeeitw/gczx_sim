@@ -184,4 +184,8 @@ def test_raw_dataset_view_applies_expert_backstop_and_rollout_failure_cap(
     assert report["num_rollout_positive_frames"] == 10
     assert report["num_rollout_failure_positive_frames"] == 2
     assert report["rollout_failure_positive_ratio"] == pytest.approx(0.2)
+    assert report["rollout_budget_feasible"] is True
+    assert report["rollout_max_feasible_filled"] is True
+    assert report["rollout_positive_shortfall"] == 0
+    assert report["rollout_positive_shortfall_reason"] is None
     assert report["failure_cap_satisfied"] is True

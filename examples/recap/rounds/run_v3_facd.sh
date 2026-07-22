@@ -244,6 +244,7 @@ export_facd() {
   python examples/recap/rounds/run_round.py \
     --config examples/recap/rounds/config/multitask_round1_prcfg.yaml \
     --stage all \
+    --force \
     --set 'pipeline=["export_multitask"]' \
     --set 'tasks=["task0","task1","task2","task3","task4","task5","task6","task7","task8","task9"]' \
     --set "paths.base_model=${BASE_MODEL}" \

@@ -231,8 +231,17 @@ def test_task_pool_and_facd_audits_accept_complete_data(tmp_path: Path) -> None:
                 "success_gate": True,
                 "demo_backstop": True,
                 "rollout_budget_filled": True,
+                "rollout_budget_feasible": True,
+                "rollout_max_feasible_filled": True,
                 "failure_cap_satisfied": True,
                 "num_full_positive_episodes": 1,
+                "num_rollout_success_frames_available": 2,
+                "num_rollout_failure_frames_available": 2,
+                "rollout_positive_budget": 1,
+                "rollout_max_feasible_positive_frames": 1,
+                "rollout_positive_shortfall": 0,
+                "rollout_positive_shortfall_reason": None,
+                "num_rollout_positive_frames": 1,
             },
         )
         export_reports[task] = report_path
@@ -247,3 +256,67 @@ def test_task_pool_and_facd_audits_accept_complete_data(tmp_path: Path) -> None:
 
     assert facd_report["passed"] is True
     assert facd_report["aggregate"]["positive_frames"] == 30
+
+
+def test_facd_audit_accepts_maximum_feasible_shortfall(tmp_path: Path) -> None:
+    rollout_root = tmp_path / "rollout"
+    expert_root = tmp_path / "expert"
+    task_datasets = {
+        task: _build_task_pool(
+            tmp_path / "pools",
+            rollout_root,
+            expert_root,
+            task,
+        )
+        for task in TASKS
+    }
+    export_reports = {}
+    for task, dataset in task_datasets.items():
+        pd.DataFrame(
+            {
+                "episode_index": [0, 0, 1, 1, 2, 2],
+                "frame_index": [0, 1, 0, 1, 0, 1],
+                "advantage": [True, True, False, False, True, True],
+            }
+        ).to_parquet(
+            dataset / "meta" / "advantages_facd_shortfall.parquet",
+            index=False,
+        )
+        report_path = tmp_path / "reports" / task / "export_report.json"
+        _write_json(
+            report_path,
+            {
+                "success_gate": True,
+                "demo_backstop": True,
+                "rollout_budget_filled": False,
+                "rollout_budget_feasible": False,
+                "rollout_max_feasible_filled": True,
+                "failure_cap_satisfied": True,
+                "num_full_positive_episodes": 1,
+                "num_rollout_success_frames_available": 2,
+                "num_rollout_failure_frames_available": 2,
+                "rollout_positive_budget": 3,
+                "rollout_max_feasible_positive_frames": 2,
+                "rollout_positive_shortfall": 1,
+                "rollout_positive_shortfall_reason": (
+                    "insufficient_success_frames_under_failure_cap"
+                ),
+                "num_rollout_positive_frames": 2,
+            },
+        )
+        export_reports[task] = report_path
+
+    report = audit_facd_labels(
+        task_datasets,
+        export_reports,
+        advantage_tag="facd_shortfall",
+        positive_quantile=0.75,
+        failure_positive_cap=0.2,
+    )
+
+    assert report["passed"] is True
+    assert report["tasks"]["task0"]["rollout_budget_feasible"] is False
+    assert report["tasks"]["task0"]["rollout_positive_shortfall"] == 1
+    assert report["tasks"]["task0"]["rollout_positive_shortfall_reason"] == (
+        "insufficient_success_frames_under_failure_cap"
+    )

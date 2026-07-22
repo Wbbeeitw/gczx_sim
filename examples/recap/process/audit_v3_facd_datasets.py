@@ -16,6 +16,24 @@ TASKS = tuple(f"task{task_id}" for task_id in range(10))
 FRAME_KEYS = ["episode_index", "frame_index"]
 
 
+def _max_feasible_positive_frames(
+    *,
+    success_frames: int,
+    failure_frames: int,
+    positive_budget: int,
+    failure_positive_cap: float,
+) -> int:
+    upper_bound = min(positive_budget, success_frames + failure_frames)
+    for selected_frames in range(upper_bound, -1, -1):
+        failure_limit = min(
+            failure_frames,
+            int(failure_positive_cap * selected_frames + 1e-12),
+        )
+        if selected_frames - failure_limit <= success_frames:
+            return selected_frames
+    raise AssertionError("zero selected frames must always be feasible")
+
+
 def _parse_mapping(value: str) -> tuple[str, Path]:
     if "=" not in value:
         raise ValueError(f"Expected TASK=PATH, got {value!r}")
@@ -406,12 +424,25 @@ def audit_facd_labels(
         rollout_frames = int(rollout.sum())
         rollout_budget = int(round(positive_quantile * rollout_frames))
         rollout_positive = labels["positive"] & rollout
-        if int(rollout_positive.sum()) != rollout_budget:
-            raise ValueError(f"{task}: rollout top30 budget is not filled")
-
         success_frame = _bool_series(
             phase_labels["is_success"], f"{task} is_success"
         )
+        rollout_success_frames = int((rollout & success_frame).sum())
+        rollout_failure_frames = rollout_frames - rollout_success_frames
+        max_feasible_positive = _max_feasible_positive_frames(
+            success_frames=rollout_success_frames,
+            failure_frames=rollout_failure_frames,
+            positive_budget=rollout_budget,
+            failure_positive_cap=failure_positive_cap,
+        )
+        rollout_positive_frames = int(rollout_positive.sum())
+        if rollout_positive_frames != max_feasible_positive:
+            raise ValueError(
+                f"{task}: selected {rollout_positive_frames} rollout positives, "
+                f"expected maximum feasible {max_feasible_positive} "
+                f"from top30 budget {rollout_budget}"
+            )
+
         failure_positive = rollout_positive & ~success_frame
         failure_ratio = (
             int(failure_positive.sum()) / int(rollout_positive.sum())
@@ -422,15 +453,44 @@ def audit_facd_labels(
             raise ValueError(f"{task}: failure-positive cap is violated")
 
         export_report = _read_json(export_reports[task])
+        budget_feasible = max_feasible_positive == rollout_budget
         required_flags = {
             "success_gate": True,
             "demo_backstop": True,
-            "rollout_budget_filled": True,
+            "rollout_budget_filled": budget_feasible,
+            "rollout_budget_feasible": budget_feasible,
+            "rollout_max_feasible_filled": True,
             "failure_cap_satisfied": True,
         }
         for field, expected in required_flags.items():
             if bool(export_report.get(field)) is not expected:
                 raise ValueError(f"{task}: export report {field} is not {expected}")
+        required_counts = {
+            "num_rollout_success_frames_available": rollout_success_frames,
+            "num_rollout_failure_frames_available": rollout_failure_frames,
+            "rollout_positive_budget": rollout_budget,
+            "rollout_max_feasible_positive_frames": max_feasible_positive,
+            "rollout_positive_shortfall": rollout_budget - rollout_positive_frames,
+            "num_rollout_positive_frames": rollout_positive_frames,
+        }
+        for field, expected in required_counts.items():
+            if int(export_report.get(field, -1)) != expected:
+                raise ValueError(
+                    f"{task}: export report {field} does not match {expected}"
+                )
+        expected_shortfall_reason = (
+            None
+            if budget_feasible
+            else "insufficient_success_frames_under_failure_cap"
+        )
+        if (
+            export_report.get("rollout_positive_shortfall_reason")
+            != expected_shortfall_reason
+        ):
+            raise ValueError(
+                f"{task}: export report shortfall reason does not match "
+                f"{expected_shortfall_reason!r}"
+            )
         if int(export_report.get("num_full_positive_episodes", -1)) != len(
             full_positive
         ):
@@ -444,9 +504,15 @@ def audit_facd_labels(
             "expert_frames": int(expert.sum()),
             "expert_positive_ratio": float(labels.loc[expert, "positive"].mean()),
             "rollout_frames": rollout_frames,
+            "rollout_success_frames_available": rollout_success_frames,
+            "rollout_failure_frames_available": rollout_failure_frames,
             "rollout_positive_budget": rollout_budget,
-            "rollout_positive_frames": int(rollout_positive.sum()),
-            "rollout_positive_ratio": int(rollout_positive.sum()) / rollout_frames,
+            "rollout_budget_feasible": budget_feasible,
+            "rollout_max_feasible_positive_frames": max_feasible_positive,
+            "rollout_positive_shortfall": rollout_budget - rollout_positive_frames,
+            "rollout_positive_shortfall_reason": expected_shortfall_reason,
+            "rollout_positive_frames": rollout_positive_frames,
+            "rollout_positive_ratio": rollout_positive_frames / rollout_frames,
             "rollout_failure_positive_frames": int(failure_positive.sum()),
             "rollout_failure_positive_ratio": failure_ratio,
             "total_positive_frames": positive_frames,

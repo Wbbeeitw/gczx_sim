@@ -70,6 +70,37 @@ def infer_episode_success(
     return first_return > -(episode_len + abs(float(failure_reward)) / 2.0)
 
 
+def compute_max_feasible_positive_selection(
+    *,
+    success_frames: int,
+    failure_frames: int,
+    positive_budget: int,
+    failure_positive_cap: float,
+) -> tuple[int, int]:
+    """Return the largest feasible selection and its failure-frame limit."""
+
+    counts = (success_frames, failure_frames, positive_budget)
+    if any(int(value) < 0 for value in counts):
+        raise ValueError("frame counts and positive_budget must be non-negative")
+    if not 0.0 <= float(failure_positive_cap) <= 1.0:
+        raise ValueError("failure_positive_cap must be between 0 and 1")
+
+    success_frames = int(success_frames)
+    failure_frames = int(failure_frames)
+    upper_bound = min(
+        int(positive_budget),
+        success_frames + failure_frames,
+    )
+    for selected_frames in range(upper_bound, -1, -1):
+        failure_limit = min(
+            failure_frames,
+            int(float(failure_positive_cap) * selected_frames + 1e-12),
+        )
+        if selected_frames - failure_limit <= success_frames:
+            return selected_frames, failure_limit
+    raise AssertionError("zero selected frames must always be feasible")
+
+
 def compute_gated_positive_mask(
     df: pd.DataFrame,
     *,
@@ -111,13 +142,20 @@ def compute_gated_positive_mask(
     advantages = df["advantage_continuous"].to_numpy(dtype=np.float64)
 
     chosen = np.zeros(n_rows, dtype=bool)
-    failure_limit = int(float(failure_positive_cap) * budget)
+    success_available = int((eligible & is_success_frame).sum())
+    failure_available = int((eligible & ~is_success_frame).sum())
+    selection_target, failure_limit = compute_max_feasible_positive_selection(
+        success_frames=success_available,
+        failure_frames=failure_available,
+        positive_budget=budget,
+        failure_positive_cap=failure_positive_cap,
+    )
     eligible_idx = np.flatnonzero(eligible)
     order = eligible_idx[np.argsort(-advantages[eligible_idx], kind="stable")]
     selected = 0
     selected_failures = 0
     for index in order:
-        if selected >= budget:
+        if selected >= selection_target:
             break
         if not is_success_frame[index]:
             if selected_failures >= failure_limit:
@@ -157,6 +195,14 @@ def summarize_gated_positive_mask(
 
     rollout_frames = int(rollout.sum())
     rollout_budget = int(round(float(positive_quantile) * rollout_frames))
+    rollout_success_frames = int((rollout & success_frame).sum())
+    rollout_failure_frames = rollout_frames - rollout_success_frames
+    max_feasible_positive, _ = compute_max_feasible_positive_selection(
+        success_frames=rollout_success_frames,
+        failure_frames=rollout_failure_frames,
+        positive_budget=rollout_budget,
+        failure_positive_cap=failure_positive_cap,
+    )
     rollout_positive_frames = int(rollout_positive.sum())
     rollout_failure_positive = int((rollout_positive & ~success_frame).sum())
     rollout_success_positive = rollout_positive_frames - rollout_failure_positive
@@ -167,12 +213,22 @@ def summarize_gated_positive_mask(
     )
     total_positive = int(positive.sum())
     total_success_positive = int((positive & success_frame).sum())
+    budget_feasible = max_feasible_positive == rollout_budget
     return {
         "failure_positive_cap": float(failure_positive_cap),
         "num_full_positive_episodes": len(forced_set),
         "num_full_positive_frames": int(forced.sum()),
         "num_rollout_frames": rollout_frames,
+        "num_rollout_success_frames_available": rollout_success_frames,
+        "num_rollout_failure_frames_available": rollout_failure_frames,
         "rollout_positive_budget": rollout_budget,
+        "rollout_max_feasible_positive_frames": max_feasible_positive,
+        "rollout_positive_shortfall": rollout_budget - rollout_positive_frames,
+        "rollout_positive_shortfall_reason": (
+            None
+            if budget_feasible
+            else "insufficient_success_frames_under_failure_cap"
+        ),
         "num_rollout_positive_frames": rollout_positive_frames,
         "num_rollout_success_positive_frames": rollout_success_positive,
         "num_rollout_failure_positive_frames": rollout_failure_positive,
@@ -181,6 +237,10 @@ def summarize_gated_positive_mask(
         ),
         "rollout_failure_positive_ratio": rollout_failure_ratio,
         "rollout_budget_filled": rollout_positive_frames == rollout_budget,
+        "rollout_budget_feasible": budget_feasible,
+        "rollout_max_feasible_filled": (
+            rollout_positive_frames == max_feasible_positive
+        ),
         "failure_cap_satisfied": (
             rollout_failure_ratio <= float(failure_positive_cap) + 1e-12
         ),

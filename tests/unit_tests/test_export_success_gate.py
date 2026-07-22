@@ -142,5 +142,35 @@ def test_all_failure_pool_only_uses_capped_budget() -> None:
         failure_reward=-300.0,
     )
 
-    # budget = 90, but with no success frames only the failure cap (18) is used.
-    assert mask.sum() == 18
+    # Any positive selection would be 100% failure, so the strict 20% cap
+    # makes zero frames the maximum feasible selection.
+    assert mask.sum() == 0
+
+
+def test_infeasible_budget_uses_maximum_strict_cap_selection() -> None:
+    success = _make_episode(
+        0,
+        num_frames=8,
+        first_return=-8.0,
+        adv_offset=0.0,
+    )
+    failure = _make_episode(
+        1,
+        num_frames=20,
+        first_return=-320.0,
+        adv_offset=10.0,
+    )
+    df = pd.concat([success, failure], ignore_index=True)
+
+    mask = compute_gated_positive_mask(
+        df,
+        positive_quantile=0.5,
+        failure_positive_cap=0.2,
+        failure_reward=-300.0,
+    )
+
+    # top50 budget is 14, but 8 available success frames can support at most
+    # 2 failure frames while keeping failure / selected <= 20%.
+    assert mask.sum() == 10
+    assert mask[df["episode_index"] == 0].sum() == 8
+    assert mask[df["episode_index"] == 1].sum() == 2
