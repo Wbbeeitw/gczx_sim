@@ -394,7 +394,7 @@ eval_checkpoints() {
       --set results.round_index=1 \
       --set results.policy_label="FACD-step${step}" \
       --set results.critic_label=Value-FACD-frozen \
-      --set 'results.baseline_success_rates={"task0":0.95,"task1":0.90,"task2":1.00,"task3":0.95,"task4":0.95,"task5":1.00,"task6":0.90,"task7":1.00,"task8":0.75,"task9":0.60}' \
+      --set 'results.baseline_success_rates={"task0":0.85,"task1":0.90,"task2":0.90,"task3":0.90,"task4":1.00,"task5":1.00,"task6":0.80,"task7":1.00,"task8":0.20,"task9":0.60}' \
       --set results.comparison="${comparison}" \
       --set results.output_dir="${RESULTS_ROOT}/eval" \
       --set results.output_name="facd_step_${step}"
