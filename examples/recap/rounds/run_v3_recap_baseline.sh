@@ -68,6 +68,8 @@ round_common_overrides() {
     --set "paths.value_checkpoint=${VALUE_CHECKPOINT}" \
     --set "paths.exp_root=${EXP_ROOT}" \
     --set "paths.results_root=${RESULTS_ROOT}" \
+    --set "gpu.cuda_visible_devices=${CUDA_VISIBLE_DEVICES}" \
+    --set gpu.gpu_id=0 \
     --set datasets.parent_episodes=0 \
     --set datasets.prebuilt_merged=true \
     --set collect.num_episodes=30 \

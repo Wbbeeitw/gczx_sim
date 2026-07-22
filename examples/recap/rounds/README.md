@@ -550,7 +550,8 @@ success/demo gates, complete frame and episode coverage, approximately 30%
 positives per task, and a feature manifest that identifies the shared Value
 checkpoint. Policy training cannot start without all three passed reports.
 
-Run this only after the gated FACD pipeline has finished and released GPU 0:
+When both runs use the same physical GPU, start this only after the gated FACD
+pipeline has finished and released GPU 0:
 
 ```bash
 cd /workspace/RLinf
@@ -560,6 +561,13 @@ POLICY_MICRO_BATCH_SIZE=16 \
 EVAL_ROLLOUT_EPOCH=2 \
 bash examples/recap/rounds/run_v3_recap_baseline.sh all
 ```
+
+To overlap the comparison with the gated FACD run, wait until
+`fit_critic_multitask` has produced the shared raw-advantage parquet and then
+launch the baseline in a container bound to a different physical GPU. Inside
+that container the selected device is normally logical GPU 0, so keep
+`CUDA_VISIBLE_DEVICES=0`; the script forwards that value into `run_round.py`.
+Never launch both pipelines against the same physical GPU.
 
 The baseline trains the same positive-only binary CFG policy for 1000 steps,
 saves and evaluates steps 500 and 1000, and writes its checkpoints under
