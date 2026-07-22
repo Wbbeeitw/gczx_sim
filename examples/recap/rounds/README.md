@@ -534,3 +534,46 @@ bash examples/recap/rounds/run_v3_facd.sh audit_facd
 bash examples/recap/rounds/run_v3_facd.sh train_policy
 bash examples/recap/rounds/run_v3_facd.sh eval_checkpoints
 ```
+
+## Round1 v3 fixed-Value ReCap baseline
+
+`run_v3_recap_baseline.sh` is the matched ReCap comparison for the gated FACD
+run above. It reuses the same ten 30-episode task pools, the same merged
+300-episode critic dataset, and the exact frozen-VLM Value checkpoint at
+`global_step_1200`. It does not train another Value model and does not run the
+task z/p heads or fusion. Instead, each task receives an ordinary raw-Value
+top-30% binary split with both `success_gate` and `demo_backstop` disabled.
+
+The baseline reruns the full task-pool and merged-pool audits before touching
+policy labels. A second audit then requires raw mode, no fused predictions, no
+success/demo gates, complete frame and episode coverage, approximately 30%
+positives per task, and a feature manifest that identifies the shared Value
+checkpoint. Policy training cannot start without all three passed reports.
+
+Run this only after the gated FACD pipeline has finished and released GPU 0:
+
+```bash
+cd /workspace/RLinf
+
+POLICY_MAX_STEPS=1000 \
+POLICY_MICRO_BATCH_SIZE=16 \
+EVAL_ROLLOUT_EPOCH=2 \
+bash examples/recap/rounds/run_v3_recap_baseline.sh all
+```
+
+The baseline trains the same positive-only binary CFG policy for 1000 steps,
+saves and evaluates steps 500 and 1000, and writes its checkpoints under
+`/workspace/results/round1_v3_recap_baseline`. The raw labels and small ReCap
+artifacts live under `/data/libero_long/round1_v3_recap_baseline_exp`.
+
+Recovery stages are:
+
+```bash
+bash examples/recap/rounds/run_v3_recap_baseline.sh check
+bash examples/recap/rounds/run_v3_recap_baseline.sh audit_data
+bash examples/recap/rounds/run_v3_recap_baseline.sh score_raw
+bash examples/recap/rounds/run_v3_recap_baseline.sh export_raw
+bash examples/recap/rounds/run_v3_recap_baseline.sh audit_raw
+bash examples/recap/rounds/run_v3_recap_baseline.sh train_policy
+bash examples/recap/rounds/run_v3_recap_baseline.sh eval_checkpoints
+```
