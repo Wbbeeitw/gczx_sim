@@ -496,3 +496,41 @@ eval:
 Set the actual FACD strategy and positive/negative scales from the experiment
 specification. The orchestrator does not automatically switch methods by round
 number.
+
+## Round1 v3 gated FACD
+
+`run_v3_facd.sh` consumes 20 PPO rollouts and 10 successful expert episodes
+per task. Its `all` stage audits every task-pool data/semantic-trace frame,
+builds and audits the merged 300-episode critic pool, trains the frozen-VLM
+Value and task fusion heads, exports and audits gated FACD labels, trains the
+expert-only binary policy, and evaluates steps 500 and 1000.
+
+The quality gates require expert episodes 20--29 to be successful and
+trainable, require exact source provenance and full frame coverage, and stop
+Policy training unless every expert frame is positive, rollout positives fill
+the per-task top-30% budget, and failed rollout positives remain at or below
+20% of selected rollout positives.
+
+After constructing the ten audited 30-episode task pools, run:
+
+```bash
+cd /workspace/RLinf
+source switch_env openpi
+
+POLICY_MAX_STEPS=1000 \
+POLICY_MICRO_BATCH_SIZE=16 \
+bash examples/recap/rounds/run_v3_facd.sh all
+```
+
+Recovery stages can be invoked independently:
+
+```bash
+bash examples/recap/rounds/run_v3_facd.sh audit_task_pools
+bash examples/recap/rounds/run_v3_facd.sh merge_pool
+bash examples/recap/rounds/run_v3_facd.sh audit_merged
+bash examples/recap/rounds/run_v3_facd.sh critic_fusion
+bash examples/recap/rounds/run_v3_facd.sh export_facd
+bash examples/recap/rounds/run_v3_facd.sh audit_facd
+bash examples/recap/rounds/run_v3_facd.sh train_policy
+bash examples/recap/rounds/run_v3_facd.sh eval_checkpoints
+```

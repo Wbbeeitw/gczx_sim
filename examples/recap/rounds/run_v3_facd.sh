@@ -20,7 +20,7 @@ STAGE="${1:-data_pool}"
 TASKS=(task0 task1 task2 task3 task4 task5 task6 task7 task8 task9)
 
 ROLLOUT_ROOT=/data/libero_long/round1_v3_ppo_rollout_20ep_retry1
-EXPERT_ROOT=/data/libero_long/round1_v3_ppo_expert
+EXPERT_ROOT=/data/libero_long/round1_v3_ppo_expert_success10
 TASK_POOL_ROOT=/data/libero_long/round1_v3_facd_30ep
 MERGED_POOL=/data/libero_long/round1_v3_facd_multitask_300ep
 REPORT_ROOT=/workspace/results/round1_v3_facd/data_pool
@@ -30,14 +30,58 @@ BASE_MODEL=/workspace/models/RLinf-Pi05-PPO-LIBERO-130
 RETURNS_TAG=round1_v3_facd_returns
 BASE_ADVANTAGE_TAG=round1_v3_facd_base_adv
 FACD_ADVANTAGE_TAG=round1_v3_facd_fused_top30
-POLICY_MAX_STEPS="${POLICY_MAX_STEPS:-1500}"
+POLICY_MAX_STEPS="${POLICY_MAX_STEPS:-1000}"
 POLICY_MICRO_BATCH_SIZE="${POLICY_MICRO_BATCH_SIZE:-16}"
 EVAL_ROLLOUT_EPOCH="${EVAL_ROLLOUT_EPOCH:-2}"
+TASK_POOL_AUDIT="${REPORT_ROOT}/task_pool_quality_audit.json"
+MERGED_POOL_AUDIT="${REPORT_ROOT}/merged_pool_quality_audit.json"
+FACD_LABEL_AUDIT="${REPORT_ROOT}/facd_label_quality_audit.json"
+
+task_dataset_args() {
+  for task in "${TASKS[@]}"; do
+    printf '%s\n' --task-dataset "${task}=${TASK_POOL_ROOT}/${task}_30ep"
+  done
+}
+
+audit_task_pools() {
+  mapfile -t dataset_args < <(task_dataset_args)
+  python examples/recap/process/audit_v3_facd_datasets.py task-pools \
+    "${dataset_args[@]}" \
+    --rollout-root "${ROLLOUT_ROOT}" \
+    --expert-root "${EXPERT_ROOT}" \
+    --output-path "${TASK_POOL_AUDIT}"
+}
+
+audit_merged_pool() {
+  mapfile -t dataset_args < <(task_dataset_args)
+  python examples/recap/process/audit_v3_facd_datasets.py merged \
+    "${dataset_args[@]}" \
+    --merged-dataset "${MERGED_POOL}" \
+    --output-path "${MERGED_POOL_AUDIT}"
+}
+
+audit_facd_labels() {
+  mapfile -t dataset_args < <(task_dataset_args)
+  report_args=()
+  for task in "${TASKS[@]}"; do
+    report_args+=(
+      --export-report
+      "${task}=${EXP_ROOT}/policy_data/${task}/export_report.json"
+    )
+  done
+  python examples/recap/process/audit_v3_facd_datasets.py facd \
+    "${dataset_args[@]}" \
+    "${report_args[@]}" \
+    --advantage-tag "${FACD_ADVANTAGE_TAG}" \
+    --positive-quantile 0.3 \
+    --failure-positive-cap 0.2 \
+    --output-path "${FACD_LABEL_AUDIT}"
+}
 
 build_task_pools() {
   for task in "${TASKS[@]}"; do
     rollout_dataset="${ROLLOUT_ROOT}/${task}_20ep"
-    expert_dataset="${EXPERT_ROOT}/${task}"
+    expert_dataset="${EXPERT_ROOT}/${task}_10ep"
     test -f "${rollout_dataset}/meta/episodes.jsonl" || {
       echo "missing rollout dataset: ${rollout_dataset}"
       exit 1
@@ -63,7 +107,7 @@ build_task_pools() {
   python examples/recap/process/build_fixed_multitask_train_pools.py \
     --tasks "${TASKS[@]}" \
     --rollout-pattern "${ROLLOUT_ROOT}/{task}_20ep" \
-    --expert-pattern "${EXPERT_ROOT}/{task}" \
+    --expert-pattern "${EXPERT_ROOT}/{task}_10ep" \
     --experts-per-task 10 \
     --episodes-per-task 30 \
     --output-pattern "${TASK_POOL_ROOT}/{task}_30ep" \
@@ -133,6 +177,11 @@ repair_rollout_traces() {
 }
 
 critic_fusion() {
+  test -f "${MERGED_POOL_AUDIT}" || {
+    echo "missing passed merged-pool audit: ${MERGED_POOL_AUDIT}"
+    echo "Run prepare_data before critic_fusion."
+    exit 1
+  }
   test -f "${MERGED_POOL}/meta/info.json" || {
     echo "missing merged 300ep pool: ${MERGED_POOL}"
     echo "Run merge_pool before critic_fusion."
@@ -175,6 +224,10 @@ critic_fusion() {
 }
 
 export_facd() {
+  test -f "${MERGED_POOL_AUDIT}" || {
+    echo "missing passed merged-pool audit: ${MERGED_POOL_AUDIT}"
+    exit 1
+  }
   base_advantages="${MERGED_POOL}/meta/advantages_${BASE_ADVANTAGE_TAG}.parquet"
   predictions="${EXP_ROOT}/revalue/predictions.parquet"
   test -f "${base_advantages}" || {
@@ -222,6 +275,11 @@ train_policy() {
   test -f "${manifest}" || {
     echo "missing policy manifest: ${manifest}"
     echo "Run export_facd before train_policy."
+    exit 1
+  }
+  test -f "${FACD_LABEL_AUDIT}" || {
+    echo "missing passed FACD-label audit: ${FACD_LABEL_AUDIT}"
+    echo "Run audit_facd before train_policy."
     exit 1
   }
   for task in "${TASKS[@]}"; do
@@ -286,7 +344,10 @@ eval_checkpoints() {
     exit 1
   }
 
-  for step in 500 1000 1500; do
+  for step in 500 1000; do
+    if [ "${step}" -gt "${POLICY_MAX_STEPS}" ]; then
+      continue
+    fi
     checkpoint="${RESULTS_ROOT}/policy/policy1_facd/checkpoints/global_step_${step}"
     test -d "${checkpoint}" || {
       echo "missing policy checkpoint: ${checkpoint}"
@@ -339,6 +400,25 @@ eval_checkpoints() {
   done
 }
 
+prepare_data() {
+  audit_task_pools
+  if [ -e "${MERGED_POOL}" ]; then
+    echo "reusing existing merged pool: ${MERGED_POOL}"
+  else
+    merge_pool
+  fi
+  audit_merged_pool
+}
+
+run_all() {
+  prepare_data
+  critic_fusion
+  export_facd
+  audit_facd_labels
+  train_policy
+  eval_checkpoints
+}
+
 case "${STAGE}" in
   task_pools)
     build_task_pools
@@ -348,6 +428,15 @@ case "${STAGE}" in
     ;;
   repair_rollout_traces)
     repair_rollout_traces
+    ;;
+  audit_task_pools)
+    audit_task_pools
+    ;;
+  audit_merged)
+    audit_merged_pool
+    ;;
+  prepare_data)
+    prepare_data
     ;;
   data_pool)
     build_task_pools
@@ -359,15 +448,21 @@ case "${STAGE}" in
   export_facd)
     export_facd
     ;;
+  audit_facd)
+    audit_facd_labels
+    ;;
   train_policy)
     train_policy
     ;;
   eval_checkpoints)
     eval_checkpoints
     ;;
+  all)
+    run_all
+    ;;
   *)
     echo "unknown stage: ${STAGE}"
-    echo "available stages: task_pools, repair_rollout_traces, merge_pool, data_pool, critic_fusion, export_facd, train_policy, eval_checkpoints"
+    echo "available stages: task_pools, audit_task_pools, merge_pool, audit_merged, prepare_data, data_pool, critic_fusion, export_facd, audit_facd, train_policy, eval_checkpoints, all"
     exit 2
     ;;
 esac
