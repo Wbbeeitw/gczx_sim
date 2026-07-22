@@ -96,7 +96,7 @@ value:
   # set true to go back to the frozen-VLM ablation.
   freeze_vlm: false
   steps: 1200
-  save_interval: 600
+  save_interval: 1200
   micro_batch_size: 16
   global_batch_size: 64
   lr: 1.0e-5

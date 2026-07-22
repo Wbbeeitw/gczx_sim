@@ -208,7 +208,7 @@ critic_fusion() {
     --set tags.child_fused="${FACD_ADVANTAGE_TAG}" \
     --set value.freeze_vlm=true \
     --set value.steps=1200 \
-    --set value.save_interval=600 \
+    --set value.save_interval=1200 \
     --set value.micro_batch_size=16 \
     --set value.global_batch_size=64 \
     --set value.lr=1e-5 \
