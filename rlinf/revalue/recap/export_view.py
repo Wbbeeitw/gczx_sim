@@ -30,6 +30,9 @@ from rlinf.revalue.data.advantage_table import (
 from rlinf.revalue.recap.export import (
     build_save_advantages_df,
     compute_fused_advantages,
+    compute_gated_positive_mask,
+    infer_episode_success,
+    load_full_positive_episodes,
     update_mixture_config,
 )
 
@@ -61,6 +64,10 @@ class ExportDatasetViewConfig:
     discount_next_value: bool = True
     expected_episodes: int | None = None
     report_path: str | None = None
+    success_gate: bool = False
+    failure_positive_cap: float = 0.2
+    failure_reward: float = -300.0
+    demo_backstop: bool = False
 
 
 def _child_total_frames(child_dataset_path: Path) -> int | None:
@@ -140,7 +147,41 @@ def export_dataset_view(cfg: ExportDatasetViewConfig) -> Path:
             (1.0 - cfg.positive_quantile) * 100.0,
         )
     )
-    save_df = build_save_advantages_df(exported_df, threshold=threshold)
+    positive_mask = None
+    gate_stats: dict[str, float | int | bool] = {}
+    if cfg.success_gate or cfg.demo_backstop:
+        forced = (
+            load_full_positive_episodes(child_path) if cfg.demo_backstop else None
+        )
+        positive_mask = compute_gated_positive_mask(
+            exported_df,
+            positive_quantile=cfg.positive_quantile,
+            failure_positive_cap=cfg.failure_positive_cap,
+            failure_reward=cfg.failure_reward,
+            full_positive_episodes=forced,
+        )
+        success_by_episode = infer_episode_success(
+            exported_df, failure_reward=cfg.failure_reward
+        )
+        positive_episodes = exported_df["episode_index"][positive_mask]
+        num_positive = int(positive_mask.sum())
+        num_success_positive = int(
+            positive_episodes.map(success_by_episode).fillna(False).sum()
+        )
+        gate_stats = {
+            "success_gate": bool(cfg.success_gate),
+            "demo_backstop": bool(cfg.demo_backstop),
+            "failure_positive_cap": float(cfg.failure_positive_cap),
+            "num_full_positive_episodes": len(forced) if forced else 0,
+            "num_success_positive_frames": num_success_positive,
+            "num_failure_positive_frames": num_positive - num_success_positive,
+            "positive_success_purity": (
+                num_success_positive / num_positive if num_positive else 0.0
+            ),
+        }
+    save_df = build_save_advantages_df(
+        exported_df, threshold=threshold, positive_mask=positive_mask
+    )
 
     episodes = int(save_df["episode_index"].nunique())
     if cfg.expected_episodes is not None and episodes != int(cfg.expected_episodes):
@@ -187,6 +228,7 @@ def export_dataset_view(cfg: ExportDatasetViewConfig) -> Path:
         "episodes_exported": episodes,
         "child_total_frames": total_frames,
         "positive_ratio": float(save_df["advantage"].mean()),
+        **gate_stats,
     }
     report_path = (
         Path(cfg.report_path)

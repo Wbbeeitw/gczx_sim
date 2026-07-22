@@ -295,6 +295,10 @@ class RevalueExportViewConfig:
     discount_next_value: bool = True
     expected_episodes: int | None = None
     report_path: str | None = None
+    success_gate: bool = False
+    failure_positive_cap: float = 0.2
+    failure_reward: float = -300.0
+    demo_backstop: bool = False
 
 
 @dataclass

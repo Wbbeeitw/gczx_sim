@@ -752,6 +752,10 @@ def run_revalue(cfg: RevalueConfig) -> None:
                     discount_next_value=cfg.export_view.discount_next_value,
                     expected_episodes=cfg.export_view.expected_episodes,
                     report_path=cfg.export_view.report_path,
+                    success_gate=cfg.export_view.success_gate,
+                    failure_positive_cap=cfg.export_view.failure_positive_cap,
+                    failure_reward=cfg.export_view.failure_reward,
+                    demo_backstop=cfg.export_view.demo_backstop,
                 )
             )
             logger.info("exported dataset view advantages: %s", view_out)

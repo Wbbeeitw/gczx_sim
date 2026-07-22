@@ -979,6 +979,13 @@ def _steps_export_policy_data(ctx: dict) -> list[Step]:
                     "export_view.discount_next_value=true",
                     f"export_view.expected_episodes={ctx['child_episodes']}",
                     f"export_view.report_path={policy_data_root}/export_report.json",
+                    "export_view.success_gate="
+                    f"{str(bool(revalue.get('success_gate', False))).lower()}",
+                    "export_view.failure_positive_cap="
+                    f"{revalue.get('failure_positive_cap', 0.2)}",
+                    f"export_view.failure_reward={_get(cfg, 'returns.failure_reward')}",
+                    "export_view.demo_backstop="
+                    f"{str(bool(revalue.get('demo_backstop', False))).lower()}",
                     f"output.root={policy_data_root}",
                 ],
             ),
@@ -1633,6 +1640,13 @@ def _steps_export_multitask(ctx: dict) -> list[Step]:
                         "export_view.discount_next_value=true",
                         f"export_view.expected_episodes={policy_episodes}",
                         f"export_view.report_path={task_root}/export_report.json",
+                        "export_view.success_gate="
+                        f"{str(bool(revalue.get('success_gate', False))).lower()}",
+                        "export_view.failure_positive_cap="
+                        f"{revalue.get('failure_positive_cap', 0.2)}",
+                        f"export_view.failure_reward={_get(cfg, 'returns.failure_reward')}",
+                        "export_view.demo_backstop="
+                        f"{str(bool(revalue.get('demo_backstop', False))).lower()}",
                         f"output.root={task_root}",
                     ],
                 ),
@@ -1737,6 +1751,13 @@ def _steps_export_multitask_raw(ctx: dict) -> list[Step]:
                         f"{revalue.get('positive_quantile', 0.3)}",
                         f"export_view.expected_episodes={policy_episodes}",
                         f"export_view.report_path={task_root}/raw_export_report.json",
+                        "export_view.success_gate="
+                        f"{str(bool(revalue.get('success_gate', False))).lower()}",
+                        "export_view.failure_positive_cap="
+                        f"{revalue.get('failure_positive_cap', 0.2)}",
+                        f"export_view.failure_reward={_get(cfg, 'returns.failure_reward')}",
+                        "export_view.demo_backstop="
+                        f"{str(bool(revalue.get('demo_backstop', False))).lower()}",
                         f"output.root={task_root}",
                     ],
                 ),

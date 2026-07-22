@@ -43,6 +43,97 @@ class ExportConfig:
     discount_next_value: bool = True
     split: str | None = "train"
     report_path: str | None = None
+    success_gate: bool = False
+    failure_positive_cap: float = 0.2
+    failure_reward: float = -300.0
+    demo_backstop: bool = False
+
+
+def infer_episode_success(
+    df: pd.DataFrame,
+    *,
+    failure_reward: float,
+) -> pd.Series:
+    """Infer per-episode success from the first-frame return.
+
+    ``compute_returns`` assigns -1 per step and adds ``failure_reward`` (e.g.
+    -300) to the final frame of failed episodes, so a failed episode of
+    length n has first-frame return around ``-(n + |failure_reward|)`` while
+    a successful one has first-frame return around ``-n``. The midpoint
+    ``-(n + |failure_reward| / 2)`` separates the two cases.
+    """
+
+    ordered = df.sort_values(["episode_index", "frame_index"])
+    grouped = ordered.groupby("episode_index")
+    episode_len = grouped["frame_index"].size()
+    first_return = grouped["return"].first()
+    return first_return > -(episode_len + abs(float(failure_reward)) / 2.0)
+
+
+def compute_gated_positive_mask(
+    df: pd.DataFrame,
+    *,
+    positive_quantile: float,
+    failure_positive_cap: float,
+    failure_reward: float,
+    full_positive_episodes: set[int] | None = None,
+) -> np.ndarray:
+    """Build the positive mask with success gating and a demo backstop.
+
+    - Episodes in ``full_positive_episodes`` are forced positive on every
+      frame (expert demos) and do not count against the quantile budget.
+    - Of the remaining frames, ``positive_quantile`` become positive;
+      at most ``failure_positive_cap`` of that budget may come from failed
+      episodes, picking the highest-advantage failure frames first.
+    """
+
+    n_rows = len(df)
+    if n_rows == 0:
+        return np.zeros(0, dtype=bool)
+
+    success_by_episode = infer_episode_success(df, failure_reward=failure_reward)
+    episode_index = df["episode_index"].to_numpy()
+    is_success_frame = np.array(
+        [bool(success_by_episode.get(ep, False)) for ep in episode_index]
+    )
+    forced = np.zeros(n_rows, dtype=bool)
+    if full_positive_episodes:
+        forced_set = {int(ep) for ep in full_positive_episodes}
+        forced = np.array([ep in forced_set for ep in episode_index])
+
+    eligible = ~forced
+    budget = int(round(float(positive_quantile) * float(eligible.sum())))
+    advantages = df["advantage_continuous"].to_numpy(dtype=np.float64)
+
+    chosen = np.zeros(n_rows, dtype=bool)
+    failure_idx = np.flatnonzero(eligible & ~is_success_frame)
+    failure_take = min(int(float(failure_positive_cap) * budget), failure_idx.size)
+    if failure_take > 0:
+        order = failure_idx[np.argsort(-advantages[failure_idx], kind="stable")]
+        chosen[order[:failure_take]] = True
+
+    success_idx = np.flatnonzero(eligible & is_success_frame)
+    success_take = min(max(0, budget - failure_take), success_idx.size)
+    if success_take > 0:
+        order = success_idx[np.argsort(-advantages[success_idx], kind="stable")]
+        chosen[order[:success_take]] = True
+
+    return chosen | forced
+
+
+def load_full_positive_episodes(dataset_path: str | Path) -> set[int]:
+    """Load demo episode indices from ``meta/full_positive_episodes.json``."""
+
+    path = Path(dataset_path) / "meta" / "full_positive_episodes.json"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"demo_backstop requires {path}; write it when merging expert demos"
+        )
+    with open(path, "r", encoding="utf-8") as file:
+        episodes = json.load(file)
+    if not isinstance(episodes, list):
+        raise ValueError(f"{path} must contain a JSON list of episode indices")
+    return {int(ep) for ep in episodes}
 
 
 def _load_predictions(path: str | Path, split: str | None) -> pd.DataFrame:
@@ -130,6 +221,7 @@ def build_save_advantages_df(
     fused_df: pd.DataFrame,
     *,
     threshold: float,
+    positive_mask: np.ndarray | None = None,
 ) -> pd.DataFrame:
     """Build a standard ReCap advantage dataframe."""
     save_cols = [
@@ -149,7 +241,10 @@ def build_save_advantages_df(
     ]
     save_cols = [col for col in save_cols if col in fused_df.columns]
     save_df = fused_df[save_cols].copy()
-    save_df["advantage"] = save_df["advantage_continuous"] >= float(threshold)
+    if positive_mask is not None:
+        save_df["advantage"] = np.asarray(positive_mask, dtype=bool)
+    else:
+        save_df["advantage"] = save_df["advantage_continuous"] >= float(threshold)
     return save_df
 
 
@@ -200,7 +295,43 @@ def export_fused_advantages(cfg: ExportConfig) -> Path:
             (1.0 - cfg.positive_quantile) * 100.0,
         )
     )
-    save_df = build_save_advantages_df(fused_df, threshold=threshold)
+    positive_mask = None
+    gate_stats: dict[str, float | int | bool] = {}
+    if cfg.success_gate or cfg.demo_backstop:
+        forced = (
+            load_full_positive_episodes(cfg.dataset_path)
+            if cfg.demo_backstop
+            else None
+        )
+        positive_mask = compute_gated_positive_mask(
+            fused_df,
+            positive_quantile=cfg.positive_quantile,
+            failure_positive_cap=cfg.failure_positive_cap,
+            failure_reward=cfg.failure_reward,
+            full_positive_episodes=forced,
+        )
+        success_by_episode = infer_episode_success(
+            fused_df, failure_reward=cfg.failure_reward
+        )
+        positive_episodes = fused_df["episode_index"][positive_mask]
+        num_positive = int(positive_mask.sum())
+        num_success_positive = int(
+            positive_episodes.map(success_by_episode).fillna(False).sum()
+        )
+        gate_stats = {
+            "success_gate": bool(cfg.success_gate),
+            "demo_backstop": bool(cfg.demo_backstop),
+            "failure_positive_cap": float(cfg.failure_positive_cap),
+            "num_full_positive_episodes": len(forced) if forced else 0,
+            "num_success_positive_frames": num_success_positive,
+            "num_failure_positive_frames": num_positive - num_success_positive,
+            "positive_success_purity": (
+                num_success_positive / num_positive if num_positive else 0.0
+            ),
+        }
+    save_df = build_save_advantages_df(
+        fused_df, threshold=threshold, positive_mask=positive_mask
+    )
     out_path = resolve_advantage_path(cfg.dataset_path, cfg.output_tag)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     save_df.to_parquet(out_path, index=False)
@@ -225,6 +356,7 @@ def export_fused_advantages(cfg: ExportConfig) -> Path:
         "rows_exported": int(len(save_df)),
         "episodes_exported": int(save_df["episode_index"].nunique()),
         "positive_ratio": float(save_df["advantage"].mean()),
+        **gate_stats,
     }
     report_path = (
         Path(cfg.report_path)
