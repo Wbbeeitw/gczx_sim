@@ -178,12 +178,15 @@ def test_build_cfg_sample_metadata_csa_soft_bottom_split_is_deterministic() -> N
     assert first == second
 
 
-def test_build_cfg_sample_metadata_csa_residual_marks_only_top_bucket() -> None:
+def test_build_cfg_sample_metadata_csa_residual_uses_exported_boolean() -> None:
     df = pd.DataFrame(
         {
             "episode_index": [0] * 10,
             "frame_index": list(range(10)),
-            "advantage": [False] * 10,
+            # Export-time boolean intentionally disagrees with the continuous
+            # ranking: the mask must follow the boolean, not a recomputed
+            # top-quantile threshold over advantage_continuous.
+            "advantage": [True, True, True] + [False] * 7,
             "advantage_continuous": list(range(10)),
         }
     )
@@ -197,13 +200,13 @@ def test_build_cfg_sample_metadata_csa_residual_marks_only_top_bucket() -> None:
         dataset_id="dataset_residual",
     )
 
-    assert metadata[(0, 9)]["advantage"] is True
-    assert metadata[(0, 8)]["cfg_residual_positive_mask"] is True
-    assert metadata[(0, 7)]["cfg_residual_positive_mask"] is True
-    assert metadata[(0, 6)]["cfg_residual_positive_mask"] is False
-    assert metadata[(0, 0)]["advantage"] is False
-    assert "cfg_quality_label" not in metadata[(0, 9)]
-    assert "cfg_loss_weight" not in metadata[(0, 9)]
+    assert metadata[(0, 0)]["advantage"] is True
+    assert metadata[(0, 0)]["cfg_residual_positive_mask"] is True
+    assert metadata[(0, 2)]["cfg_residual_positive_mask"] is True
+    assert metadata[(0, 9)]["cfg_residual_positive_mask"] is False
+    assert metadata[(0, 9)]["advantage"] is False
+    assert "cfg_quality_label" not in metadata[(0, 0)]
+    assert "cfg_loss_weight" not in metadata[(0, 0)]
 
 
 def test_compute_binary_cfg_routing_masks_matches_legacy_semantics() -> None:

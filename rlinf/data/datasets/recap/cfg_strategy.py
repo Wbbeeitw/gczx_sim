@@ -88,7 +88,7 @@ def build_cfg_sample_metadata(
     - ``cfg_quality_label``: 0=positive, 1=neutral, 2=negative
     - ``cfg_percentile_rank``: rank of continuous advantage in [0, 1]
     - ``cfg_loss_weight``: smooth weight derived from percentile rank
-    - ``cfg_residual_positive_mask``: top-positive mask for residual CFG
+    - ``cfg_residual_positive_mask``: export-time positive boolean for residual CFG
     """
 
     required_keys = {"episode_index", "frame_index", "advantage"}
@@ -139,14 +139,17 @@ def build_cfg_sample_metadata(
         return metadata
 
     if strategy_cfg.strategy == CFG_STRATEGY_CSA_RESIDUAL:
+        # Use the export-time positive boolean as the residual mask so training
+        # sees exactly the frames selected during advantage export, instead of
+        # recomputing a (possibly different) top-quantile threshold here.
         metadata: dict[tuple[int, int], dict[str, Any]] = {}
         for idx, row in enumerate(advantages_df.to_dict("records")):
             episode_index = int(row["episode_index"])
             frame_index = int(row["frame_index"])
-            is_positive = float(row["advantage_continuous"]) >= positive_threshold
+            is_positive = bool(row["advantage"])
             metadata[(episode_index, frame_index)] = {
-                "advantage": bool(is_positive),
-                "cfg_residual_positive_mask": bool(is_positive),
+                "advantage": is_positive,
+                "cfg_residual_positive_mask": is_positive,
                 "cfg_percentile_rank": float(percentile_rank[idx]),
             }
         return metadata
