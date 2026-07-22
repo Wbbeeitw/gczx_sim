@@ -271,6 +271,9 @@ class RevalueRolloutCollectConfig:
     guidance_scale: float = 1.0
     negative_guidance_scale: float = 0.0
     failure_reward: float | None = None
+    success_only: bool = False
+    target_successes: int = 0
+    max_attempts: int = 0
     semantic_trace: bool = False
     semantic_trace_task: str = "task1"
     semantic_trace_output_name: str = "semantic_trace_task1"

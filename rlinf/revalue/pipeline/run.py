@@ -708,6 +708,9 @@ def run_revalue(cfg: RevalueConfig) -> None:
                         cfg.rollout_collect.negative_guidance_scale
                     ),
                     failure_reward=cfg.rollout_collect.failure_reward,
+                    success_only=cfg.rollout_collect.success_only,
+                    target_successes=cfg.rollout_collect.target_successes,
+                    max_attempts=cfg.rollout_collect.max_attempts,
                     semantic_trace=cfg.rollout_collect.semantic_trace,
                     semantic_trace_task=cfg.rollout_collect.semantic_trace_task,
                     semantic_trace_output_name=(
