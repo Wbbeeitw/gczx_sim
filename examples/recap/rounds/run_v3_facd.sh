@@ -24,14 +24,15 @@ EXPERT_ROOT=/data/libero_long/round1_v3_ppo_expert_success10
 TASK_POOL_ROOT=/data/libero_long/round1_v3_facd_30ep
 MERGED_POOL=/data/libero_long/round1_v3_facd_multitask_300ep
 REPORT_ROOT=/workspace/results/round1_v3_facd/data_pool
-EXP_ROOT=/data/libero_long/round1_v3_facd_exp
-RESULTS_ROOT=/workspace/results/round1_v3_facd
+EXP_ROOT="${FACD_EXP_ROOT:-/data/libero_long/round1_v3_facd_exp}"
+RESULTS_ROOT="${FACD_RESULTS_ROOT:-/workspace/results/round1_v3_facd}"
 BASE_MODEL=/workspace/models/RLinf-Pi05-PPO-LIBERO-130
 RETURNS_TAG=round1_v3_facd_returns
 BASE_ADVANTAGE_TAG=round1_v3_facd_base_adv
 FACD_ADVANTAGE_TAG=round1_v3_facd_fused_top30
 POLICY_MAX_STEPS="${POLICY_MAX_STEPS:-1000}"
 POLICY_MICRO_BATCH_SIZE="${POLICY_MICRO_BATCH_SIZE:-16}"
+POLICY_SEED="${POLICY_SEED:-1234}"
 EVAL_ROLLOUT_EPOCH="${EVAL_ROLLOUT_EPOCH:-2}"
 TASK_POOL_AUDIT="${REPORT_ROOT}/task_pool_quality_audit.json"
 MERGED_POOL_AUDIT="${REPORT_ROOT}/merged_pool_quality_audit.json"
@@ -330,7 +331,7 @@ train_policy() {
     --set policy.lr_warmup_steps=100 \
     --set policy.global_batch_size=64 \
     --set policy.micro_batch_size="${POLICY_MICRO_BATCH_SIZE}" \
-    --set 'policy.extra_overrides=["actor.model.openpi.train_expert_only=true","actor.fsdp_config.strategy=fsdp2","actor.fsdp_config.sharding_strategy=no_shard","actor.fsdp_config.use_orig_params=false","+actor.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap=[\"NonExistentModule\"]","+actor.fsdp_config.ignored_module_classes=[\"OpenPi0ForCFGActionPrediction\"]","actor.optim.lr=1e-5"]'
+    --set "policy.extra_overrides=[\"actor.seed=${POLICY_SEED}\",\"actor.model.openpi.train_expert_only=true\",\"actor.fsdp_config.strategy=fsdp2\",\"actor.fsdp_config.sharding_strategy=no_shard\",\"actor.fsdp_config.use_orig_params=false\",\"+actor.fsdp_config.wrap_policy.transformer_layer_cls_to_wrap=[\\\"NonExistentModule\\\"]\",\"+actor.fsdp_config.ignored_module_classes=[\\\"OpenPi0ForCFGActionPrediction\\\"]\",\"actor.optim.lr=1e-5\"]"
 }
 
 eval_checkpoints() {

@@ -442,6 +442,21 @@ The final result JSON and CSV preserve the four policy metrics per task:
 successful-episode action statistics, fused Critic frame MAE, per-task z/p and
 fusion validation metrics, and policy-data source statistics.
 
+The original 500-step FACD policy uses the default `actor.seed=1234`. To add
+two independent repeats using the same audited labels and Value/Fusion
+artifacts, run:
+
+```bash
+FACD_SEEDS="20260723 20260724" \
+  bash examples/recap/rounds/run_v3_facd_multiseed.sh all
+```
+
+Together with the original seed, this produces three independent policy
+training runs. Each repeat uses an independent `actor.seed`, result directory,
+and evaluation directory. Evaluations use 10 parallel environments for two
+rollout epochs, or 20 fixed-reset episodes per task. Existing checkpoints and
+completed result JSON files are reused rather than overwritten.
+
 Within `fit_critic`, execution remains strictly ordered: returns and Value
 training finish first, then frozen Value/VLM features and base advantages are
 built, then the z/p head is trained, and fusion is trained only after the z/p
