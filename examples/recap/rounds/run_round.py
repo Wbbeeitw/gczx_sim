@@ -693,6 +693,8 @@ def _steps_fit_value(ctx: dict) -> list[Step]:
             _step_merge_multitask(ctx) if step.name == "merge_datasets" else step
             for step in steps
         ]
+    if bool(_get(cfg, "datasets.prebuilt_merged", False)):
+        steps = [step for step in steps if step.name != "merge_datasets"]
     return steps
 
 
@@ -1075,6 +1077,7 @@ def _steps_eval_policy(ctx: dict) -> list[Step]:
     default_guidance = policy.get("guidance_type", "positive")
     default_neg_scale = policy.get("negative_guidance_scale", 0.0)
     results = cfg.get("results", {})
+    eval_root = str(eval_cfg.get("output_root") or f"{ctx['exp_root']}/eval")
     task_ids = (
         [(task, int(task.removeprefix("task"))) for task in ctx["tasks"]]
         if ctx["multitask"]
@@ -1084,9 +1087,9 @@ def _steps_eval_policy(ctx: dict) -> list[Step]:
     steps: list[Step] = []
     for task, task_id in task_ids:
         log_dir = (
-            f"{ctx['exp_root']}/eval/{task}"
+            f"{eval_root}/{task}"
             if ctx["multitask"]
-            else f"{ctx['exp_root']}/eval"
+            else eval_root
         )
         experiment_name = (
             f"{ctx['eval_exp']}_{task}" if ctx["multitask"] else ctx["eval_exp"]
@@ -1187,6 +1190,16 @@ def _steps_eval_policy(ctx: dict) -> list[Step]:
                                 if ctx["advantage_source"] == "fused"
                                 else []
                             ),
+                            *[
+                                argument
+                                for task, rate in (
+                                    results.get("baseline_success_rates") or {}
+                                ).items()
+                                for argument in (
+                                    "--baseline-success-rate",
+                                    f"{task}={rate}",
+                                )
+                            ],
                             f"--comparison={ctx['comparison']}",
                             f"--policy-data-report={policy_data_report}",
                             f"--output-dir={results['output_dir']}",
@@ -1398,7 +1411,16 @@ def _steps_build_multitask_critic_pool(ctx: dict) -> list[Step]:
 def _steps_fit_critic_multitask(ctx: dict) -> list[Step]:
     """Joint critic on the merged multi-task dataset (no joint z/p/fusion)."""
     critic_steps = _steps_fit_value(ctx)
-    critic_steps += _steps_fit_critic(ctx)[3:6]
+    critic_steps += [
+        step
+        for step in _steps_fit_critic(ctx)
+        if step.name
+        in {
+            "prepare_data",
+            "extract_features",
+            "build_base_from_cache",
+        }
+    ]
     return critic_steps
 
 

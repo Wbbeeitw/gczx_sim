@@ -16,6 +16,10 @@
 
 import pandas as pd
 
+from revalue_test_utils import install_omegaconf_stub
+
+install_omegaconf_stub()
+
 from rlinf.revalue.recap.export import (
     compute_gated_positive_mask,
     infer_episode_success,
@@ -73,6 +77,33 @@ def test_gate_caps_failure_positives_and_prefers_top_advantage() -> None:
     # has the larger adv_offset, so all 30 failure positives come from it.
     assert mask[df["episode_index"] == 4].sum() == 30
     assert mask[df["episode_index"] == 3].sum() == 0
+
+
+def test_gate_does_not_reserve_failure_quota() -> None:
+    success = _make_episode(
+        0,
+        num_frames=100,
+        first_return=-100.0,
+        adv_offset=10.0,
+    )
+    failure = _make_episode(
+        1,
+        num_frames=100,
+        first_return=-400.0,
+        adv_offset=0.0,
+    )
+    df = pd.concat([success, failure], ignore_index=True)
+
+    mask = compute_gated_positive_mask(
+        df,
+        positive_quantile=0.3,
+        failure_positive_cap=0.2,
+        failure_reward=-300.0,
+    )
+
+    assert mask.sum() == 60
+    assert mask[df["episode_index"] == 0].sum() == 60
+    assert mask[df["episode_index"] == 1].sum() == 0
 
 
 def test_demo_backstop_forces_all_frames_and_stays_outside_budget() -> None:

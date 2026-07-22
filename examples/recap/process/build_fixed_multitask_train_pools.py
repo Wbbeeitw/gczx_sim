@@ -201,6 +201,56 @@ def _select_task_pool(
     return selected, report
 
 
+def _select_successful_experts(
+    candidates: list[EpisodeCandidate],
+    *,
+    task: str,
+    dataset_path: Path,
+    count: int,
+) -> list[EpisodeCandidate]:
+    successful = [candidate for candidate in candidates if candidate.is_success]
+    if len(successful) < count:
+        raise ValueError(
+            f"{task}: requested {count} successful experts, but only found "
+            f"{len(successful)} in {dataset_path}"
+        )
+    return successful[:count]
+
+
+def _write_pool_provenance(
+    output_path: Path,
+    task: str,
+    selected: list[EpisodeCandidate],
+) -> tuple[Path, Path, list[int]]:
+    provenance_path = output_path / "meta" / "episode_provenance.jsonl"
+    with provenance_path.open("w", encoding="utf-8") as file:
+        for output_index, item in enumerate(selected):
+            record = {
+                "episode_index": output_index,
+                "task": task,
+                "source_type": item.source_type,
+                "source_dataset": str(item.dataset_path),
+                "source_episode_position": item.position,
+                "source_episode_index": item.episode_index,
+                "is_success": item.is_success,
+                "max_phase": item.max_phase,
+                "max_global_progress": item.max_global_progress,
+                "max_phase_progress": item.max_phase_progress,
+            }
+            file.write(json.dumps(record, ensure_ascii=False) + "\n")
+    full_positive_episodes = [
+        output_index
+        for output_index, item in enumerate(selected)
+        if item.source_type == "expert"
+    ]
+    full_positive_path = output_path / "meta" / "full_positive_episodes.json"
+    full_positive_path.write_text(
+        json.dumps(full_positive_episodes, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return provenance_path, full_positive_path, full_positive_episodes
+
+
 def build_fixed_pools(
     *,
     tasks: list[str],
@@ -208,14 +258,24 @@ def build_fixed_pools(
     output_pattern: str,
     episodes_per_task: int,
     expert_inputs: dict[str, list[tuple[Path, tuple[int, int] | None]]],
+    expert_pattern: str | None,
+    experts_per_task: int | None,
     overwrite: bool,
     require_successful_experts: bool,
 ) -> dict[str, Any]:
     """Materialize one fixed-size LeRobot dataset per task."""
     result: dict[str, Any] = {"episodes_per_task": episodes_per_task, "tasks": {}}
+    prepared: list[
+        tuple[str, Path, Path, list[EpisodeCandidate], dict[str, Any]]
+    ] = []
     for task in tasks:
         rollout_path = Path(rollout_pattern.format(task=task))
         output_path = Path(output_pattern.format(task=task))
+        if output_path.exists() and not overwrite:
+            raise FileExistsError(
+                f"Output dataset already exists: {output_path}; "
+                "use --overwrite to replace it"
+            )
         rollout = _episode_candidates(rollout_path, task, "rollout")
         experts = [
             candidate
@@ -224,39 +284,50 @@ def build_fixed_pools(
                 path, task, "expert", episode_range
             )
         ]
+        if expert_pattern is not None:
+            if experts:
+                raise ValueError(
+                    f"{task}: --expert-pattern cannot be combined with "
+                    "explicit --expert inputs"
+                )
+            expert_path = Path(expert_pattern.format(task=task))
+            available_experts = _episode_candidates(
+                expert_path,
+                task,
+                "expert",
+            )
+            requested_experts = int(experts_per_task or 0)
+            experts = _select_successful_experts(
+                available_experts,
+                task=task,
+                dataset_path=expert_path,
+                count=requested_experts,
+            )
         selected, task_report = _select_task_pool(
             rollout,
             experts,
             episodes_per_task,
             require_successful_experts,
         )
+        prepared.append((task, rollout_path, output_path, selected, task_report))
+
+    for task, rollout_path, output_path, selected, task_report in prepared:
         merge_multitask_datasets(
             [item.dataset_path for item in selected],
             output_path,
             overwrite=overwrite,
             episode_ranges=[(item.position, item.position + 1) for item in selected],
         )
-        provenance_path = output_path / "meta" / "episode_provenance.jsonl"
-        with provenance_path.open("w", encoding="utf-8") as file:
-            for output_index, item in enumerate(selected):
-                record = {
-                    "episode_index": output_index,
-                    "task": task,
-                    "source_type": item.source_type,
-                    "source_dataset": str(item.dataset_path),
-                    "source_episode_position": item.position,
-                    "source_episode_index": item.episode_index,
-                    "is_success": item.is_success,
-                    "max_phase": item.max_phase,
-                    "max_global_progress": item.max_global_progress,
-                    "max_phase_progress": item.max_phase_progress,
-                }
-                file.write(json.dumps(record, ensure_ascii=False) + "\n")
+        provenance_path, full_positive_path, full_positive_episodes = (
+            _write_pool_provenance(output_path, task, selected)
+        )
         task_report.update(
             {
                 "rollout_dataset": str(rollout_path),
                 "output_dataset": str(output_path),
                 "provenance_path": str(provenance_path),
+                "full_positive_episodes_path": str(full_positive_path),
+                "full_positive_episodes": full_positive_episodes,
             }
         )
         result["tasks"][task] = task_report
@@ -270,6 +341,8 @@ def main() -> None:
     parser.add_argument("--output-pattern", required=True)
     parser.add_argument("--episodes-per-task", type=int, default=40)
     parser.add_argument("--expert", action="append", default=[])
+    parser.add_argument("--expert-pattern")
+    parser.add_argument("--experts-per-task", type=int)
     parser.add_argument("--report-path", type=Path, required=True)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--allow-failed-expert", action="store_true")
@@ -281,12 +354,25 @@ def main() -> None:
         if task not in args.tasks:
             raise ValueError(f"expert task {task!r} is not listed in --tasks")
         expert_inputs.setdefault(task, []).append((path, episode_range))
+    if args.expert_pattern is not None:
+        if args.experts_per_task is None or args.experts_per_task <= 0:
+            raise ValueError(
+                "--expert-pattern requires --experts-per-task to be positive"
+            )
+        if args.expert:
+            raise ValueError(
+                "--expert-pattern cannot be combined with explicit --expert inputs"
+            )
+    elif args.experts_per_task is not None:
+        raise ValueError("--experts-per-task requires --expert-pattern")
     result = build_fixed_pools(
         tasks=args.tasks,
         rollout_pattern=args.rollout_pattern,
         output_pattern=args.output_pattern,
         episodes_per_task=args.episodes_per_task,
         expert_inputs=expert_inputs,
+        expert_pattern=args.expert_pattern,
+        experts_per_task=args.experts_per_task,
         overwrite=args.overwrite,
         require_successful_experts=not args.allow_failed_expert,
     )

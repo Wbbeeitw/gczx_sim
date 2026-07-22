@@ -549,6 +549,7 @@ class Task0SemanticTraceRecorder(Task1SemanticTraceRecorder):
                 object_a_alias="alphabet_soup",
                 object_b_alias="tomato_sauce",
                 basket_alias="basket",
+                stable_frames=3,
             ),
         )
 
@@ -2789,7 +2790,7 @@ def write_task7_semantic_artifacts(dataset_path: str | Path, records: list[dict[
     return {"raw_trace": str(raw_path), "phase_labels": str(labels_path), "audit": str(audit_path), "metadata": str(metadata_path)}
 
 
-def write_task0_semantic_artifacts(dataset_path: str | Path, records: list[dict[str, Any]], metadata: dict[str, Any], *, output_name: str = "semantic_trace_task0", stable_frames: int = 5) -> dict[str, str]:
+def write_task0_semantic_artifacts(dataset_path: str | Path, records: list[dict[str, Any]], metadata: dict[str, Any], *, output_name: str = "semantic_trace_task0", stable_frames: int = 3) -> dict[str, str]:
     """Write Task0 raw trace, two-object basket labels, audit, and metadata."""
     dataset_path = Path(dataset_path)
     meta_dir = dataset_path / "meta"

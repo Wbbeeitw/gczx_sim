@@ -6,10 +6,13 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from examples.recap.process.build_fixed_multitask_train_pools import (
     EpisodeCandidate,
+    _select_successful_experts,
     _select_task_pool,
+    _write_pool_provenance,
 )
 from examples.recap.process.record_multitask_round_results import (
     record_multitask_results,
@@ -30,6 +33,7 @@ from examples.recap.rounds.run_round import (
     _steps_eval_policy,
     _steps_export_multitask,
     _steps_export_multitask_raw,
+    _steps_fit_critic_multitask,
     _steps_score_critic_multitask,
     _steps_train_policy,
 )
@@ -96,6 +100,9 @@ def _round_cfg(tmp_path: Path, *, round_two: bool = False) -> dict:
         "revalue": {
             "label_name": "phase_progress_multitask",
             "positive_quantile": 0.3,
+            "success_gate": True,
+            "failure_positive_cap": 0.2,
+            "demo_backstop": True,
         },
         "policy": {
             "strategy": "csa_residual",
@@ -175,6 +182,12 @@ def test_multitask_export_and_training_use_fresh_fixed_pools(tmp_path: Path) -> 
         "export_view.expected_episodes=40" in command
         for command in export_commands
     )
+    assert all("export_view.success_gate=true" in command for command in export_commands)
+    assert all(
+        "export_view.failure_positive_cap=0.2" in command
+        for command in export_commands
+    )
+    assert all("export_view.demo_backstop=true" in command for command in export_commands)
     assert "export_view.source_episode_start=40" in export_commands[0]
     assert "export_view.source_episode_start=120" in export_commands[1]
 
@@ -211,6 +224,28 @@ def test_external_value_scores_multitask_pool_without_value_training(
         step.argv for step in steps if step.name == "extract_features"
     )
     assert "value.checkpoint=/checkpoints/value1" in extract_command
+
+
+def test_prebuilt_multitask_pool_skips_merge_and_trains_frozen_value(
+    tmp_path: Path,
+) -> None:
+    cfg = _round_cfg(tmp_path)
+    cfg["datasets"]["prebuilt_merged"] = True
+    cfg["value"]["freeze_vlm"] = True
+    ctx = _build_ctx(cfg)
+
+    steps = _steps_fit_critic_multitask(ctx)
+    names = [step.name for step in steps]
+
+    assert names == [
+        "compute_returns",
+        "value_sft",
+        "prepare_data",
+        "extract_features",
+        "build_base_from_cache",
+    ]
+    value_command = next(step.argv for step in steps if step.name == "value_sft")
+    assert "actor.model.freeze_vlm=True" in value_command
 
 
 def test_external_value_scoring_requires_checkpoint(tmp_path: Path) -> None:
@@ -331,6 +366,74 @@ def test_fixed_pool_preserves_successes_and_drops_lowest_progress_failures() -> 
     assert report["expert_episodes"] == 1
 
 
+def test_fixed_pool_selects_successful_experts_and_writes_backstop(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "output_task0"
+    (output / "meta").mkdir(parents=True)
+    rollout = [_candidate(position) for position in range(20)]
+    expert_candidates = [
+        _candidate(position, source="expert", success=position != 1)
+        for position in range(12)
+    ]
+    experts = _select_successful_experts(
+        expert_candidates,
+        task="task0",
+        dataset_path=Path("/expert/task0"),
+        count=10,
+    )
+    selected, _ = _select_task_pool(rollout, experts, 30, True)
+    _write_pool_provenance(
+        output,
+        "task0",
+        selected,
+    )
+
+    provenance = [
+        json.loads(line)
+        for line in (output / "meta" / "episode_provenance.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert len(provenance) == 30
+    assert [row["source_type"] for row in provenance[:20]] == ["rollout"] * 20
+    assert [row["source_type"] for row in provenance[20:]] == ["expert"] * 10
+    assert all(row["is_success"] for row in provenance[20:])
+    assert [row["source_episode_index"] for row in provenance[20:]] == [
+        0,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+    ]
+    full_positive = json.loads(
+        (output / "meta" / "full_positive_episodes.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert full_positive == list(range(20, 30))
+
+
+def test_fixed_pool_requires_enough_successful_experts() -> None:
+    candidates = [
+        _candidate(position, source="expert", success=position < 9)
+        for position in range(12)
+    ]
+
+    with pytest.raises(ValueError, match="requested 10 successful experts"):
+        _select_successful_experts(
+            candidates,
+            task="task0",
+            dataset_path=Path("/expert/task0"),
+            count=10,
+        )
+
+
 def _write_eval_summary(path: Path, success_steps: float) -> None:
     path.parent.mkdir(parents=True)
     path.write_text(
@@ -414,6 +517,7 @@ def test_multitask_record_and_policy_summary_report_primary_metrics(
         policy_data_report_path=policy_report,
         output_dir=tmp_path / "results",
         output_name="round1",
+        baseline_success_rates={"task0": 0.4, "task1": 0.6},
     )
 
     assert result["aggregate"]["num_trajectories"] == 4
@@ -421,6 +525,11 @@ def test_multitask_record_and_policy_summary_report_primary_metrics(
     assert result["aggregate"]["micro_success_rate"] == 0.5
     assert result["aggregate"]["success_episode_act_mean"] == 250.0
     assert result["aggregate"]["success_episode_act_std"] == 50.0
+    assert result["aggregate"]["baseline_macro_success_rate"] == 0.5
+    assert result["aggregate"]["macro_success_rate_delta"] == 0.0
+    assert result["tasks"]["task0"]["baseline"][
+        "delta_success_rate"
+    ] == pytest.approx(0.1)
 
 
 def test_policy_data_summary_audits_expert_selection(tmp_path: Path) -> None:

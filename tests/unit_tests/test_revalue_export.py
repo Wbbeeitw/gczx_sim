@@ -117,3 +117,71 @@ def test_raw_dataset_view_reindexes_without_fused_predictions(
     )
     assert report["mode"] == "raw"
     assert report["predictions_path"] is None
+
+
+def test_raw_dataset_view_applies_expert_backstop_and_rollout_failure_cap(
+    tmp_path,
+) -> None:
+    child = tmp_path / "child"
+    (child / "meta").mkdir(parents=True)
+    (child / "meta" / "info.json").write_text(
+        json.dumps({"total_frames": 30, "total_episodes": 3}),
+        encoding="utf-8",
+    )
+    (child / "meta" / "full_positive_episodes.json").write_text(
+        json.dumps([2]),
+        encoding="utf-8",
+    )
+    source = tmp_path / "raw.parquet"
+    rows = []
+    for episode, first_return, advantage_offset in (
+        (0, -10.0, 0.0),
+        (1, -310.0, 10.0),
+        (2, -10.0, -10.0),
+    ):
+        for frame in range(10):
+            rows.append(
+                {
+                    "episode_index": episode,
+                    "frame_index": frame,
+                    "advantage_continuous": advantage_offset + frame / 100.0,
+                    "return": first_return + frame,
+                    "value_current": 0.0,
+                    "value_next": 0.0,
+                    "reward_sum": 0.0,
+                }
+            )
+    pd.DataFrame(rows).to_parquet(source)
+
+    output = export_dataset_view(
+        ExportDatasetViewConfig(
+            mode="raw",
+            source_advantages_path=str(source),
+            predictions_path=None,
+            child_dataset_path=str(child),
+            output_tag="facd",
+            source_episode_start=0,
+            source_episode_end=3,
+            positive_quantile=0.5,
+            failure_positive_cap=0.2,
+            failure_reward=-300.0,
+            success_gate=True,
+            demo_backstop=True,
+            expected_episodes=3,
+        )
+    )
+
+    exported = pd.read_parquet(output)
+    positives = exported.groupby("episode_index")["advantage"].sum().to_dict()
+    assert positives == {0: 8, 1: 2, 2: 10}
+    report = json.loads(
+        (child / "meta" / "facd_revalue_report.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert report["num_full_positive_frames"] == 10
+    assert report["rollout_positive_budget"] == 10
+    assert report["num_rollout_positive_frames"] == 10
+    assert report["num_rollout_failure_positive_frames"] == 2
+    assert report["rollout_failure_positive_ratio"] == pytest.approx(0.2)
+    assert report["failure_cap_satisfied"] is True

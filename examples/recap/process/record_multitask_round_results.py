@@ -49,6 +49,16 @@ def _parse_range(value: str) -> tuple[str, tuple[int, int]]:
     return task, (start, end)
 
 
+def _parse_rate_mapping(value: str) -> tuple[str, float]:
+    if "=" not in value:
+        raise ValueError(f"Expected TASK=RATE, got {value!r}")
+    task, raw_rate = value.split("=", 1)
+    rate = float(raw_rate)
+    if not 0.0 <= rate <= 1.0:
+        raise ValueError(f"Success rate must be between 0 and 1, got {value!r}")
+    return task, rate
+
+
 def _pooled_success_length_metrics(
     task_metrics: dict[str, dict[str, Any]],
 ) -> tuple[float | None, float | None]:
@@ -84,6 +94,7 @@ def record_multitask_results(
     policy_data_report_path: Path | None,
     output_dir: Path,
     output_name: str,
+    baseline_success_rates: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """Write detailed JSON and flat per-task CSV results."""
     tasks = list(task_ranges)
@@ -123,6 +134,20 @@ def record_multitask_results(
             "fusion": fusion,
             "policy_data": policy_data,
         }
+        baseline_rate = (
+            baseline_success_rates.get(task)
+            if baseline_success_rates is not None
+            else None
+        )
+        if baseline_rate is not None:
+            task_result["baseline"] = {
+                "success_rate": float(baseline_rate),
+                "delta_success_rate": (
+                    policy_metrics["success_rate"] - float(baseline_rate)
+                    if policy_metrics.get("success_rate") is not None
+                    else None
+                ),
+            }
         task_results[task] = task_result
         csv_rows.append(
             {
@@ -133,6 +158,10 @@ def record_multitask_results(
                 "num_trajectories": policy_metrics.get("episodes"),
                 "successes": policy_metrics.get("successes"),
                 "success_rate": policy_metrics.get("success_rate"),
+                "baseline_success_rate": baseline_rate,
+                "delta_success_rate": (
+                    task_result.get("baseline", {}).get("delta_success_rate")
+                ),
                 "success_episode_act_mean": policy_metrics.get(
                     "success_only_act"
                 ),
@@ -190,6 +219,32 @@ def record_multitask_results(
             float(np.mean(fused_mae)) if fused_mae else None
         ),
     }
+    if baseline_success_rates is not None:
+        missing_baselines = set(tasks).difference(baseline_success_rates)
+        if missing_baselines:
+            raise ValueError(
+                f"baseline success rates missing tasks {sorted(missing_baselines)}"
+            )
+        baseline_macro = float(
+            np.mean([baseline_success_rates[task] for task in tasks])
+        )
+        deltas = {
+            task: task_results[task]["baseline"]["delta_success_rate"]
+            for task in tasks
+        }
+        aggregate.update(
+            {
+                "baseline_macro_success_rate": baseline_macro,
+                "macro_success_rate_delta": (
+                    aggregate["macro_success_rate"] - baseline_macro
+                    if aggregate["macro_success_rate"] is not None
+                    else None
+                ),
+                "improved_tasks": [task for task, delta in deltas.items() if delta > 0],
+                "regressed_tasks": [task for task, delta in deltas.items() if delta < 0],
+                "tied_tasks": [task for task, delta in deltas.items() if delta == 0],
+            }
+        )
     result = {
         "schema_version": "1.0",
         "round": round_index,
@@ -200,8 +255,17 @@ def record_multitask_results(
         "aggregate": aggregate,
         "primary_metrics": {
             "macro_success_rate": aggregate["macro_success_rate"],
+            "baseline_macro_success_rate": aggregate.get(
+                "baseline_macro_success_rate"
+            ),
+            "macro_success_rate_delta": aggregate.get(
+                "macro_success_rate_delta"
+            ),
             "micro_success_rate": aggregate["micro_success_rate"],
             "num_trajectories": aggregate["num_trajectories"],
+            "improved_tasks": aggregate.get("improved_tasks"),
+            "regressed_tasks": aggregate.get("regressed_tasks"),
+            "tied_tasks": aggregate.get("tied_tasks"),
             "success_episode_act_mean": aggregate[
                 "success_episode_act_mean"
             ],
@@ -245,6 +309,7 @@ def main() -> None:
     parser.add_argument("--policy-data-report", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--output-name", required=True)
+    parser.add_argument("--baseline-success-rate", action="append", default=[])
     args = parser.parse_args()
 
     result = record_multitask_results(
@@ -264,6 +329,11 @@ def main() -> None:
         policy_data_report_path=args.policy_data_report,
         output_dir=args.output_dir,
         output_name=args.output_name,
+        baseline_success_rates=(
+            dict(_parse_rate_mapping(value) for value in args.baseline_success_rate)
+            if args.baseline_success_rate
+            else None
+        ),
     )
     print(json.dumps(result["primary_metrics"], ensure_ascii=False, indent=2))
 

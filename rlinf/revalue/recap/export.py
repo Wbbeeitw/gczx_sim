@@ -82,14 +82,19 @@ def compute_gated_positive_mask(
 
     - Episodes in ``full_positive_episodes`` are forced positive on every
       frame (expert demos) and do not count against the quantile budget.
-    - Of the remaining frames, ``positive_quantile`` become positive;
-      at most ``failure_positive_cap`` of that budget may come from failed
-      episodes, picking the highest-advantage failure frames first.
+    - All remaining rollout frames are ranked together by continuous
+      advantage. Frames are accepted in descending order until the
+      ``positive_quantile`` budget is filled, while failed-episode frames are
+      skipped once ``failure_positive_cap`` of the budget has been accepted.
     """
 
     n_rows = len(df)
     if n_rows == 0:
         return np.zeros(0, dtype=bool)
+    if not 0.0 <= float(positive_quantile) <= 1.0:
+        raise ValueError("positive_quantile must be between 0 and 1")
+    if not 0.0 <= float(failure_positive_cap) <= 1.0:
+        raise ValueError("failure_positive_cap must be between 0 and 1")
 
     success_by_episode = infer_episode_success(df, failure_reward=failure_reward)
     episode_index = df["episode_index"].to_numpy()
@@ -106,19 +111,85 @@ def compute_gated_positive_mask(
     advantages = df["advantage_continuous"].to_numpy(dtype=np.float64)
 
     chosen = np.zeros(n_rows, dtype=bool)
-    failure_idx = np.flatnonzero(eligible & ~is_success_frame)
-    failure_take = min(int(float(failure_positive_cap) * budget), failure_idx.size)
-    if failure_take > 0:
-        order = failure_idx[np.argsort(-advantages[failure_idx], kind="stable")]
-        chosen[order[:failure_take]] = True
-
-    success_idx = np.flatnonzero(eligible & is_success_frame)
-    success_take = min(max(0, budget - failure_take), success_idx.size)
-    if success_take > 0:
-        order = success_idx[np.argsort(-advantages[success_idx], kind="stable")]
-        chosen[order[:success_take]] = True
+    failure_limit = int(float(failure_positive_cap) * budget)
+    eligible_idx = np.flatnonzero(eligible)
+    order = eligible_idx[np.argsort(-advantages[eligible_idx], kind="stable")]
+    selected = 0
+    selected_failures = 0
+    for index in order:
+        if selected >= budget:
+            break
+        if not is_success_frame[index]:
+            if selected_failures >= failure_limit:
+                continue
+            selected_failures += 1
+        chosen[index] = True
+        selected += 1
 
     return chosen | forced
+
+
+def summarize_gated_positive_mask(
+    df: pd.DataFrame,
+    positive_mask: np.ndarray,
+    *,
+    positive_quantile: float,
+    failure_positive_cap: float,
+    failure_reward: float,
+    full_positive_episodes: set[int] | None = None,
+) -> dict[str, float | int | bool]:
+    """Summarize expert backstop and constrained rollout selection."""
+
+    episode_index = df["episode_index"].to_numpy(dtype=np.int64)
+    forced_set = {int(ep) for ep in full_positive_episodes or set()}
+    forced = np.array([ep in forced_set for ep in episode_index], dtype=bool)
+    rollout = ~forced
+    positive = np.asarray(positive_mask, dtype=bool)
+    rollout_positive = positive & rollout
+    success_by_episode = infer_episode_success(
+        df,
+        failure_reward=failure_reward,
+    )
+    success_frame = np.array(
+        [bool(success_by_episode.get(ep, False)) for ep in episode_index],
+        dtype=bool,
+    )
+
+    rollout_frames = int(rollout.sum())
+    rollout_budget = int(round(float(positive_quantile) * rollout_frames))
+    rollout_positive_frames = int(rollout_positive.sum())
+    rollout_failure_positive = int((rollout_positive & ~success_frame).sum())
+    rollout_success_positive = rollout_positive_frames - rollout_failure_positive
+    rollout_failure_ratio = (
+        rollout_failure_positive / rollout_positive_frames
+        if rollout_positive_frames
+        else 0.0
+    )
+    total_positive = int(positive.sum())
+    total_success_positive = int((positive & success_frame).sum())
+    return {
+        "failure_positive_cap": float(failure_positive_cap),
+        "num_full_positive_episodes": len(forced_set),
+        "num_full_positive_frames": int(forced.sum()),
+        "num_rollout_frames": rollout_frames,
+        "rollout_positive_budget": rollout_budget,
+        "num_rollout_positive_frames": rollout_positive_frames,
+        "num_rollout_success_positive_frames": rollout_success_positive,
+        "num_rollout_failure_positive_frames": rollout_failure_positive,
+        "rollout_positive_ratio": (
+            rollout_positive_frames / rollout_frames if rollout_frames else 0.0
+        ),
+        "rollout_failure_positive_ratio": rollout_failure_ratio,
+        "rollout_budget_filled": rollout_positive_frames == rollout_budget,
+        "failure_cap_satisfied": (
+            rollout_failure_ratio <= float(failure_positive_cap) + 1e-12
+        ),
+        "num_success_positive_frames": total_success_positive,
+        "num_failure_positive_frames": total_positive - total_success_positive,
+        "positive_success_purity": (
+            total_success_positive / total_positive if total_positive else 0.0
+        ),
+    }
 
 
 def load_full_positive_episodes(dataset_path: str | Path) -> set[int]:
@@ -310,23 +381,16 @@ def export_fused_advantages(cfg: ExportConfig) -> Path:
             failure_reward=cfg.failure_reward,
             full_positive_episodes=forced,
         )
-        success_by_episode = infer_episode_success(
-            fused_df, failure_reward=cfg.failure_reward
-        )
-        positive_episodes = fused_df["episode_index"][positive_mask]
-        num_positive = int(positive_mask.sum())
-        num_success_positive = int(
-            positive_episodes.map(success_by_episode).fillna(False).sum()
-        )
         gate_stats = {
             "success_gate": bool(cfg.success_gate),
             "demo_backstop": bool(cfg.demo_backstop),
-            "failure_positive_cap": float(cfg.failure_positive_cap),
-            "num_full_positive_episodes": len(forced) if forced else 0,
-            "num_success_positive_frames": num_success_positive,
-            "num_failure_positive_frames": num_positive - num_success_positive,
-            "positive_success_purity": (
-                num_success_positive / num_positive if num_positive else 0.0
+            **summarize_gated_positive_mask(
+                fused_df,
+                positive_mask,
+                positive_quantile=cfg.positive_quantile,
+                failure_positive_cap=cfg.failure_positive_cap,
+                failure_reward=cfg.failure_reward,
+                full_positive_episodes=forced,
             ),
         }
     save_df = build_save_advantages_df(
