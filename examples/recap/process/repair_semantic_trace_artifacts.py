@@ -17,6 +17,7 @@ from typing import Any, Callable
 import pandas as pd
 
 from rlinf.revalue.semantic_trace import (
+    build_task0_phase_labels,
     build_task1_phase_labels,
     build_task2_phase_labels,
     build_task3_phase_labels,
@@ -41,7 +42,7 @@ Builder = Callable[..., tuple[pd.DataFrame, pd.DataFrame]]
 Writer = Callable[..., dict[str, str]]
 
 BUILDERS: dict[str, Builder] = {
-    "task0": build_task1_phase_labels,
+    "task0": build_task0_phase_labels,
     "task1": build_task1_phase_labels,
     "task2": build_task2_phase_labels,
     "task3": build_task3_phase_labels,

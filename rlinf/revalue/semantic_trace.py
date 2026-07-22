@@ -1745,6 +1745,108 @@ def build_task1_phase_labels(
     return pd.concat(label_frames, ignore_index=True), pd.DataFrame(audit_rows)
 
 
+def build_task0_phase_labels(
+    trace: pd.DataFrame,
+    *,
+    stable_frames: int = 3,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build task0 phases from contact, basket placement, and env success."""
+    required = {
+        "episode_index",
+        "frame_index",
+        "is_success",
+        "env_success",
+        "object_a_gripper_contact",
+        "object_b_gripper_contact",
+        "object_a_basket_contact",
+        "object_b_basket_contact",
+    }
+    missing = required - set(trace.columns)
+    if missing:
+        raise ValueError(f"Semantic trace missing columns: {sorted(missing)}")
+
+    label_frames: list[pd.DataFrame] = []
+    audit_rows: list[dict[str, Any]] = []
+    for episode_index, episode_trace in trace.groupby("episode_index", sort=True):
+        episode_trace = episode_trace.sort_values("frame_index").reset_index(drop=True)
+        is_success = bool(episode_trace["is_success"].iloc[-1])
+        gripper_contact = (
+            episode_trace["object_a_gripper_contact"].to_numpy(dtype=bool)
+            | episode_trace["object_b_gripper_contact"].to_numpy(dtype=bool)
+        )
+        one_in_basket = (
+            episode_trace["object_a_basket_contact"].to_numpy(dtype=bool)
+            | episode_trace["object_b_basket_contact"].to_numpy(dtype=bool)
+        )
+        env_success = episode_trace["env_success"].to_numpy(dtype=bool)
+
+        b1 = _first_stable_frame(gripper_contact, stable_frames)
+        b2_start = b1 + 1 if b1 is not None else 0
+        b2 = _first_stable_frame(one_in_basket, stable_frames, b2_start)
+        b3 = None
+        b3_source = "failed_episode" if not is_success else "unresolved"
+        if is_success and b2 is not None:
+            success_frames = np.flatnonzero(env_success)
+            success_frames = success_frames[success_frames > b2]
+            if len(success_frames):
+                b3 = int(success_frames[0])
+                b3_source = "env_success_terminal"
+
+        phase = np.zeros(len(episode_trace), dtype=np.int64)
+        if b1 is not None:
+            phase[b1:] = 1
+        if b2 is not None and b1 is not None and b2 > b1:
+            phase[b2:] = 2
+        else:
+            b2 = None
+        if b3 is not None and b2 is not None and b3 > b2:
+            phase[b3:] = 3
+        else:
+            b3 = None
+            if is_success:
+                b3_source = "unresolved"
+
+        phase_progress, global_progress = _phase_progress(
+            phase,
+            is_success=is_success,
+        )
+        trainable = b1 is not None and (not is_success or b3 is not None)
+        label_frames.append(
+            pd.DataFrame(
+                {
+                    "episode_index": int(episode_index),
+                    "frame_index": episode_trace["frame_index"].to_numpy(
+                        dtype=np.int64
+                    ),
+                    "phase": phase,
+                    "phase_progress": phase_progress,
+                    "global_progress": global_progress,
+                    "semantic_source": "simulator_trace",
+                    "semantic_confidence": (
+                        "state_verified" if trainable else "unresolved"
+                    ),
+                    "is_success": is_success,
+                }
+            )
+        )
+        audit_rows.append(
+            {
+                "episode_index": int(episode_index),
+                "episode_length": len(episode_trace),
+                "is_success": is_success,
+                "b1_frame": b1,
+                "b1_source": "gripper_contact" if b1 is not None else "unresolved",
+                "b2_frame": b2,
+                "b2_source": "one_object_in_basket" if b2 is not None else "unresolved",
+                "b3_frame": b3,
+                "b3_source": b3_source,
+                "b3_consistent_with_success": (b3 is not None) == is_success,
+                "trainable": trainable,
+            }
+        )
+    return pd.concat(label_frames, ignore_index=True), pd.DataFrame(audit_rows)
+
+
 def write_task1_semantic_artifacts(
     dataset_path: str | Path,
     records: list[dict[str, Any]],
@@ -2796,7 +2898,7 @@ def write_task0_semantic_artifacts(dataset_path: str | Path, records: list[dict[
     meta_dir = dataset_path / "meta"
     meta_dir.mkdir(parents=True, exist_ok=True)
     trace = pd.DataFrame(records).sort_values(["episode_index", "frame_index"])
-    labels, audit = build_task1_phase_labels(trace, stable_frames=stable_frames)
+    labels, audit = build_task0_phase_labels(trace, stable_frames=stable_frames)
     raw_path, labels_path = meta_dir / f"{output_name}.parquet", meta_dir / f"phase_progress_{output_name}.parquet"
     audit_path, metadata_path = meta_dir / f"{output_name}_audit.csv", meta_dir / f"{output_name}_metadata.json"
     trace.to_parquet(raw_path, index=False)

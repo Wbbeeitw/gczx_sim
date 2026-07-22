@@ -5,8 +5,13 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from revalue_test_utils import install_omegaconf_stub
+
+install_omegaconf_stub()
+
 from rlinf.revalue.semantic_trace import (
     _phase_progress,
+    build_task0_phase_labels,
     build_task1_phase_labels,
     build_task2_phase_labels,
     build_task3_phase_labels,
@@ -14,6 +19,31 @@ from rlinf.revalue.semantic_trace import (
     build_task5_phase_labels,
     build_task6_phase_labels,
 )
+
+
+def test_task0_uses_contact_basket_and_env_success_boundaries() -> None:
+    rows = []
+    for frame_index in range(20):
+        rows.append(
+            {
+                "episode_index": 0,
+                "frame_index": frame_index,
+                "is_success": True,
+                "env_success": frame_index == 19,
+                "object_a_gripper_contact": 2 <= frame_index < 8,
+                "object_b_gripper_contact": False,
+                "object_a_basket_contact": 8 <= frame_index,
+                "object_b_basket_contact": False,
+            }
+        )
+
+    labels, audit = build_task0_phase_labels(pd.DataFrame(rows), stable_frames=3)
+
+    assert audit.loc[0, "b1_frame"] == 2
+    assert audit.loc[0, "b2_frame"] == 8
+    assert audit.loc[0, "b3_frame"] == 19
+    assert bool(audit.loc[0, "trainable"])
+    assert labels.loc[labels["frame_index"] == 19, "phase"].item() == 3
 
 
 def test_success_phase_progress_completes_each_entered_phase() -> None:
