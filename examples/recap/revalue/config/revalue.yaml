@@ -217,6 +217,9 @@ rollout_collect:
   guidance_scale: 1.0
   negative_guidance_scale: 0.0
   failure_reward: null
+  success_only: false
+  target_successes: 0
+  max_attempts: 0
 
 export_view:
   mode: fused
@@ -233,3 +236,7 @@ export_view:
   discount_next_value: true
   expected_episodes: null
   report_path: null
+  success_gate: false
+  failure_positive_cap: 0.2
+  failure_reward: -300.0
+  demo_backstop: false
