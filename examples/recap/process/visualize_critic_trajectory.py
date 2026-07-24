@@ -286,30 +286,39 @@ def _choose_keyframes(
     mandatory.extend(boundaries.tolist())
     mandatory.append(frames[-1])
     mandatory = list(dict.fromkeys(mandatory))
-
-    candidates: list[tuple[int, int]] = []
-    frame_array = np.asarray(frames)
-    for boundary in boundaries:
-        for requested in (boundary - boundary_window, boundary + boundary_window):
-            nearest = int(frame_array[np.argmin(np.abs(frame_array - requested))])
-            candidates.append((0, nearest))
-    if trajectory["phase"].notna().any():
-        for _, phase_frame in trajectory.groupby("phase", sort=False, dropna=True):
-            midpoint = int(phase_frame.iloc[len(phase_frame) // 2]["frame_index"])
-            candidates.append((1, midpoint))
-    evenly_spaced = np.linspace(0, len(frames) - 1, num_keyframes, dtype=int)
-    candidates.extend((2, frames[index]) for index in evenly_spaced)
-
     selected = mandatory[:num_keyframes]
-    minimum_gap = max(1, len(frames) // max(2, num_keyframes * 3))
-    for _, candidate in sorted(candidates):
-        if len(selected) >= num_keyframes:
+    frame_positions = {frame: index for index, frame in enumerate(frames)}
+    minimum_margin = max(1, boundary_window)
+    selected_positions = sorted(frame_positions[frame] for frame in selected)
+    intervals = [
+        (left, right)
+        for left, right in zip(selected_positions, selected_positions[1:])
+        if right - left > 1
+    ]
+    allocations = [0] * len(intervals)
+    for _ in range(max(0, num_keyframes - len(selected))):
+        if not intervals:
             break
-        if candidate in selected:
-            continue
-        if any(abs(candidate - existing) < minimum_gap for existing in selected):
-            continue
-        selected.append(candidate)
+        interval_index = max(
+            range(len(intervals)),
+            key=lambda index: (
+                (intervals[index][1] - intervals[index][0])
+                / (allocations[index] + 1),
+                intervals[index][1] - intervals[index][0],
+            ),
+        )
+        allocations[interval_index] += 1
+
+    for (left, right), allocation in zip(intervals, allocations):
+        span = right - left
+        for slot in range(1, allocation + 1):
+            position = int(round(left + span * slot / (allocation + 1)))
+            lower = min(left + minimum_margin, right - 1)
+            upper = max(right - minimum_margin, left + 1)
+            position = min(max(position, lower), upper)
+            candidate = frames[position]
+            if candidate not in selected:
+                selected.append(candidate)
     if len(selected) < num_keyframes:
         for candidate in frames:
             if len(selected) >= num_keyframes:

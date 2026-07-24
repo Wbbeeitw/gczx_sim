@@ -615,7 +615,9 @@ The command writes a 300-DPI PNG, vector PDF, aligned per-frame CSV, and JSON
 metadata using the same output stem. The default layout uses six large,
 numbered simulator keyframes, an auto-detected natural-language task
 instruction, a success/failure badge, a semantic-phase strip, aligned curve
-anchors, and a compact error panel. `--image-key` overrides camera
+anchors, and a compact error panel. The first frame, every semantic-phase
+boundary, and the final frame are always retained; remaining keyframes are
+distributed across the longest uncovered time intervals. `--image-key` overrides camera
 auto-detection, `--task-description` overrides the detected instruction,
 `--smooth-window` only smooths the two displayed predictions, and
 `--no-error-panel` produces a more compact figure. The task offsets for ten
