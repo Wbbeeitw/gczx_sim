@@ -624,8 +624,10 @@ auto-detection, `--task-description` overrides the detected instruction,
 30-episode child datasets are 0, 30, 60, 90, 120, 150, 180, 210, 240, and 270.
 Pass `--comparison-episode` instead when the merged ordering differs.
 
-For the final three-row paper figure, rerender the selected episodes with the
-same layout and colors while enlarging all text in Times New Roman:
+For the final three-row paper figure, use compact paper mode. It preserves the
+six simulator keyframes, phase strip, main return curves, outcome, instruction,
+and MAE summary while removing the camera label, repeated episode text, verbose
+keyframe captions, and the separate absolute-error subplot:
 
 ```bash
 cd /workspace/RLinf
@@ -642,7 +644,8 @@ python examples/recap/process/visualize_critic_trajectory.py \
   --num-keyframes 6 \
   --title "(a) Task 0 - Success" \
   --font-family "Times New Roman" \
-  --font-scale 1.18 \
+  --font-scale 1.15 \
+  --compact-paper \
   --dpi 600 \
   --output "$PANEL_ROOT/task0_success_episode15_panel"
 
@@ -654,7 +657,9 @@ python examples/recap/process/visualize_critic_trajectory.py \
   --num-keyframes 6 \
   --title "(b) Task 9 - Success" \
   --font-family "Times New Roman" \
-  --font-scale 1.18 \
+  --font-scale 1.15 \
+  --compact-paper \
+  --hide-legend \
   --dpi 600 \
   --output "$PANEL_ROOT/task9_success_episode16_panel"
 
@@ -666,7 +671,9 @@ python examples/recap/process/visualize_critic_trajectory.py \
   --num-keyframes 6 \
   --title "(c) Task 1 - Failure" \
   --font-family "Times New Roman" \
-  --font-scale 1.18 \
+  --font-scale 1.15 \
+  --compact-paper \
+  --hide-legend \
   --dpi 600 \
   --output "$PANEL_ROOT/task1_failure_episode19_panel"
 ```
@@ -683,9 +690,10 @@ python examples/recap/process/compose_critic_trajectory_figure.py \
   --gap-px 24
 ```
 
-The composer does not crop, relabel, or restyle the three inputs. It only
-normalizes their widths and stacks them from top to bottom with a narrow white
-gap. The final output is `critic_trajectory_triptych.png` at 600 DPI.
+Only the first panel retains the shared return-curve legend. The composer does
+not crop or redraw the inputs; it normalizes their widths and stacks them with
+a narrow white gap. The final output is `critic_trajectory_triptych.png` at
+600 DPI.
 
 Recovery stages are:
 

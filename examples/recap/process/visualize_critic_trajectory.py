@@ -551,6 +551,7 @@ def _draw_phase_strip(
     axis: plt.Axes,
     trajectory: pd.DataFrame,
     phase_names: list[str],
+    show_axis_label: bool = True,
 ) -> None:
     frames = trajectory["frame_index"].astype(int)
     axis.set_xlim(int(frames.iloc[0]), int(frames.iloc[-1]))
@@ -582,16 +583,17 @@ def _draw_phase_strip(
             color=BOUNDARY_COLOR,
             linewidth=1.25,
         )
-    axis.text(
-        -0.012,
-        0.5,
-        "Semantic phases",
-        transform=axis.transAxes,
-        ha="right",
-        va="center",
-        fontsize=8.5,
-        color="#52606D",
-    )
+    if show_axis_label:
+        axis.text(
+            -0.012,
+            0.5,
+            "Semantic phases",
+            transform=axis.transAxes,
+            ha="right",
+            va="center",
+            fontsize=8.5,
+            color="#52606D",
+        )
     axis.set_axis_off()
 
 
@@ -646,19 +648,34 @@ def _plot_trajectory(
     dpi: int,
     font_family: str | None,
     font_scale: float,
+    compact_paper: bool,
+    hide_legend: bool,
 ) -> None:
     keyframes = sorted(images)
     columns = max(1, len(keyframes))
     figure_width = max(14.8, 2.45 * columns)
-    row_heights = [2.45, 0.22, 3.25, 1.15] if show_error_panel else [2.45, 0.22, 3.65]
-    figure_height = 8.8 if show_error_panel else 7.5
+    if compact_paper:
+        show_error_panel = False
+        row_heights = [2.25, 0.18, 2.75]
+        figure_height = 5.9
+        grid_vertical_space = 0.14
+        grid_horizontal_space = 0.07
+    else:
+        row_heights = (
+            [2.45, 0.22, 3.25, 1.15]
+            if show_error_panel
+            else [2.45, 0.22, 3.65]
+        )
+        figure_height = 8.8 if show_error_panel else 7.5
+        grid_vertical_space = 0.20
+        grid_horizontal_space = 0.08
     figure = plt.figure(figsize=(figure_width, figure_height), facecolor="white")
     grid = figure.add_gridspec(
         len(row_heights),
         columns,
         height_ratios=row_heights,
-        hspace=0.20,
-        wspace=0.08,
+        hspace=grid_vertical_space,
+        wspace=grid_horizontal_space,
     )
     image_axes = [figure.add_subplot(grid[0, index]) for index in range(columns)]
     phase_axis = figure.add_subplot(grid[1, :])
@@ -668,7 +685,12 @@ def _plot_trajectory(
         if show_error_panel
         else None
     )
-    figure.subplots_adjust(left=0.065, right=0.985, bottom=0.075, top=0.875)
+    figure.subplots_adjust(
+        left=0.065,
+        right=0.985,
+        bottom=0.075,
+        top=0.835 if compact_paper else 0.875,
+    )
 
     trajectory_lookup = trajectory.set_index("frame_index")
     outcome, outcome_color = _episode_outcome(trajectory)
@@ -676,7 +698,8 @@ def _plot_trajectory(
         axis.imshow(images[frame])
         phase = trajectory_lookup.loc[frame, "phase"]
         label = _phase_display_name(phase, phase_names)
-        if bool(trajectory_lookup.loc[frame, "is_boundary"]):
+        is_boundary = bool(trajectory_lookup.loc[frame, "is_boundary"])
+        if is_boundary:
             label = f"Transition to {label}"
         elif frame == keyframes[0]:
             label = "Start"
@@ -699,22 +722,40 @@ def _plot_trajectory(
                 "linewidth": 1.0,
             },
         )
-        axis.set_xlabel(
-            f"{label}\nTime step {frame}",
-            fontsize=9,
-            color="#334E68",
-            labelpad=6,
-        )
+        if compact_paper:
+            compact_label = _phase_display_name(phase, phase_names)
+            if frame == keyframes[0]:
+                compact_label = "Start"
+            elif frame == keyframes[-1]:
+                compact_label = "Success" if outcome == "SUCCESS" else "Incomplete"
+            axis.set_xlabel(
+                f"{compact_label}  |  t={frame}",
+                fontsize=9.6,
+                color="#334E68",
+                labelpad=4,
+            )
+        else:
+            axis.set_xlabel(
+                f"{label}\nTime step {frame}",
+                fontsize=9,
+                color="#334E68",
+                labelpad=6,
+            )
         axis.set_xticks([])
         axis.set_yticks([])
         axis.set_facecolor("white")
         for spine in axis.spines.values():
             spine.set_visible(True)
-            spine.set_color(FUSED_COLOR if "Transition" in label else "#9FB3C8")
-            spine.set_linewidth(2.0 if "Transition" in label else 1.0)
+            spine.set_color(FUSED_COLOR if is_boundary else "#9FB3C8")
+            spine.set_linewidth(2.0 if is_boundary else 1.0)
 
     frames = trajectory["frame_index"].to_numpy()
-    _draw_phase_strip(phase_axis, trajectory, phase_names)
+    _draw_phase_strip(
+        phase_axis,
+        trajectory,
+        phase_names,
+        show_axis_label=not compact_paper,
+    )
     _add_phase_context(trajectory_axis, trajectory, phase_names, show_labels=False)
     trajectory_axis.plot(
         frames,
@@ -722,7 +763,7 @@ def _plot_trajectory(
         color=TARGET_COLOR,
         linestyle="--",
         linewidth=2.15,
-        label="Target return",
+        label="Return-to-go" if compact_paper else "Target return",
         zorder=4,
     )
     trajectory_axis.plot(
@@ -738,20 +779,21 @@ def _plot_trajectory(
         trajectory["fused_critic_plot"],
         color=FUSED_COLOR,
         linewidth=2.65,
-        label="Ours (Fused Critic)",
+        label="Fused Critic" if compact_paper else "Ours (Fused Critic)",
         zorder=5,
     )
     trajectory_axis.set_ylabel("Return prediction", fontsize=10.5, color="#334E68")
     trajectory_axis.grid(axis="y", color="#CFD8DC", alpha=0.55, linewidth=0.7)
-    trajectory_axis.legend(
-        loc="lower left",
-        ncol=3,
-        frameon=True,
-        framealpha=0.96,
-        facecolor="white",
-        edgecolor="#D9E2EC",
-        fontsize=9,
-    )
+    if not hide_legend:
+        trajectory_axis.legend(
+            loc="lower left",
+            ncol=3,
+            frameon=True,
+            framealpha=0.96,
+            facecolor="white",
+            edgecolor="#D9E2EC",
+            fontsize=9,
+        )
     trajectory_axis.margins(x=0.01)
     trajectory_axis.tick_params(labelbottom=not show_error_panel)
     _style_plot_axis(trajectory_axis)
@@ -829,11 +871,18 @@ def _plot_trajectory(
         trajectory_axis.set_xlabel("Time step", fontsize=10.5, color="#334E68")
 
     metrics = _metric_summary(trajectory)
-    metric_text = (
-        f"Raw MAE  {metrics['raw_mae']:.2f}\n"
-        f"Fused MAE  {metrics['fused_mae']:.2f}\n"
-        f"MAE improvement  {metrics['mae_improvement_pct']:.1f}%"
-    )
+    if compact_paper:
+        metric_text = (
+            f"MAE   Raw {metrics['raw_mae']:.2f}   |   "
+            f"Fused {metrics['fused_mae']:.2f}   |   "
+            f"Improvement {metrics['mae_improvement_pct']:.1f}%"
+        )
+    else:
+        metric_text = (
+            f"Raw MAE  {metrics['raw_mae']:.2f}\n"
+            f"Fused MAE  {metrics['fused_mae']:.2f}\n"
+            f"MAE improvement  {metrics['mae_improvement_pct']:.1f}%"
+        )
     trajectory_axis.text(
         0.988,
         0.982,
@@ -841,7 +890,7 @@ def _plot_trajectory(
         transform=trajectory_axis.transAxes,
         ha="right",
         va="top",
-        fontsize=8.7,
+        fontsize=9.3 if compact_paper else 8.7,
         linespacing=1.35,
         color="#243B53",
         bbox={
@@ -856,7 +905,7 @@ def _plot_trajectory(
 
     figure.text(
         0.065,
-        0.965,
+        0.972 if compact_paper else 0.965,
         title,
         ha="left",
         va="top",
@@ -864,20 +913,26 @@ def _plot_trajectory(
         fontweight="bold",
         color="#102A43",
     )
-    description = textwrap.fill(task_description, width=105)
+    description = textwrap.fill(
+        task_description,
+        width=125 if compact_paper else 105,
+    )
     figure.text(
         0.065,
-        0.944,
+        0.938 if compact_paper else 0.944,
         description,
         ha="left",
         va="top",
         fontsize=10.2,
         color="#486581",
     )
-    status_text = (
-        f"{outcome}   |   EPISODE {dataset_episode}   |   "
-        f"{len(trajectory)} STEPS"
-    )
+    if compact_paper:
+        status_text = f"{outcome}   |   {len(trajectory)} STEPS"
+    else:
+        status_text = (
+            f"{outcome}   |   EPISODE {dataset_episode}   |   "
+            f"{len(trajectory)} STEPS"
+        )
     figure.text(
         0.985,
         0.982,
@@ -893,15 +948,16 @@ def _plot_trajectory(
             "edgecolor": outcome_color,
         },
     )
-    figure.text(
-        0.985,
-        0.944,
-        f"Camera: {image_key}",
-        ha="right",
-        va="top",
-        fontsize=8.3,
-        color="#829AB1",
-    )
+    if not compact_paper:
+        figure.text(
+            0.985,
+            0.944,
+            f"Camera: {image_key}",
+            ha="right",
+            va="top",
+            fontsize=8.3,
+            color="#829AB1",
+        )
     for text_artist in figure.findobj(match=Text):
         if font_family is not None:
             text_artist.set_fontfamily(font_family)
@@ -990,6 +1046,19 @@ def _build_parser() -> argparse.ArgumentParser:
         default=1.0,
         help="Multiplier applied to every text size; defaults to 1.0.",
     )
+    parser.add_argument(
+        "--compact-paper",
+        action="store_true",
+        help=(
+            "Keep keyframes, phases, the main return plot, and MAE metrics "
+            "while removing redundant labels and the absolute-error subplot."
+        ),
+    )
+    parser.add_argument(
+        "--hide-legend",
+        action="store_true",
+        help="Hide the return-curve legend, useful after the first stacked panel.",
+    )
     parser.add_argument("--return-min", type=float)
     parser.add_argument("--return-max", type=float)
     parser.add_argument("--value-min", type=float)
@@ -1070,6 +1139,8 @@ def main() -> None:
         args.dpi,
         args.font_family,
         args.font_scale,
+        args.compact_paper,
+        args.hide_legend,
     )
 
     export_columns = [
@@ -1117,6 +1188,8 @@ def main() -> None:
         "smooth_window": int(args.smooth_window),
         "font_family": args.font_family,
         "font_scale": float(args.font_scale),
+        "compact_paper": bool(args.compact_paper),
+        "hide_legend": bool(args.hide_legend),
         "metrics": metrics,
         "outputs": {
             "png": str(output_base.with_suffix(".png")),
