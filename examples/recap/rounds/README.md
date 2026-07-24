@@ -626,8 +626,9 @@ Pass `--comparison-episode` instead when the merged ordering differs.
 
 For the final two-row paper figure, use compact paper mode. It preserves the
 six simulator keyframes, phase strip, main return curves, outcome, instruction,
-and MAE summary while removing the camera label, repeated episode text, verbose
-keyframe captions, and the separate absolute-error subplot:
+and separate Raw/Fused MAE and signed-bias cards while removing the camera
+label, repeated episode text, verbose keyframe captions, and the separate
+absolute-error subplot:
 
 ```bash
 cd /workspace/RLinf

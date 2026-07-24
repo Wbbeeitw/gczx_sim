@@ -635,6 +635,55 @@ def _metric_summary(trajectory: pd.DataFrame) -> dict[str, float]:
     }
 
 
+def _draw_compact_metric_strip(
+    axis: plt.Axes,
+    metrics: dict[str, float],
+) -> None:
+    axis.set_xlim(0.0, 1.0)
+    axis.set_ylim(0.0, 1.0)
+    axis.set_axis_off()
+    entries = (
+        (
+            0.012,
+            f"RAW CRITIC   MAE {metrics['raw_mae']:.2f}   "
+            f"BIAS {metrics['raw_bias']:+.2f}",
+            RAW_COLOR,
+            "#FFF4EF",
+        ),
+        (
+            0.385,
+            f"FUSED CRITIC   MAE {metrics['fused_mae']:.2f}   "
+            f"BIAS {metrics['fused_bias']:+.2f}",
+            FUSED_COLOR,
+            "#EFF6FC",
+        ),
+        (
+            0.755,
+            f"MAE IMPROVEMENT   {metrics['mae_improvement_pct']:.1f}%",
+            SUCCESS_COLOR,
+            "#F1F8F5",
+        ),
+    )
+    for x_position, text, edge_color, face_color in entries:
+        axis.text(
+            x_position,
+            0.5,
+            text,
+            transform=axis.transAxes,
+            ha="left",
+            va="center",
+            fontsize=9.2,
+            color="#243B53",
+            bbox={
+                "boxstyle": "round,pad=0.42",
+                "facecolor": face_color,
+                "edgecolor": edge_color,
+                "linewidth": 0.9,
+                "alpha": 0.98,
+            },
+        )
+
+
 def _plot_trajectory(
     trajectory: pd.DataFrame,
     images: dict[int, np.ndarray],
@@ -657,9 +706,9 @@ def _plot_trajectory(
     figure_width = max(14.8, 2.45 * columns)
     if compact_paper:
         show_error_panel = False
-        row_heights = [2.25, 0.18, 2.75]
-        figure_height = 5.9
-        grid_vertical_space = 0.14
+        row_heights = [2.25, 0.18, 0.34, 2.75]
+        figure_height = 6.1
+        grid_vertical_space = 0.10
         grid_horizontal_space = 0.07
     else:
         row_heights = (
@@ -680,12 +729,18 @@ def _plot_trajectory(
     )
     image_axes = [figure.add_subplot(grid[0, index]) for index in range(columns)]
     phase_axis = figure.add_subplot(grid[1, :])
-    trajectory_axis = figure.add_subplot(grid[2, :])
-    error_axis = (
-        figure.add_subplot(grid[3, :], sharex=trajectory_axis)
-        if show_error_panel
-        else None
-    )
+    if compact_paper:
+        metric_axis = figure.add_subplot(grid[2, :])
+        trajectory_axis = figure.add_subplot(grid[3, :])
+        error_axis = None
+    else:
+        metric_axis = None
+        trajectory_axis = figure.add_subplot(grid[2, :])
+        error_axis = (
+            figure.add_subplot(grid[3, :], sharex=trajectory_axis)
+            if show_error_panel
+            else None
+        )
     figure.subplots_adjust(
         left=0.065,
         right=0.985,
@@ -724,13 +779,15 @@ def _plot_trajectory(
             },
         )
         if compact_paper:
-            compact_label = _phase_display_name(phase, phase_names)
             if frame == keyframes[0]:
-                compact_label = "Start"
+                compact_label = f"Start  |  t={frame}"
             elif frame == keyframes[-1]:
-                compact_label = "Success" if outcome == "SUCCESS" else "Incomplete"
+                endpoint = "Success" if outcome == "SUCCESS" else "Incomplete"
+                compact_label = f"{endpoint}  |  t={frame}"
+            else:
+                compact_label = f"t={frame}"
             axis.set_xlabel(
-                f"{compact_label}  |  t={frame}",
+                compact_label,
                 fontsize=9.6,
                 color="#334E68",
                 labelpad=4,
@@ -873,36 +930,36 @@ def _plot_trajectory(
 
     metrics = _metric_summary(trajectory)
     if compact_paper:
-        metric_text = (
-            f"MAE   Raw {metrics['raw_mae']:.2f}   |   "
-            f"Fused {metrics['fused_mae']:.2f}   |   "
-            f"Improvement {metrics['mae_improvement_pct']:.1f}%"
-        )
+        if metric_axis is None:
+            raise RuntimeError("Compact metric axis was not initialized.")
+        _draw_compact_metric_strip(metric_axis, metrics)
     else:
         metric_text = (
             f"Raw MAE  {metrics['raw_mae']:.2f}\n"
+            f"Raw bias  {metrics['raw_bias']:+.2f}\n"
             f"Fused MAE  {metrics['fused_mae']:.2f}\n"
+            f"Fused bias  {metrics['fused_bias']:+.2f}\n"
             f"MAE improvement  {metrics['mae_improvement_pct']:.1f}%"
         )
-    trajectory_axis.text(
-        0.988,
-        0.982,
-        metric_text,
-        transform=trajectory_axis.transAxes,
-        ha="right",
-        va="top",
-        fontsize=9.3 if compact_paper else 8.7,
-        linespacing=1.35,
-        color="#243B53",
-        bbox={
-            "boxstyle": "round,pad=0.55",
-            "facecolor": "white",
-            "edgecolor": "#BCCCDC",
-            "linewidth": 0.9,
-            "alpha": 0.96,
-        },
-        zorder=10,
-    )
+        trajectory_axis.text(
+            0.988,
+            0.982,
+            metric_text,
+            transform=trajectory_axis.transAxes,
+            ha="right",
+            va="top",
+            fontsize=8.7,
+            linespacing=1.35,
+            color="#243B53",
+            bbox={
+                "boxstyle": "round,pad=0.55",
+                "facecolor": "white",
+                "edgecolor": "#BCCCDC",
+                "linewidth": 0.9,
+                "alpha": 0.96,
+            },
+            zorder=10,
+        )
 
     figure.text(
         0.065,
