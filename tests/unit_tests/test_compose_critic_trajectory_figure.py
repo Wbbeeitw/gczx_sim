@@ -21,9 +21,9 @@ sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
 
-def test_stack_three_panels_without_restyling(tmp_path: Path) -> None:
+def test_stack_two_panels_without_restyling(tmp_path: Path) -> None:
     panel_paths = []
-    for index, size in enumerate(((100, 40), (80, 30), (100, 50))):
+    for index, size in enumerate(((100, 40), (80, 30))):
         panel_path = tmp_path / f"panel{index}.png"
         Image.new("RGB", size, (50 * index, 80, 120)).save(panel_path)
         panel_paths.append(panel_path)
@@ -37,8 +37,8 @@ def test_stack_three_panels_without_restyling(tmp_path: Path) -> None:
     )
 
     assert output.is_file()
-    assert dimensions == (100, 40 + 38 + 50 + 20)
+    assert dimensions == (100, 40 + 38 + 10)
     with Image.open(output) as image:
         assert image.getpixel((5, 5)) == (0, 80, 120)
         assert image.getpixel((5, 55)) == (50, 80, 120)
-        assert image.getpixel((5, image.height - 5)) == (100, 80, 120)
+        assert image.getpixel((5, image.height - 5)) == (50, 80, 120)

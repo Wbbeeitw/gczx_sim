@@ -1,4 +1,4 @@
-"""Stack three existing critic-trajectory PNGs into one vertical figure."""
+"""Stack existing critic-trajectory PNGs into one vertical figure."""
 
 from __future__ import annotations
 
@@ -47,13 +47,13 @@ def _stack_panels(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Stack exactly three wide critic-trajectory PNGs vertically."
+        description="Stack two or more wide critic-trajectory PNGs vertically."
     )
     parser.add_argument(
         "--panel",
         action="append",
         required=True,
-        help="Panel PNG path or output stem; pass three in top-to-bottom order.",
+        help="Panel PNG path or output stem; pass in top-to-bottom order.",
     )
     parser.add_argument("--output", required=True, help="Final PNG path.")
     parser.add_argument("--dpi", type=int, default=600)
@@ -67,10 +67,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    """Load three panels and write their unmodified vertical composition."""
+    """Load panels and write their unmodified vertical composition."""
     args = _build_parser().parse_args()
-    if len(args.panel) != 3:
-        raise ValueError("Pass exactly three --panel arguments.")
+    if len(args.panel) < 2:
+        raise ValueError("Pass at least two --panel arguments.")
     if args.dpi < 72:
         raise ValueError("--dpi must be at least 72.")
     if args.gap_px < 0:
