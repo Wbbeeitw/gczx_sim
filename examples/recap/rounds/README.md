@@ -592,6 +592,31 @@ saves and evaluates steps 500 and 1000, and writes its checkpoints under
 `/workspace/results/round1_v3_recap_baseline`. The raw labels and small ReCap
 artifacts live under `/data/libero_long/round1_v3_recap_baseline_exp`.
 
+## Critic trajectory figure
+
+Use `visualize_critic_trajectory.py` to align the empirical target return, raw
+Critic prediction, fused Critic prediction, semantic phase boundaries, and
+simulator keyframes for one episode. Child task episodes are local indices,
+while the merged 300-episode Critic files use a task-dependent global offset.
+For example, task8 starts at merged episode 240:
+
+```bash
+python examples/recap/process/visualize_critic_trajectory.py \
+  --dataset /data/libero_long/round1_v3_facd_30ep/task8_30ep \
+  --comparison /data/libero_long/round1_v3_facd_exp/revalue/return_compare.json \
+  --episode 3 \
+  --episode-offset 240 \
+  --phase-names "Approach object,Grasp object,Transport object,Complete task" \
+  --output /workspace/results/figures/task8_episode3_critic
+```
+
+The command writes a 300-DPI PNG, vector PDF, aligned per-frame CSV, and JSON
+metadata using the same output stem. `--image-key` overrides camera
+auto-detection, `--smooth-window` only smooths the two displayed predictions,
+and `--no-error-panel` produces a more compact two-row figure. The task offsets
+for ten 30-episode child datasets are 0, 30, 60, 90, 120, 150, 180, 210, 240,
+and 270. Pass `--comparison-episode` instead when the merged ordering differs.
+
 Recovery stages are:
 
 ```bash
