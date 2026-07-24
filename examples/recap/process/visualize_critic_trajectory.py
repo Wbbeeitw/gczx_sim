@@ -706,9 +706,9 @@ def _plot_trajectory(
     figure_width = max(14.8, 2.45 * columns)
     if compact_paper:
         show_error_panel = False
-        row_heights = [2.25, 0.18, 0.34, 2.75]
-        figure_height = 6.1
-        grid_vertical_space = 0.10
+        row_heights = [2.25, 0.28, 0.18, 0.34, 2.75]
+        figure_height = 6.35
+        grid_vertical_space = 0.06
         grid_horizontal_space = 0.07
     else:
         row_heights = (
@@ -728,12 +728,17 @@ def _plot_trajectory(
         wspace=grid_horizontal_space,
     )
     image_axes = [figure.add_subplot(grid[0, index]) for index in range(columns)]
-    phase_axis = figure.add_subplot(grid[1, :])
     if compact_paper:
-        metric_axis = figure.add_subplot(grid[2, :])
-        trajectory_axis = figure.add_subplot(grid[3, :])
+        caption_axes = [
+            figure.add_subplot(grid[1, index]) for index in range(columns)
+        ]
+        phase_axis = figure.add_subplot(grid[2, :])
+        metric_axis = figure.add_subplot(grid[3, :])
+        trajectory_axis = figure.add_subplot(grid[4, :])
         error_axis = None
     else:
+        caption_axes = []
+        phase_axis = figure.add_subplot(grid[1, :])
         metric_axis = None
         trajectory_axis = figure.add_subplot(grid[2, :])
         error_axis = (
@@ -786,11 +791,17 @@ def _plot_trajectory(
                 compact_label = f"{endpoint}  |  t={frame}"
             else:
                 compact_label = f"t={frame}"
-            axis.set_xlabel(
+            caption_axis = caption_axes[image_number - 1]
+            caption_axis.set_axis_off()
+            caption_axis.text(
+                0.5,
+                0.52,
                 compact_label,
+                transform=caption_axis.transAxes,
+                ha="center",
+                va="center",
                 fontsize=9.6,
                 color="#334E68",
-                labelpad=4,
             )
         else:
             axis.set_xlabel(
@@ -858,9 +869,17 @@ def _plot_trajectory(
 
     for image_number, (axis, frame) in enumerate(zip(image_axes, keyframes), start=1):
         anchor_y = float(trajectory_lookup.loc[frame, "fused_critic_plot"])
+        if compact_paper:
+            frame_min = float(frames[0])
+            frame_span = max(float(frames[-1]) - frame_min, 1.0)
+            source_xy = ((float(frame) - frame_min) / frame_span, 0.0)
+            source_coords = phase_axis.transAxes
+        else:
+            source_xy = (0.5, 0.0)
+            source_coords = axis.transAxes
         connector = ConnectionPatch(
-            xyA=(0.5, 0.0),
-            coordsA=axis.transAxes,
+            xyA=source_xy,
+            coordsA=source_coords,
             xyB=(frame, anchor_y),
             coordsB=trajectory_axis.transData,
             color="#829AB1",

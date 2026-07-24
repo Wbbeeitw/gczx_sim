@@ -711,6 +711,21 @@ comparison artifact over the same frames and return scale. By default the
 script intentionally reads Raw/Base and Fused predictions from the shared
 comparison to prevent dataset or scale differences from contaminating bias.
 
+To combine the original FACD-500 evaluation and two independent-seed repeats
+into one reproducible per-task success-rate table, run:
+
+```bash
+python examples/recap/process/summarize_policy_eval_repeats.py \
+  --repeat repeat1=/data/libero_long/round1_v3_facd_exp/eval_step_500 \
+  --repeat repeat2=/data/libero_long/round1_v3_facd_repeat_seed20260723_exp/eval_step_500 \
+  --repeat repeat3=/data/libero_long/round1_v3_facd_repeat_seed20260724_exp/eval_step_500 \
+  --output-dir /workspace/results/round1_v3_facd/eval_three_repeats
+```
+
+This writes all 30 individual task measurements, task-wise repeat means and
+sample standard deviations, and repeat-wise macro success rates as CSV, JSON,
+and plain text.
+
 Recovery stages are:
 
 ```bash
