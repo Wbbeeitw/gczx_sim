@@ -644,7 +644,8 @@ python examples/recap/process/visualize_critic_trajectory.py \
   --num-keyframes 6 \
   --title "(a) Task 0 - Success" \
   --font-family "Times New Roman" \
-  --font-scale 1.15 \
+  --font-scale 1.25 \
+  --font-weight bold \
   --compact-paper \
   --dpi 600 \
   --output "$PANEL_ROOT/task0_success_episode15_panel"
@@ -657,7 +658,8 @@ python examples/recap/process/visualize_critic_trajectory.py \
   --num-keyframes 6 \
   --title "(b) Task 9 - Success" \
   --font-family "Times New Roman" \
-  --font-scale 1.15 \
+  --font-scale 1.25 \
+  --font-weight bold \
   --compact-paper \
   --hide-legend \
   --dpi 600 \
@@ -671,7 +673,8 @@ python examples/recap/process/visualize_critic_trajectory.py \
   --num-keyframes 6 \
   --title "(c) Task 1 - Failure" \
   --font-family "Times New Roman" \
-  --font-scale 1.15 \
+  --font-scale 1.25 \
+  --font-weight bold \
   --compact-paper \
   --hide-legend \
   --dpi 600 \
@@ -694,6 +697,34 @@ Only the first panel retains the shared return-curve legend. The composer does
 not crop or redraw the inputs; it normalizes their widths and stacks them with
 a narrow white gap. The final output is `critic_trajectory_triptych.png` at
 600 DPI.
+
+## Detailed ReCAP-vs-Ours critic bias
+
+Use the same fixed 300-episode return comparison for both methods: ReCAP is the
+Raw/Base Critic prediction and Ours is the Fused Critic prediction. Bias is
+defined as `prediction - realized return-to-go`, so positive values are
+optimistic and negative values are pessimistic:
+
+```bash
+python examples/recap/process/summarize_v3_critic_bias.py \
+  --ours-comparison /data/libero_long/round1_v3_facd_exp/revalue/return_compare.json \
+  --output-dir /workspace/results/round1_v3_critic_bias
+```
+
+The command prints the per-task table and writes:
+
+- `critic_bias_by_task.csv`: task0-task9 frame-weighted bias, normalized bias,
+  MAE, RMSE, and improvements;
+- `critic_bias_by_task_split.csv`: the same statistics for all/train/val;
+- `critic_bias_by_episode.csv`: all 300 episode-level statistics;
+- `critic_bias_summary.json`: frame-micro, task-macro, and episode-macro
+  aggregates;
+- `critic_bias_summary.txt`: a readable complete report.
+
+Pass `--recap-comparison <path>` only when ReCAP was scored into a separate
+comparison artifact over the same frames and return scale. By default the
+script intentionally reads Raw/Base and Fused predictions from the shared
+comparison to prevent dataset or scale differences from contaminating bias.
 
 Recovery stages are:
 

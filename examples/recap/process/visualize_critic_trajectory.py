@@ -648,6 +648,7 @@ def _plot_trajectory(
     dpi: int,
     font_family: str | None,
     font_scale: float,
+    font_weight: str | None,
     compact_paper: bool,
     hide_legend: bool,
 ) -> None:
@@ -962,6 +963,8 @@ def _plot_trajectory(
         if font_family is not None:
             text_artist.set_fontfamily(font_family)
         text_artist.set_fontsize(text_artist.get_fontsize() * font_scale)
+        if font_weight is not None:
+            text_artist.set_fontweight(font_weight)
     figure.savefig(output_base.with_suffix(".png"), dpi=dpi, bbox_inches="tight")
     figure.savefig(output_base.with_suffix(".pdf"), bbox_inches="tight")
     plt.close(figure)
@@ -1045,6 +1048,11 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=1.0,
         help="Multiplier applied to every text size; defaults to 1.0.",
+    )
+    parser.add_argument(
+        "--font-weight",
+        choices=("normal", "medium", "semibold", "bold"),
+        help="Optional font weight applied to all labels.",
     )
     parser.add_argument(
         "--compact-paper",
@@ -1139,6 +1147,7 @@ def main() -> None:
         args.dpi,
         args.font_family,
         args.font_scale,
+        args.font_weight,
         args.compact_paper,
         args.hide_legend,
     )
@@ -1188,6 +1197,7 @@ def main() -> None:
         "smooth_window": int(args.smooth_window),
         "font_family": args.font_family,
         "font_scale": float(args.font_scale),
+        "font_weight": args.font_weight,
         "compact_paper": bool(args.compact_paper),
         "hide_legend": bool(args.hide_legend),
         "metrics": metrics,
