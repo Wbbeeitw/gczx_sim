@@ -624,6 +624,69 @@ auto-detection, `--task-description` overrides the detected instruction,
 30-episode child datasets are 0, 30, 60, 90, 120, 150, 180, 210, 240, and 270.
 Pass `--comparison-episode` instead when the merged ordering differs.
 
+For the final three-row paper figure, rerender the selected episodes with the
+same layout and colors while enlarging all text in Times New Roman:
+
+```bash
+cd /workspace/RLinf
+
+COMPARISON=/data/libero_long/round1_v3_facd_exp/revalue/return_compare.json
+PANEL_ROOT=/workspace/results/critic_trajectory_figures/final_triptych/panels
+mkdir -p "$PANEL_ROOT"
+
+python examples/recap/process/visualize_critic_trajectory.py \
+  --dataset /data/libero_long/round1_v3_facd_30ep/task0_30ep \
+  --comparison "$COMPARISON" \
+  --episode 15 \
+  --episode-offset 0 \
+  --num-keyframes 6 \
+  --title "(a) Task 0 - Success" \
+  --font-family "Times New Roman" \
+  --font-scale 1.18 \
+  --dpi 600 \
+  --output "$PANEL_ROOT/task0_success_episode15_panel"
+
+python examples/recap/process/visualize_critic_trajectory.py \
+  --dataset /data/libero_long/round1_v3_facd_30ep/task9_30ep \
+  --comparison "$COMPARISON" \
+  --episode 16 \
+  --episode-offset 270 \
+  --num-keyframes 6 \
+  --title "(b) Task 9 - Success" \
+  --font-family "Times New Roman" \
+  --font-scale 1.18 \
+  --dpi 600 \
+  --output "$PANEL_ROOT/task9_success_episode16_panel"
+
+python examples/recap/process/visualize_critic_trajectory.py \
+  --dataset /data/libero_long/round1_v3_facd_30ep/task1_30ep \
+  --comparison "$COMPARISON" \
+  --episode 19 \
+  --episode-offset 30 \
+  --num-keyframes 6 \
+  --title "(c) Task 1 - Failure" \
+  --font-family "Times New Roman" \
+  --font-scale 1.18 \
+  --dpi 600 \
+  --output "$PANEL_ROOT/task1_failure_episode19_panel"
+```
+
+Then compose the three panels into the final 600-DPI paper PNG:
+
+```bash
+python examples/recap/process/compose_critic_trajectory_figure.py \
+  --panel "$PANEL_ROOT/task0_success_episode15_panel" \
+  --panel "$PANEL_ROOT/task9_success_episode16_panel" \
+  --panel "$PANEL_ROOT/task1_failure_episode19_panel" \
+  --output /workspace/results/critic_trajectory_figures/final_triptych/critic_trajectory_triptych.png \
+  --dpi 600 \
+  --gap-px 24
+```
+
+The composer does not crop, relabel, or restyle the three inputs. It only
+normalizes their widths and stacks them from top to bottom with a narrow white
+gap. The final output is `critic_trajectory_triptych.png` at 600 DPI.
+
 Recovery stages are:
 
 ```bash

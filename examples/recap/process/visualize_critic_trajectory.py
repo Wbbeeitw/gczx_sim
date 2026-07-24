@@ -21,6 +21,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.patches import ConnectionPatch
+from matplotlib.text import Text
 
 
 TARGET_COLOR = "#263238"
@@ -643,6 +644,8 @@ def _plot_trajectory(
     phase_names: list[str],
     show_error_panel: bool,
     dpi: int,
+    font_family: str | None,
+    font_scale: float,
 ) -> None:
     keyframes = sorted(images)
     columns = max(1, len(keyframes))
@@ -899,6 +902,10 @@ def _plot_trajectory(
         fontsize=8.3,
         color="#829AB1",
     )
+    for text_artist in figure.findobj(match=Text):
+        if font_family is not None:
+            text_artist.set_fontfamily(font_family)
+        text_artist.set_fontsize(text_artist.get_fontsize() * font_scale)
     figure.savefig(output_base.with_suffix(".png"), dpi=dpi, bbox_inches="tight")
     figure.savefig(output_base.with_suffix(".pdf"), bbox_inches="tight")
     plt.close(figure)
@@ -973,6 +980,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--smooth-window", type=int, default=1)
     parser.add_argument("--dpi", type=int, default=300)
     parser.add_argument("--no-error-panel", action="store_true")
+    parser.add_argument(
+        "--font-family",
+        help="Optional font family applied to all labels, e.g. Times New Roman.",
+    )
+    parser.add_argument(
+        "--font-scale",
+        type=float,
+        default=1.0,
+        help="Multiplier applied to every text size; defaults to 1.0.",
+    )
     parser.add_argument("--return-min", type=float)
     parser.add_argument("--return-max", type=float)
     parser.add_argument("--value-min", type=float)
@@ -993,6 +1010,8 @@ def main() -> None:
         raise ValueError("--smooth-window must be at least 1.")
     if args.dpi < 72:
         raise ValueError("--dpi must be at least 72.")
+    if args.font_scale <= 0:
+        raise ValueError("--font-scale must be positive.")
 
     dataset_path = Path(args.dataset).expanduser()
     if not dataset_path.is_dir():
@@ -1049,6 +1068,8 @@ def main() -> None:
         phase_names,
         not args.no_error_panel,
         args.dpi,
+        args.font_family,
+        args.font_scale,
     )
 
     export_columns = [
@@ -1094,6 +1115,8 @@ def main() -> None:
             "value_max": paths.value_max,
         },
         "smooth_window": int(args.smooth_window),
+        "font_family": args.font_family,
+        "font_scale": float(args.font_scale),
         "metrics": metrics,
         "outputs": {
             "png": str(output_base.with_suffix(".png")),
