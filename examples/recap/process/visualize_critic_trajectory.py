@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,11 +23,13 @@ import pandas as pd
 from matplotlib.patches import ConnectionPatch
 
 
-TARGET_COLOR = "#222222"
-RAW_COLOR = "#D55E00"
-FUSED_COLOR = "#0072B2"
-BOUNDARY_COLOR = "#3A506B"
-PHASE_COLORS = ("#DCEAF7", "#F2F2F2", "#E8F3E8", "#F8E6DD")
+TARGET_COLOR = "#263238"
+RAW_COLOR = "#E76F51"
+FUSED_COLOR = "#2364AA"
+BOUNDARY_COLOR = "#415A77"
+PHASE_COLORS = ("#DCEAF7", "#E8F3E8", "#FFF1D6", "#F7E1EA")
+SUCCESS_COLOR = "#2A9D8F"
+FAILURE_COLOR = "#C44536"
 
 
 @dataclass(frozen=True)
@@ -272,7 +275,7 @@ def _phase_display_name(phase: Any, phase_names: list[str]) -> str:
 
 def _choose_keyframes(
     trajectory: pd.DataFrame,
-    max_keyframes: int,
+    num_keyframes: int,
     boundary_window: int,
 ) -> list[int]:
     frames = trajectory["frame_index"].astype(int).tolist()
@@ -294,19 +297,25 @@ def _choose_keyframes(
         for _, phase_frame in trajectory.groupby("phase", sort=False, dropna=True):
             midpoint = int(phase_frame.iloc[len(phase_frame) // 2]["frame_index"])
             candidates.append((1, midpoint))
-    evenly_spaced = np.linspace(0, len(frames) - 1, max_keyframes, dtype=int)
+    evenly_spaced = np.linspace(0, len(frames) - 1, num_keyframes, dtype=int)
     candidates.extend((2, frames[index]) for index in evenly_spaced)
 
-    selected = mandatory[:max_keyframes]
-    minimum_gap = max(1, len(frames) // max(2, max_keyframes * 3))
+    selected = mandatory[:num_keyframes]
+    minimum_gap = max(1, len(frames) // max(2, num_keyframes * 3))
     for _, candidate in sorted(candidates):
-        if len(selected) >= max_keyframes:
+        if len(selected) >= num_keyframes:
             break
         if candidate in selected:
             continue
         if any(abs(candidate - existing) < minimum_gap for existing in selected):
             continue
         selected.append(candidate)
+    if len(selected) < num_keyframes:
+        for candidate in frames:
+            if len(selected) >= num_keyframes:
+                break
+            if candidate not in selected:
+                selected.append(candidate)
     return sorted(selected)
 
 
@@ -380,13 +389,41 @@ def _episode_indices(dataset: Any, episode_index: int) -> list[int]:
     return indices
 
 
+def _task_description(dataset_path: Path, sample: dict[str, Any]) -> str | None:
+    for key in ("task", "task_name", "language_instruction", "instruction"):
+        value = sample.get(key)
+        if isinstance(value, str) and value.strip():
+            return " ".join(value.split())
+
+    task_index = sample.get("task_index")
+    if task_index is None:
+        return None
+    try:
+        task_index = int(np.asarray(task_index).item())
+    except (TypeError, ValueError):
+        return None
+
+    tasks_path = dataset_path / "meta" / "tasks.jsonl"
+    if not tasks_path.is_file():
+        return None
+    with tasks_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            entry = json.loads(line)
+            if int(entry.get("task_index", -1)) != task_index:
+                continue
+            task = entry.get("task") or entry.get("task_name")
+            if isinstance(task, str) and task.strip():
+                return " ".join(task.split())
+    return None
+
+
 def _load_keyframe_images(
     dataset_path: Path,
     episode_index: int,
     requested_frames: list[int],
     trajectory_frames: list[int],
     image_key: str | None,
-) -> tuple[dict[int, np.ndarray], str]:
+) -> tuple[dict[int, np.ndarray], str, str | None]:
     from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
     from rlinf.data.datasets.recap.utils import decode_image_struct_batch
 
@@ -443,7 +480,7 @@ def _load_keyframe_images(
         frame: _to_image_array(samples[frame][selected_key])
         for frame in requested_frames
     }
-    return images, selected_key
+    return images, selected_key, _task_description(dataset_path, first_sample)
 
 
 def _phase_segments(trajectory: pd.DataFrame) -> list[tuple[int, int, Any]]:
@@ -479,42 +516,96 @@ def _add_phase_context(
         if show_labels:
             axis.text(
                 (start + end) / 2,
-                0.97,
+                0.96,
                 _phase_display_name(phase, phase_names),
                 transform=axis.get_xaxis_transform(),
                 ha="center",
                 va="top",
-                fontsize=9,
-                color="#4A4A4A",
+                fontsize=8,
+                color="#52606D",
             )
     boundaries = trajectory[trajectory["is_boundary"]]
-    previous_phase = trajectory["phase"].shift(1)
-    for index, row in boundaries.iterrows():
+    for _, row in boundaries.iterrows():
         frame = int(row["frame_index"])
         axis.axvline(
             frame,
             color=BOUNDARY_COLOR,
-            linestyle=(0, (5, 3)),
-            linewidth=1.6,
-            alpha=0.9,
+            linestyle=(0, (4, 3)),
+            linewidth=1.25,
+            alpha=0.75,
             zorder=2,
         )
-        if show_labels:
-            before = _phase_display_name(previous_phase.loc[index], phase_names)
-            after = _phase_display_name(row["phase"], phase_names)
-            axis.annotate(
-                f"{before} -> {after}",
-                xy=(frame, 1.0),
-                xycoords=axis.get_xaxis_transform(),
-                xytext=(4, 7),
-                textcoords="offset points",
-                rotation=90,
-                ha="left",
-                va="bottom",
-                fontsize=8,
-                color=BOUNDARY_COLOR,
-                clip_on=False,
-            )
+
+
+def _draw_phase_strip(
+    axis: plt.Axes,
+    trajectory: pd.DataFrame,
+    phase_names: list[str],
+) -> None:
+    frames = trajectory["frame_index"].astype(int)
+    axis.set_xlim(int(frames.iloc[0]), int(frames.iloc[-1]))
+    axis.set_ylim(0.0, 1.0)
+    for index, (start, end, phase) in enumerate(_phase_segments(trajectory)):
+        axis.axvspan(
+            start,
+            end,
+            ymin=0.08,
+            ymax=0.92,
+            color=PHASE_COLORS[index % len(PHASE_COLORS)],
+            linewidth=0,
+        )
+        axis.text(
+            (start + end) / 2,
+            0.5,
+            _phase_display_name(phase, phase_names),
+            ha="center",
+            va="center",
+            fontsize=8.5,
+            fontweight="semibold",
+            color="#334E68",
+        )
+    for frame in trajectory.loc[trajectory["is_boundary"], "frame_index"]:
+        axis.axvline(
+            int(frame),
+            ymin=0.08,
+            ymax=0.92,
+            color=BOUNDARY_COLOR,
+            linewidth=1.25,
+        )
+    axis.text(
+        -0.012,
+        0.5,
+        "Semantic phases",
+        transform=axis.transAxes,
+        ha="right",
+        va="center",
+        fontsize=8.5,
+        color="#52606D",
+    )
+    axis.set_axis_off()
+
+
+def _episode_outcome(trajectory: pd.DataFrame) -> tuple[str, str]:
+    values = trajectory["is_success"].dropna()
+    if values.empty:
+        return "TRAJECTORY", BOUNDARY_COLOR
+    value = values.iloc[-1]
+    if isinstance(value, str):
+        success = value.strip().lower() in {"true", "1", "yes"}
+    else:
+        success = bool(value)
+    if success:
+        return "SUCCESS", SUCCESS_COLOR
+    return "FAILURE / INCOMPLETE", FAILURE_COLOR
+
+
+def _style_plot_axis(axis: plt.Axes) -> None:
+    axis.set_facecolor("#FCFDFE")
+    axis.spines["top"].set_visible(False)
+    axis.spines["right"].set_visible(False)
+    axis.spines["left"].set_color("#90A4AE")
+    axis.spines["bottom"].set_color("#90A4AE")
+    axis.tick_params(colors="#455A64", labelsize=9)
 
 
 def _metric_summary(trajectory: pd.DataFrame) -> dict[str, float]:
@@ -538,50 +629,87 @@ def _plot_trajectory(
     image_key: str,
     output_base: Path,
     title: str,
+    task_description: str,
+    dataset_episode: int,
     phase_names: list[str],
     show_error_panel: bool,
     dpi: int,
 ) -> None:
     keyframes = sorted(images)
     columns = max(1, len(keyframes))
-    figure_width = max(11.0, 2.0 * columns)
-    row_heights = [1.65, 3.2, 1.35] if show_error_panel else [1.65, 3.5]
-    figure = plt.figure(
-        figsize=(figure_width, sum(row_heights) + 0.8), constrained_layout=True
-    )
+    figure_width = max(14.8, 2.45 * columns)
+    row_heights = [2.45, 0.22, 3.25, 1.15] if show_error_panel else [2.45, 0.22, 3.65]
+    figure_height = 8.8 if show_error_panel else 7.5
+    figure = plt.figure(figsize=(figure_width, figure_height), facecolor="white")
     grid = figure.add_gridspec(
-        len(row_heights), columns, height_ratios=row_heights, hspace=0.08, wspace=0.05
+        len(row_heights),
+        columns,
+        height_ratios=row_heights,
+        hspace=0.20,
+        wspace=0.08,
     )
     image_axes = [figure.add_subplot(grid[0, index]) for index in range(columns)]
-    trajectory_axis = figure.add_subplot(grid[1, :])
+    phase_axis = figure.add_subplot(grid[1, :])
+    trajectory_axis = figure.add_subplot(grid[2, :])
     error_axis = (
-        figure.add_subplot(grid[2, :], sharex=trajectory_axis)
+        figure.add_subplot(grid[3, :], sharex=trajectory_axis)
         if show_error_panel
         else None
     )
+    figure.subplots_adjust(left=0.065, right=0.985, bottom=0.075, top=0.875)
 
     trajectory_lookup = trajectory.set_index("frame_index")
-    for axis, frame in zip(image_axes, keyframes):
+    outcome, outcome_color = _episode_outcome(trajectory)
+    for image_number, (axis, frame) in enumerate(zip(image_axes, keyframes), start=1):
         axis.imshow(images[frame])
         phase = trajectory_lookup.loc[frame, "phase"]
         label = _phase_display_name(phase, phase_names)
         if bool(trajectory_lookup.loc[frame, "is_boundary"]):
-            label = f"Boundary | {label}"
-        axis.set_title(f"t = {frame}\n{label}", fontsize=9, pad=4)
+            label = f"Transition to {label}"
+        elif frame == keyframes[0]:
+            label = "Start"
+        elif frame == keyframes[-1]:
+            label = "End" if outcome == "SUCCESS" else "End (incomplete)"
+        axis.text(
+            0.045,
+            0.93,
+            str(image_number),
+            transform=axis.transAxes,
+            ha="center",
+            va="center",
+            fontsize=9,
+            fontweight="bold",
+            color="white",
+            bbox={
+                "boxstyle": "circle,pad=0.28",
+                "facecolor": FUSED_COLOR,
+                "edgecolor": "white",
+                "linewidth": 1.0,
+            },
+        )
+        axis.set_xlabel(
+            f"{label}\nTime step {frame}",
+            fontsize=9,
+            color="#334E68",
+            labelpad=6,
+        )
         axis.set_xticks([])
         axis.set_yticks([])
+        axis.set_facecolor("white")
         for spine in axis.spines.values():
-            spine.set_color(BOUNDARY_COLOR if "Boundary" in label else "#A0A0A0")
-            spine.set_linewidth(2.2 if "Boundary" in label else 0.8)
+            spine.set_visible(True)
+            spine.set_color(FUSED_COLOR if "Transition" in label else "#9FB3C8")
+            spine.set_linewidth(2.0 if "Transition" in label else 1.0)
 
     frames = trajectory["frame_index"].to_numpy()
-    _add_phase_context(trajectory_axis, trajectory, phase_names, show_labels=True)
+    _draw_phase_strip(phase_axis, trajectory, phase_names)
+    _add_phase_context(trajectory_axis, trajectory, phase_names, show_labels=False)
     trajectory_axis.plot(
         frames,
         trajectory["target_return"],
         color=TARGET_COLOR,
         linestyle="--",
-        linewidth=2.0,
+        linewidth=2.15,
         label="Target return",
         zorder=4,
     )
@@ -589,7 +717,7 @@ def _plot_trajectory(
         frames,
         trajectory["raw_critic_plot"],
         color=RAW_COLOR,
-        linewidth=2.0,
+        linewidth=2.15,
         label="Raw Critic",
         zorder=3,
     )
@@ -597,33 +725,59 @@ def _plot_trajectory(
         frames,
         trajectory["fused_critic_plot"],
         color=FUSED_COLOR,
-        linewidth=2.3,
+        linewidth=2.65,
         label="Ours (Fused Critic)",
         zorder=5,
     )
-    trajectory_axis.set_ylabel("Predicted return", fontsize=11)
-    trajectory_axis.grid(axis="y", alpha=0.22, linewidth=0.7)
-    trajectory_axis.legend(loc="lower right", ncol=3, frameon=True, fontsize=9)
+    trajectory_axis.set_ylabel("Return prediction", fontsize=10.5, color="#334E68")
+    trajectory_axis.grid(axis="y", color="#CFD8DC", alpha=0.55, linewidth=0.7)
+    trajectory_axis.legend(
+        loc="lower left",
+        ncol=3,
+        frameon=True,
+        framealpha=0.96,
+        facecolor="white",
+        edgecolor="#D9E2EC",
+        fontsize=9,
+    )
     trajectory_axis.margins(x=0.01)
     trajectory_axis.tick_params(labelbottom=not show_error_panel)
+    _style_plot_axis(trajectory_axis)
 
-    for axis, frame in zip(image_axes, keyframes):
-        target_y = float(trajectory_lookup.loc[frame, "target_return"])
+    for image_number, (axis, frame) in enumerate(zip(image_axes, keyframes), start=1):
+        anchor_y = float(trajectory_lookup.loc[frame, "fused_critic_plot"])
         connector = ConnectionPatch(
             xyA=(0.5, 0.0),
             coordsA=axis.transAxes,
-            xyB=(frame, target_y),
+            xyB=(frame, anchor_y),
             coordsB=trajectory_axis.transData,
-            color="#6B7280",
-            linewidth=0.8,
-            linestyle=":",
-            alpha=0.7,
+            color="#829AB1",
+            linewidth=0.9,
+            linestyle=(0, (2, 2)),
+            alpha=0.72,
             zorder=1,
             clip_on=False,
         )
         figure.add_artist(connector)
         trajectory_axis.scatter(
-            [frame], [target_y], s=24, color=TARGET_COLOR, zorder=6, edgecolor="white"
+            [frame],
+            [anchor_y],
+            s=90,
+            color=FUSED_COLOR,
+            zorder=7,
+            edgecolor="white",
+            linewidth=1.2,
+        )
+        trajectory_axis.text(
+            frame,
+            anchor_y,
+            str(image_number),
+            ha="center",
+            va="center",
+            fontsize=7.5,
+            fontweight="bold",
+            color="white",
+            zorder=8,
         )
 
     if error_axis is not None:
@@ -632,36 +786,110 @@ def _plot_trajectory(
             frames,
             trajectory["raw_abs_error"],
             color=RAW_COLOR,
-            linewidth=1.6,
+            linewidth=1.45,
             label="Raw absolute error",
         )
         error_axis.plot(
             frames,
             trajectory["fused_abs_error"],
             color=FUSED_COLOR,
-            linewidth=1.8,
+            linewidth=1.7,
             label="Fused absolute error",
         )
         error_axis.fill_between(
             frames,
             trajectory["fused_abs_error"].to_numpy(),
             color=FUSED_COLOR,
-            alpha=0.08,
+            alpha=0.10,
         )
-        error_axis.set_ylabel("Absolute error", fontsize=10)
-        error_axis.set_xlabel("Episode frame", fontsize=11)
-        error_axis.grid(axis="y", alpha=0.22, linewidth=0.7)
-        error_axis.legend(loc="upper right", ncol=2, fontsize=8)
+        error_axis.set_ylabel("Absolute error", fontsize=9.5, color="#334E68")
+        error_axis.set_xlabel("Time step", fontsize=10.5, color="#334E68")
+        error_axis.grid(axis="y", color="#CFD8DC", alpha=0.5, linewidth=0.65)
+        error_axis.legend(
+            loc="upper right",
+            ncol=2,
+            frameon=False,
+            fontsize=8,
+        )
         error_axis.margins(x=0.01)
+        _style_plot_axis(error_axis)
     else:
-        trajectory_axis.set_xlabel("Episode frame", fontsize=11)
+        trajectory_axis.set_xlabel("Time step", fontsize=10.5, color="#334E68")
 
     metrics = _metric_summary(trajectory)
-    subtitle = (
-        f"Raw MAE {metrics['raw_mae']:.2f}  |  Fused MAE {metrics['fused_mae']:.2f}  "
-        f"|  improvement {metrics['mae_improvement_pct']:.1f}%  |  image: {image_key}"
+    metric_text = (
+        f"Raw MAE  {metrics['raw_mae']:.2f}\n"
+        f"Fused MAE  {metrics['fused_mae']:.2f}\n"
+        f"MAE improvement  {metrics['mae_improvement_pct']:.1f}%"
     )
-    figure.suptitle(f"{title}\n{subtitle}", fontsize=13, fontweight="semibold")
+    trajectory_axis.text(
+        0.988,
+        0.982,
+        metric_text,
+        transform=trajectory_axis.transAxes,
+        ha="right",
+        va="top",
+        fontsize=8.7,
+        linespacing=1.35,
+        color="#243B53",
+        bbox={
+            "boxstyle": "round,pad=0.55",
+            "facecolor": "white",
+            "edgecolor": "#BCCCDC",
+            "linewidth": 0.9,
+            "alpha": 0.96,
+        },
+        zorder=10,
+    )
+
+    figure.text(
+        0.065,
+        0.965,
+        title,
+        ha="left",
+        va="top",
+        fontsize=15,
+        fontweight="bold",
+        color="#102A43",
+    )
+    description = textwrap.fill(task_description, width=105)
+    figure.text(
+        0.065,
+        0.944,
+        description,
+        ha="left",
+        va="top",
+        fontsize=10.2,
+        color="#486581",
+    )
+    status_text = (
+        f"{outcome}   |   EPISODE {dataset_episode}   |   "
+        f"{len(trajectory)} STEPS"
+    )
+    figure.text(
+        0.985,
+        0.982,
+        status_text,
+        ha="right",
+        va="top",
+        fontsize=9.3,
+        fontweight="bold",
+        color="white",
+        bbox={
+            "boxstyle": "round,pad=0.48",
+            "facecolor": outcome_color,
+            "edgecolor": outcome_color,
+        },
+    )
+    figure.text(
+        0.985,
+        0.944,
+        f"Camera: {image_key}",
+        ha="right",
+        va="top",
+        fontsize=8.3,
+        color="#829AB1",
+    )
     figure.savefig(output_base.with_suffix(".png"), dpi=dpi, bbox_inches="tight")
     figure.savefig(output_base.with_suffix(".pdf"), bbox_inches="tight")
     plt.close(figure)
@@ -716,11 +944,22 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--title", help="Figure title.")
     parser.add_argument("--task-name", help="Task name shown in the default title.")
     parser.add_argument(
+        "--task-description",
+        help="Task instruction shown below the title; auto-detected by default.",
+    )
+    parser.add_argument(
         "--phase-names",
         default="",
         help="Comma-separated phase names in numeric phase order.",
     )
-    parser.add_argument("--max-keyframes", type=int, default=8)
+    parser.add_argument(
+        "--num-keyframes",
+        "--max-keyframes",
+        dest="num_keyframes",
+        type=int,
+        default=6,
+        help="Number of simulator keyframes; defaults to 6.",
+    )
     parser.add_argument("--boundary-window", type=int, default=3)
     parser.add_argument("--smooth-window", type=int, default=1)
     parser.add_argument("--dpi", type=int, default=300)
@@ -737,8 +976,8 @@ def main() -> None:
     args = _build_parser().parse_args()
     if args.episode < 0:
         raise ValueError("--episode must be non-negative.")
-    if args.max_keyframes < 2:
-        raise ValueError("--max-keyframes must be at least 2.")
+    if args.num_keyframes < 2:
+        raise ValueError("--num-keyframes must be at least 2.")
     if args.boundary_window < 0:
         raise ValueError("--boundary-window must be non-negative.")
     if args.smooth_window < 1:
@@ -769,10 +1008,10 @@ def main() -> None:
         comparison_episode,
     )
     keyframes = _choose_keyframes(
-        trajectory, args.max_keyframes, args.boundary_window
+        trajectory, args.num_keyframes, args.boundary_window
     )
     trajectory["is_keyframe"] = trajectory["frame_index"].isin(keyframes)
-    images, image_key = _load_keyframe_images(
+    images, image_key, detected_task_description = _load_keyframe_images(
         dataset_path,
         args.episode,
         keyframes,
@@ -782,9 +1021,11 @@ def main() -> None:
 
     phase_names = [name.strip() for name in args.phase_names.split(",") if name.strip()]
     task_name = args.task_name or dataset_path.name
-    title = args.title or (
-        f"{task_name} | dataset episode {args.episode} | "
-        f"critic episode {comparison_episode}"
+    title = args.title or task_name
+    task_description = (
+        args.task_description
+        or detected_task_description
+        or "Robot manipulation trajectory with semantic phase annotations."
     )
     output_base = _output_base(args.output, args.episode)
     output_base.parent.mkdir(parents=True, exist_ok=True)
@@ -794,6 +1035,8 @@ def main() -> None:
         image_key,
         output_base,
         title,
+        task_description,
+        args.episode,
         phase_names,
         not args.no_error_panel,
         args.dpi,
@@ -826,7 +1069,11 @@ def main() -> None:
         "phase_path": phase_path_text,
         "phase_episode": used_phase_episode,
         "image_key": image_key,
+        "task_name": task_name,
+        "task_description": task_description,
+        "outcome": _episode_outcome(trajectory)[0],
         "keyframes": keyframes,
+        "num_keyframes": int(args.num_keyframes),
         "phase_boundaries": [
             {"frame_index": int(row.frame_index), "phase": str(row.phase)}
             for row in boundaries.itertuples(index=False)

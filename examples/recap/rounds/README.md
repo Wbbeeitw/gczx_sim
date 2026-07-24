@@ -606,16 +606,21 @@ python examples/recap/process/visualize_critic_trajectory.py \
   --comparison /data/libero_long/round1_v3_facd_exp/revalue/return_compare.json \
   --episode 3 \
   --episode-offset 240 \
+  --num-keyframes 6 \
   --phase-names "Approach object,Grasp object,Transport object,Complete task" \
   --output /workspace/results/figures/task8_episode3_critic
 ```
 
 The command writes a 300-DPI PNG, vector PDF, aligned per-frame CSV, and JSON
-metadata using the same output stem. `--image-key` overrides camera
-auto-detection, `--smooth-window` only smooths the two displayed predictions,
-and `--no-error-panel` produces a more compact two-row figure. The task offsets
-for ten 30-episode child datasets are 0, 30, 60, 90, 120, 150, 180, 210, 240,
-and 270. Pass `--comparison-episode` instead when the merged ordering differs.
+metadata using the same output stem. The default layout uses six large,
+numbered simulator keyframes, an auto-detected natural-language task
+instruction, a success/failure badge, a semantic-phase strip, aligned curve
+anchors, and a compact error panel. `--image-key` overrides camera
+auto-detection, `--task-description` overrides the detected instruction,
+`--smooth-window` only smooths the two displayed predictions, and
+`--no-error-panel` produces a more compact figure. The task offsets for ten
+30-episode child datasets are 0, 30, 60, 90, 120, 150, 180, 210, 240, and 270.
+Pass `--comparison-episode` instead when the merged ordering differs.
 
 Recovery stages are:
 
