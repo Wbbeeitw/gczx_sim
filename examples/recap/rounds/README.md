@@ -813,6 +813,41 @@ candidates; the task, episode, phase, and slice CSV files retain the full audit
 trail. Metrics should be selected for conceptual relevance and consistency
 across tasks, not solely by the largest numerical improvement.
 
+## GLC-Critic architecture ablation sweep
+
+`run_critic_ablation_sweep.py` reuses the fixed per-task `train.pt` and
+`val.pt` feature caches from the same 300-episode pool. It does not retrain the
+Value model, extract VLM features, resplit episodes, or collect trajectories.
+Each non-Raw variant independently retrains its phase/progress head and fusion
+MLP with the same seed and hyperparameters. This is a structural ablation, not
+inference-time feature masking.
+
+Audit inputs without starting training:
+
+```bash
+python examples/recap/process/run_critic_ablation_sweep.py \
+  --revalue-root /data/libero_long/round1_v3_facd_exp/revalue \
+  --advantages /data/libero_long/round1_v3_facd_multitask_300ep/meta/advantages_round1_v3_facd_base_adv.parquet \
+  --output-root /workspace/results/round1_v3_critic_ablation \
+  --dry-run
+```
+
+Remove `--dry-run` to train all four ablations. When
+`<revalue-root>/predictions.parquet` exists, the script reuses it for the Full
+GLC-Critic row; pass `--retrain-full` to retrain Full under the sweep instead.
+Completed per-task predictions are skipped automatically, so the same command
+resumes an interrupted run. `--force` intentionally replaces existing sweep
+artifacts.
+
+The `w/o z` variant trains an unconditioned intra-phase progress regressor and
+uses uniform phase probabilities plus neutral global progress `0.5`; it never
+receives a ground-truth phase prior. The `w/o p` variant retains phase
+prediction and fixes local progress at the phase midpoint `0.5`. The report
+inverse-maps normalized values to the original return/cost scale before
+computing held-out frame-micro MAE. Boundary MAE uses frames within `+/-10`
+steps of a privileged `phase_true` transition. Outputs include the paper table,
+per-task values, a JSON audit record, and a readable text summary.
+
 Recovery stages are:
 
 ```bash

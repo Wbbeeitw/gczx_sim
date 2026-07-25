@@ -340,17 +340,22 @@ def _is_better_temporal_checkpoint(
     best_metrics: dict[str, float] | None,
     *,
     min_delta: float,
+    use_phase_head: bool = True,
+    use_progress_head: bool = True,
 ) -> bool:
     if best_metrics is None:
         return True
 
-    comparisons = [
-        ("global_progress_mae", False),
-        ("progress_mae", False),
-        ("late_phase_acc", True),
-        ("macro_phase_acc", True),
-        ("loss", False),
-    ]
+    comparisons: list[tuple[str, bool]] = []
+    if use_phase_head and use_progress_head:
+        comparisons.append(("global_progress_mae", False))
+    if use_progress_head:
+        comparisons.append(("progress_mae", False))
+    if use_phase_head:
+        comparisons.extend(
+            [("late_phase_acc", True), ("macro_phase_acc", True)]
+        )
+    comparisons.append(("loss", False))
     for key, higher_is_better in comparisons:
         current = float(metrics[key])
         best = float(best_metrics[key])
@@ -371,9 +376,13 @@ def _should_track_temporal_checkpoint(
     *,
     epoch: int,
     cfg: TemporalZPHeadTrainerConfig,
+    use_phase_head: bool = True,
+    use_progress_head: bool = True,
 ) -> bool:
     """Avoid selecting a best checkpoint before progress supervision starts."""
-    return epoch > cfg.stage_only_epochs
+    if use_phase_head and use_progress_head:
+        return epoch > cfg.stage_only_epochs
+    return True
 
 
 class TemporalZPHeadTrainer:
@@ -419,6 +428,86 @@ class TemporalZPHeadTrainer:
             label_smoothing=self.cfg.label_smoothing,
         )
 
+    @property
+    def _use_phase_head(self) -> bool:
+        return bool(getattr(self.head, "use_phase_head", True))
+
+    @property
+    def _use_progress_head(self) -> bool:
+        return bool(getattr(self.head, "use_progress_head", True))
+
+    def _head_forward(
+        self,
+        feature_window: torch.Tensor,
+        valid_mask: torch.Tensor | None,
+        *,
+        phase_center: torch.Tensor,
+        epoch: int | None,
+    ) -> dict[str, torch.Tensor]:
+        head_kwargs: dict[str, torch.Tensor | None] = {"stage_prior": None}
+        if getattr(self.head, "USES_VALID_MASK", False):
+            head_kwargs["valid_mask"] = valid_mask
+        if (
+            epoch is None
+            or not self._use_phase_head
+            or not self._use_progress_head
+            or epoch <= self.cfg.stage_only_epochs
+        ):
+            return self.head(feature_window, **head_kwargs)
+
+        stage_out = self.head(feature_window, **head_kwargs)
+        head_kwargs["stage_prior"] = _build_stage_prior(
+            phase_center,
+            stage_out["phase_logits"],
+            epoch=epoch,
+            cfg=self.cfg,
+            dtype=feature_window.dtype,
+        )
+        return self.head(feature_window, **head_kwargs)
+
+    def _active_loss(
+        self,
+        out: dict[str, torch.Tensor],
+        *,
+        phase_center: torch.Tensor,
+        phase_progress_center: torch.Tensor,
+        global_progress_center: torch.Tensor,
+        phase_criterion: nn.Module,
+        include_progress: bool,
+    ) -> torch.Tensor:
+        terms: list[torch.Tensor] = []
+        if self._use_phase_head:
+            terms.append(
+                self.cfg.phase_loss_weight
+                * phase_criterion(out["phase_logits"], phase_center)
+            )
+        if self._use_progress_head and include_progress:
+            terms.append(
+                self.cfg.progress_loss_weight
+                * F.smooth_l1_loss(
+                    out["phase_progress"],
+                    phase_progress_center,
+                    beta=self.cfg.progress_beta,
+                )
+            )
+        if (
+            self._use_phase_head
+            and self._use_progress_head
+            and include_progress
+            and self.cfg.global_progress_loss_weight > 0.0
+        ):
+            terms.append(
+                self.cfg.global_progress_loss_weight
+                * F.smooth_l1_loss(
+                    out["global_progress"],
+                    global_progress_center,
+                    beta=self.cfg.progress_beta,
+                )
+            )
+        if not terms:
+            raise RuntimeError("Temporal head has no active training objective")
+        return torch.stack(terms).sum()
+
     def train_epoch(
         self,
         train_loader: DataLoader,
@@ -428,8 +517,6 @@ class TemporalZPHeadTrainer:
         epoch: int,
     ) -> float:
         self.head.train()
-        progress_criterion = nn.SmoothL1Loss(beta=self.cfg.progress_beta)
-        global_progress_criterion = nn.SmoothL1Loss(beta=self.cfg.progress_beta)
         total_loss = 0.0
         total_count = 0
 
@@ -442,44 +529,23 @@ class TemporalZPHeadTrainer:
             global_progress_center = batch["global_progress_center"].to(self.device)
 
             optimizer.zero_grad(set_to_none=True)
-            if epoch <= self.cfg.stage_only_epochs:
-                head_kwargs = {"stage_prior": None}
-                if getattr(self.head, "USES_VALID_MASK", False):
-                    head_kwargs["valid_mask"] = valid_mask
-                out = self.head(feature_window, **head_kwargs)
-                loss = self.cfg.phase_loss_weight * phase_criterion(
-                    out["phase_logits"],
-                    phase_center,
-                )
-            else:
-                head_kwargs = {"stage_prior": None}
-                if getattr(self.head, "USES_VALID_MASK", False):
-                    head_kwargs["valid_mask"] = valid_mask
-                stage_out = self.head(feature_window, **head_kwargs)
-                stage_prior = _build_stage_prior(
-                    phase_center,
-                    stage_out["phase_logits"],
-                    epoch=epoch,
-                    cfg=self.cfg,
-                    dtype=feature_window.dtype,
-                )
-                head_kwargs = {"stage_prior": stage_prior}
-                if getattr(self.head, "USES_VALID_MASK", False):
-                    head_kwargs["valid_mask"] = valid_mask
-                out = self.head(feature_window, **head_kwargs)
-                loss = self.cfg.phase_loss_weight * phase_criterion(
-                    out["phase_logits"],
-                    phase_center,
-                )
-                loss = loss + self.cfg.progress_loss_weight * progress_criterion(
-                    out["phase_progress"],
-                    phase_progress_center,
-                )
-                if self.cfg.global_progress_loss_weight > 0.0:
-                    loss = loss + self.cfg.global_progress_loss_weight * global_progress_criterion(
-                        out["global_progress"],
-                        global_progress_center,
-                    )
+            out = self._head_forward(
+                feature_window,
+                valid_mask,
+                phase_center=phase_center,
+                epoch=epoch,
+            )
+            loss = self._active_loss(
+                out,
+                phase_center=phase_center,
+                phase_progress_center=phase_progress_center,
+                global_progress_center=global_progress_center,
+                phase_criterion=phase_criterion,
+                include_progress=(
+                    not self._use_phase_head
+                    or epoch > self.cfg.stage_only_epochs
+                ),
+            )
 
             loss.backward()
             if self.cfg.max_grad_norm is not None:
@@ -499,8 +565,6 @@ class TemporalZPHeadTrainer:
         phase_criterion: nn.Module,
     ) -> dict[str, float]:
         self.head.eval()
-        progress_criterion = nn.SmoothL1Loss(beta=self.cfg.progress_beta)
-        global_progress_criterion = nn.SmoothL1Loss(beta=self.cfg.progress_beta)
         total_loss = 0.0
         total_count = 0
         all_logits: list[torch.Tensor] = []
@@ -518,23 +582,20 @@ class TemporalZPHeadTrainer:
             phase_progress_center = batch["phase_progress_center"].to(self.device)
             global_progress_center = batch["global_progress_center"].to(self.device)
 
-            head_kwargs = {"stage_prior": None}
-            if getattr(self.head, "USES_VALID_MASK", False):
-                head_kwargs["valid_mask"] = valid_mask
-            out = self.head(feature_window, **head_kwargs)
-            loss = self.cfg.phase_loss_weight * phase_criterion(
-                out["phase_logits"],
-                phase_center,
+            out = self._head_forward(
+                feature_window,
+                valid_mask,
+                phase_center=phase_center,
+                epoch=None,
             )
-            loss = loss + self.cfg.progress_loss_weight * progress_criterion(
-                out["phase_progress"],
-                phase_progress_center,
+            loss = self._active_loss(
+                out,
+                phase_center=phase_center,
+                phase_progress_center=phase_progress_center,
+                global_progress_center=global_progress_center,
+                phase_criterion=phase_criterion,
+                include_progress=True,
             )
-            if self.cfg.global_progress_loss_weight > 0.0:
-                loss = loss + self.cfg.global_progress_loss_weight * global_progress_criterion(
-                    out["global_progress"],
-                    global_progress_center,
-                )
 
             batch_size = int(feature_window.shape[0])
             total_loss += float(loss.item()) * batch_size
@@ -600,13 +661,20 @@ class TemporalZPHeadTrainer:
                 val_metrics["global_progress_mae"],
             )
 
-            if not _should_track_temporal_checkpoint(epoch=epoch, cfg=self.cfg):
+            if not _should_track_temporal_checkpoint(
+                epoch=epoch,
+                cfg=self.cfg,
+                use_phase_head=self._use_phase_head,
+                use_progress_head=self._use_progress_head,
+            ):
                 continue
 
             if _is_better_temporal_checkpoint(
                 val_metrics,
                 self.best_val_metrics,
                 min_delta=self.cfg.early_stop_delta,
+                use_phase_head=self._use_phase_head,
+                use_progress_head=self._use_progress_head,
             ):
                 self.best_val_loss = float(val_metrics["loss"])
                 self.best_epoch = epoch

@@ -836,6 +836,10 @@ class TemporalLocalStageGatedProgressHead(nn.Module):
         progress_depth: int = 2,
         trunk_depth: int = 2,
         phase_span_priors: list[float] | None = None,
+        use_local_temporal: bool = True,
+        use_motion_difference: bool = True,
+        use_phase_head: bool = True,
+        use_progress_head: bool = True,
     ) -> None:
         super().__init__()
         if window_size < 1 or window_size % 2 == 0:
@@ -879,6 +883,12 @@ class TemporalLocalStageGatedProgressHead(nn.Module):
         self.progress_depth = int(progress_depth)
         self.trunk_depth = int(trunk_depth)
         self.center_index = self.window_size // 2
+        self.use_local_temporal = bool(use_local_temporal)
+        self.use_motion_difference = bool(use_motion_difference)
+        self.use_phase_head = bool(use_phase_head)
+        self.use_progress_head = bool(use_progress_head)
+        if not self.use_phase_head and not self.use_progress_head:
+            raise ValueError("At least one of phase or progress head must be enabled")
 
         self.input_proj = nn.Sequential(
             nn.Linear(self.feature_dim, self.hidden_dim),
@@ -886,35 +896,47 @@ class TemporalLocalStageGatedProgressHead(nn.Module):
             nn.GELU(),
             nn.Dropout(dropout) if dropout > 0.0 else nn.Identity(),
         )
-        self.position_embedding = nn.Parameter(
-            torch.zeros(1, self.window_size, self.hidden_dim)
+        self.position_embedding = (
+            nn.Parameter(torch.zeros(1, self.window_size, self.hidden_dim))
+            if self.use_local_temporal
+            else None
         )
         self.input_dropout = (
             nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
         )
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=self.hidden_dim,
-            nhead=self.num_heads,
-            dim_feedforward=self.ffn_dim,
-            dropout=dropout,
-            activation="gelu",
-            batch_first=True,
-        )
-        self.temporal_encoder = nn.TransformerEncoder(
-            encoder_layer,
-            num_layers=self.num_layers,
-        )
+        if self.use_local_temporal:
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=self.hidden_dim,
+                nhead=self.num_heads,
+                dim_feedforward=self.ffn_dim,
+                dropout=dropout,
+                activation="gelu",
+                batch_first=True,
+            )
+            self.temporal_encoder = nn.TransformerEncoder(
+                encoder_layer,
+                num_layers=self.num_layers,
+            )
+        else:
+            self.temporal_encoder = None
         self.temporal_norm = nn.LayerNorm(self.hidden_dim)
 
-        self.motion_proj = nn.Sequential(
-            nn.Linear(self.feature_dim * 3, self.hidden_dim),
-            nn.LayerNorm(self.hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout) if dropout > 0.0 else nn.Identity(),
+        self.motion_proj = (
+            nn.Sequential(
+                nn.Linear(self.feature_dim * 3, self.hidden_dim),
+                nn.LayerNorm(self.hidden_dim),
+                nn.GELU(),
+                nn.Dropout(dropout) if dropout > 0.0 else nn.Identity(),
+            )
+            if self.use_motion_difference
+            else None
         )
 
         self.shared_input_proj = nn.Sequential(
-            nn.Linear(self.hidden_dim * 2, self.hidden_dim),
+            nn.Linear(
+                self.hidden_dim * (2 if self.use_motion_difference else 1),
+                self.hidden_dim,
+            ),
             nn.LayerNorm(self.hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout) if dropout > 0.0 else nn.Identity(),
@@ -933,23 +955,39 @@ class TemporalLocalStageGatedProgressHead(nn.Module):
         )
         self.shared_norm = nn.LayerNorm(self.hidden_dim)
 
-        self.phase_head = nn.Sequential(
-            nn.Linear(self.hidden_dim, self.hidden_dim),
-            nn.LayerNorm(self.hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout) if dropout > 0.0 else nn.Identity(),
-            nn.Linear(self.hidden_dim, self.num_phases),
+        self.phase_head = (
+            nn.Sequential(
+                nn.Linear(self.hidden_dim, self.hidden_dim),
+                nn.LayerNorm(self.hidden_dim),
+                nn.GELU(),
+                nn.Dropout(dropout) if dropout > 0.0 else nn.Identity(),
+                nn.Linear(self.hidden_dim, self.num_phases),
+            )
+            if self.use_phase_head
+            else None
         )
-        self.stage_embedding = nn.Linear(
-            self.num_phases,
-            self.stage_embedding_dim,
-            bias=False,
+        self.stage_embedding = (
+            nn.Linear(
+                self.num_phases,
+                self.stage_embedding_dim,
+                bias=False,
+            )
+            if self.use_phase_head and self.use_progress_head
+            else None
         )
-        self.progress_head = _make_progress_head(
-            input_dim=self.hidden_dim + self.stage_embedding_dim,
-            hidden_dim=self.progress_hidden_dim,
-            depth=self.progress_depth,
-            dropout=dropout,
+        self.progress_head = (
+            _make_progress_head(
+                input_dim=(
+                    self.hidden_dim + self.stage_embedding_dim
+                    if self.use_phase_head
+                    else self.hidden_dim
+                ),
+                hidden_dim=self.progress_hidden_dim,
+                depth=self.progress_depth,
+                dropout=dropout,
+            )
+            if self.use_progress_head
+            else None
         )
 
         default_spans = [1.0 / self.num_phases for _ in range(self.num_phases)]
@@ -973,7 +1011,8 @@ class TemporalLocalStageGatedProgressHead(nn.Module):
         self._init_weights()
 
     def _init_weights(self) -> None:
-        nn.init.normal_(self.position_embedding, mean=0.0, std=0.02)
+        if self.position_embedding is not None:
+            nn.init.normal_(self.position_embedding, mean=0.0, std=0.02)
         for module in self.modules():
             if isinstance(module, nn.Linear):
                 nn.init.xavier_uniform_(module.weight)
@@ -988,15 +1027,21 @@ class TemporalLocalStageGatedProgressHead(nn.Module):
         feature_window: torch.Tensor,
         valid_mask: torch.Tensor | None,
     ) -> torch.Tensor:
+        if self.motion_proj is None:
+            raise RuntimeError("Motion branch is disabled for this head")
         center_feat = feature_window[:, self.center_index, :]
         prev_feat = feature_window[:, max(0, self.center_index - 1), :]
-        next_feat = feature_window[:, min(self.window_size - 1, self.center_index + 1), :]
+        next_feat = feature_window[
+            :, min(self.window_size - 1, self.center_index + 1), :
+        ]
 
         delta_prev = center_feat - prev_feat
         delta_next = next_feat - center_feat
         if valid_mask is not None:
             prev_valid = valid_mask[:, max(0, self.center_index - 1)].unsqueeze(-1)
-            next_valid = valid_mask[:, min(self.window_size - 1, self.center_index + 1)].unsqueeze(-1)
+            next_valid = valid_mask[
+                :, min(self.window_size - 1, self.center_index + 1)
+            ].unsqueeze(-1)
             delta_prev = delta_prev * prev_valid.to(delta_prev.dtype)
             delta_next = delta_next * next_valid.to(delta_next.dtype)
 
@@ -1042,43 +1087,70 @@ class TemporalLocalStageGatedProgressHead(nn.Module):
                 f"{feature_window.shape[1]} vs {self.window_size}"
             )
 
-        hidden = self.input_proj(feature_window)
-        hidden = hidden + self.position_embedding
-        hidden = self.input_dropout(hidden)
-        hidden = self.temporal_encoder(
-            hidden,
-            src_key_padding_mask=_build_src_key_padding_mask(
-                valid_mask,
-                center_index=self.center_index,
-                window_size=self.window_size,
-            ),
-        )
-        hidden = self.temporal_norm(hidden)
+        if self.use_local_temporal:
+            hidden = self.input_proj(feature_window)
+            hidden = hidden + self.position_embedding
+            hidden = self.input_dropout(hidden)
+            hidden = self.temporal_encoder(
+                hidden,
+                src_key_padding_mask=_build_src_key_padding_mask(
+                    valid_mask,
+                    center_index=self.center_index,
+                    window_size=self.window_size,
+                ),
+            )
+            center_hidden = self.temporal_norm(hidden)[:, self.center_index, :]
+        else:
+            center_hidden = self.temporal_norm(
+                self.input_proj(feature_window[:, self.center_index, :])
+            )
 
-        center_hidden = hidden[:, self.center_index, :]
-        motion_hidden = self._encode_motion(feature_window, valid_mask)
-        shared_hidden = self.shared_input_proj(
-            torch.cat([center_hidden, motion_hidden], dim=-1)
-        )
+        motion_hidden = None
+        shared_inputs = [center_hidden]
+        if self.use_motion_difference:
+            motion_hidden = self._encode_motion(feature_window, valid_mask)
+            shared_inputs.append(motion_hidden)
+        shared_hidden = self.shared_input_proj(torch.cat(shared_inputs, dim=-1))
         for block in self.shared_blocks:
             shared_hidden = shared_hidden + block(shared_hidden)
         shared_hidden = self.shared_norm(shared_hidden)
 
-        phase_logits = self.phase_head(shared_hidden)
-        phase_probs = F.softmax(phase_logits, dim=-1)
+        if self.use_phase_head:
+            phase_logits = self.phase_head(shared_hidden)
+            phase_probs = F.softmax(phase_logits, dim=-1)
+        else:
+            phase_logits = shared_hidden.new_zeros(
+                (shared_hidden.shape[0], self.num_phases)
+            )
+            phase_probs = torch.full_like(phase_logits, 1.0 / self.num_phases)
         phase_pred = phase_logits.argmax(dim=-1)
 
-        prior = phase_probs if stage_prior is None else stage_prior.to(phase_probs.dtype)
-        stage_emb = self.stage_embedding(prior)
-        progress_input = torch.cat([shared_hidden, stage_emb], dim=-1)
-        phase_progress_soft = self.progress_head(progress_input).squeeze(-1)
+        prior = phase_probs
+        if self.use_phase_head and stage_prior is not None:
+            prior = stage_prior.to(phase_probs.dtype)
+        if self.use_progress_head:
+            progress_input = shared_hidden
+            if self.use_phase_head:
+                stage_emb = self.stage_embedding(prior)
+                progress_input = torch.cat([shared_hidden, stage_emb], dim=-1)
+            phase_progress_soft = self.progress_head(progress_input).squeeze(-1)
+        else:
+            phase_progress_soft = shared_hidden.new_full(
+                (shared_hidden.shape[0],), 0.5
+            )
         phase_progress_hard = phase_progress_soft
-        global_progress_soft, global_progress_hard = self._compute_global_progress(
-            prior,
-            phase_pred,
-            phase_progress_soft,
-            phase_progress_hard,
-        )
+        if self.use_phase_head:
+            global_progress_soft, global_progress_hard = self._compute_global_progress(
+                prior,
+                phase_pred,
+                phase_progress_soft,
+                phase_progress_hard,
+            )
+        else:
+            global_progress_soft = shared_hidden.new_full(
+                (shared_hidden.shape[0],), 0.5
+            )
+            global_progress_hard = global_progress_soft
 
         return {
             "phase_logits": phase_logits,

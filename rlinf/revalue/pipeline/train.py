@@ -89,6 +89,10 @@ class ZPTrainingConfig:
     gt_stage_prior_epochs: int = 6
     stage_prior_ramp_epochs: int = 10
     max_pred_stage_prior_weight: float = 0.7
+    use_local_temporal: bool = True
+    use_motion_difference: bool = True
+    use_phase_head: bool = True
+    use_progress_head: bool = True
     device: str = "cuda"
     seed: int = 42
 
@@ -123,6 +127,20 @@ class FusionTrainingConfig:
 
 def train_zp_head(cfg: ZPTrainingConfig) -> Path:
     """Train stage-1 z/p head and save ``zp_head.pt``."""
+    ablation_flags = (
+        cfg.use_local_temporal,
+        cfg.use_motion_difference,
+        cfg.use_phase_head,
+        cfg.use_progress_head,
+    )
+    if (
+        cfg.head_type != HEAD_TYPE_TEMPORAL_LOCAL_STAGE_GATED
+        and ablation_flags != (True, True, True, True)
+    ):
+        raise ValueError(
+            "Structural ablation flags are supported only by "
+            f"{HEAD_TYPE_TEMPORAL_LOCAL_STAGE_GATED!r}"
+        )
     torch.manual_seed(cfg.seed)
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -174,6 +192,10 @@ def train_zp_head(cfg: ZPTrainingConfig) -> Path:
                 progress_depth=cfg.progress_depth,
                 trunk_depth=cfg.trunk_depth,
                 phase_span_priors=phase_span_priors,
+                use_local_temporal=cfg.use_local_temporal,
+                use_motion_difference=cfg.use_motion_difference,
+                use_phase_head=cfg.use_phase_head,
+                use_progress_head=cfg.use_progress_head,
             )
         elif cfg.head_type == HEAD_TYPE_TEMPORAL_STAGE_EXPERTS:
             head = TemporalStageExpertsProgressHead(
@@ -242,6 +264,10 @@ def train_zp_head(cfg: ZPTrainingConfig) -> Path:
             "progress_depth": cfg.progress_depth,
             "trunk_depth": cfg.trunk_depth,
             "phase_span_priors": phase_span_priors,
+            "use_local_temporal": cfg.use_local_temporal,
+            "use_motion_difference": cfg.use_motion_difference,
+            "use_phase_head": cfg.use_phase_head,
+            "use_progress_head": cfg.use_progress_head,
         }
     else:
         head = SharedMLPPhaseProgressHead(
@@ -327,6 +353,16 @@ def load_zp_head(path: str | Path, *, device: str = "cpu") -> torch.nn.Module:
                 progress_depth=int(checkpoint["progress_depth"]),
                 trunk_depth=int(checkpoint.get("trunk_depth", 2)),
                 phase_span_priors=phase_span_priors,
+                use_local_temporal=bool(
+                    checkpoint.get("use_local_temporal", True)
+                ),
+                use_motion_difference=bool(
+                    checkpoint.get("use_motion_difference", True)
+                ),
+                use_phase_head=bool(checkpoint.get("use_phase_head", True)),
+                use_progress_head=bool(
+                    checkpoint.get("use_progress_head", True)
+                ),
             )
         elif head_type == HEAD_TYPE_TEMPORAL_STAGE_EXPERTS:
             head = TemporalStageExpertsProgressHead(
