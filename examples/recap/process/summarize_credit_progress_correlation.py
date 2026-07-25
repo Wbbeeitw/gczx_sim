@@ -404,6 +404,13 @@ def main() -> None:
         raise ValueError("--gamma must be non-negative.")
     if args.num_tasks <= 0 or args.episodes_per_task <= 0:
         raise ValueError("Task and episode counts must be positive.")
+    policy_rates = {
+        "--raw-policy-sr": args.raw_policy_sr,
+        "--fused-policy-sr": args.fused_policy_sr,
+    }
+    for option, value in policy_rates.items():
+        if value is not None and not 0.0 <= value <= 100.0:
+            raise ValueError(f"{option} must be a percentage in [0, 100].")
 
     aligned, metadata = build_credit_progress_frame(
         args.comparison,
