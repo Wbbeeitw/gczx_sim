@@ -726,6 +726,42 @@ This writes all 30 individual task measurements, task-wise repeat means and
 sample standard deviations, and repeat-wise macro success rates as CSV, JSON,
 and plain text.
 
+## Held-out credit-progress rank correlation
+
+The minimal offline credit-quality experiment measures whether the continuous
+credit scores actually rank semantic task advancement correctly. It uses the
+same code-native credit definition as ReCap/FACD,
+`reward_sum + gamma**H * value[t+H] - value[t]`, for both Raw and Fused values.
+Only the value source changes. The target is the privileged simulator-trace
+delta `global_progress_true[t+H] - global_progress_true[t]`; it is never
+thresholded or converted into a policy label.
+
+Run the experiment on the prediction table's held-out validation split:
+
+```bash
+python examples/recap/process/summarize_credit_progress_correlation.py \
+  --comparison /data/libero_long/round1_v3_facd_exp/revalue/return_compare.json \
+  --split val \
+  --lookahead-step 10 \
+  --gamma 1.0 \
+  --num-tasks 10 \
+  --episodes-per-task 30 \
+  --raw-policy-sr 75.8 \
+  --fused-policy-sr 83.3 \
+  --output-dir /workspace/results/round1_v3_credit_progress
+```
+
+The script retains only exact `t+H` pairs from validation episodes. It computes
+Spearman correlation independently for each task and reports the equal-weight
+10-task macro average as the primary result. It writes a per-task CSV, a JSON
+and text summary, the aligned frame-level parquet used for the calculation,
+and a paper-table CSV. Value MAE is read from the existing comparison report;
+the optional Policy SR arguments are display-only and do not affect the metric.
+No positive/negative quantiles, progress epsilon, Label Flip, or PR-CFG/FACD
+binary-label rules enter this experiment. `global_progress_true` is the
+privileged semantic-trace label stored alongside predictions; the predicted
+progress head output is not used as the evaluation target.
+
 Recovery stages are:
 
 ```bash
