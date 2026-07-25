@@ -762,6 +762,31 @@ binary-label rules enter this experiment. `global_progress_true` is the
 privileged semantic-trace label stored alongside predictions; the predicted
 progress head output is not used as the evaluation target.
 
+## Held-out upstream Critic quality sweep
+
+Use the existing return comparison and prediction artifacts to evaluate
+multiple upstream metrics before selecting a compact paper table. The sweep is
+fixed to one held-out split and reports average error, tail error, improvement
+coverage, return ranking, success/failure subsets, semantic phase boundaries,
+and individual phases without retraining or policy evaluation:
+
+```bash
+python examples/recap/process/summarize_critic_upstream_quality.py \
+  --comparison /data/libero_long/round1_v3_facd_exp/revalue/return_compare.json \
+  --split val \
+  --num-tasks 10 \
+  --episodes-per-task 30 \
+  --failure-reward -300 \
+  --boundary-window 10 \
+  --output-dir /workspace/results/round1_v3_critic_upstream
+```
+
+The boundary window is fixed to the existing ten-step action/credit horizon.
+`critic_upstream_paper_candidates.csv` contains the predeclared compact
+candidates; the task, episode, phase, and slice CSV files retain the full audit
+trail. Metrics should be selected for conceptual relevance and consistency
+across tasks, not solely by the largest numerical improvement.
+
 Recovery stages are:
 
 ```bash
