@@ -746,6 +746,7 @@ python examples/recap/process/summarize_credit_progress_correlation.py \
   --gamma 1.0 \
   --num-tasks 10 \
   --episodes-per-task 30 \
+  --boundary-window 10 \
   --raw-policy-sr 75.8 \
   --fused-policy-sr 83.3 \
   --output-dir /workspace/results/round1_v3_credit_progress
@@ -761,6 +762,31 @@ No positive/negative quantiles, progress epsilon, Label Flip, or PR-CFG/FACD
 binary-label rules enter this experiment. `global_progress_true` is the
 privileged semantic-trace label stored alongside predictions; the predicted
 progress head output is not used as the evaluation target.
+
+The same run also produces a fixed candidate scorecard so every diagnostic is
+reported together rather than retaining only the largest improvement:
+
+- **Credit-progress task-macro Spearman** (higher is better) directly measures
+  whether step-level credit ranks privileged task advancement correctly.
+- **Boundary residual jitter** (lower is better) is the mean absolute second
+  temporal difference of prediction residual inside a `+/- boundary-window`
+  neighborhood of each privileged phase transition. It targets the claim that
+  the corrected Critic oscillates less around phase boundaries.
+- **Boundary continuous-credit jitter** (lower is better) measures the mean
+  absolute adjacent change in continuous credit in the same boundary windows.
+  It targets credit stability rather than only scalar value accuracy.
+- **Boundary-local Value MAE** (lower is better) isolates prediction accuracy
+  near transitions instead of repeating the global MAE result.
+
+For the distributional-uncertainty claim, the report additionally includes
+the task-macro Spearman correlation between normalized Raw value-distribution
+entropy and absolute Raw return error, plus the entropy lift at boundaries
+relative to phase interiors. The current prediction artifact does not preserve
+Fused logits, so these uncertainty numbers validate the Raw distributional
+Critic's uncertainty signal and are not presented as a Raw-vs-Fused comparison.
+The main text metric should be selected for conceptual fit and task coverage,
+not solely for the largest percentage; non-selected candidates should remain
+available in the appendix.
 
 ## Held-out upstream Critic quality sweep
 

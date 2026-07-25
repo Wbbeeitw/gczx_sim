@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Measure whether ReCap credit rankings agree with semantic progress."""
+"""Evaluate held-out credit alignment, boundary stability, and uncertainty."""
 
 from __future__ import annotations
 
@@ -52,6 +52,62 @@ def _spearman_rank_correlation(left: pd.Series, right: pd.Series) -> float:
     return float(np.corrcoef(left_rank, right_rank)[0, 1])
 
 
+def _optional_spearman(left: pd.Series, right: pd.Series) -> float:
+    try:
+        return _spearman_rank_correlation(left, right)
+    except ValueError:
+        return float("nan")
+
+
+def _map_value_to_return(
+    values: pd.Series,
+    comparison: dict[str, Any],
+) -> np.ndarray:
+    return_min = float(comparison.get("return_min", -900.0))
+    return_max = float(comparison.get("return_max", 0.0))
+    value_min = float(comparison.get("value_min", -1.0))
+    value_max = float(comparison.get("value_max", 0.0))
+    value_range = value_max - value_min
+    if return_max <= return_min or value_range <= 0.0:
+        raise ValueError("Invalid value/return scale in comparison report.")
+    values_array = values.to_numpy(dtype=np.float64)
+    return (
+        (values_array - value_min)
+        / value_range
+        * (return_max - return_min)
+        + return_min
+    )
+
+
+def _normalized_distribution_entropy(
+    values: pd.Series,
+    *,
+    values_are_logits: bool,
+) -> np.ndarray:
+    entropies = []
+    for row_index, raw_values in enumerate(values):
+        array = np.asarray(raw_values, dtype=np.float64)
+        if array.ndim != 1 or len(array) < 2 or not np.isfinite(array).all():
+            raise ValueError(f"Invalid value distribution at row {row_index}.")
+        if values_are_logits:
+            shifted = array - float(array.max())
+            probabilities = np.exp(shifted)
+        else:
+            if float(array.min()) < -1e-8:
+                raise ValueError(f"Negative value probability at row {row_index}.")
+            probabilities = np.clip(array, 0.0, None)
+        denominator = float(probabilities.sum())
+        if denominator <= 0.0:
+            raise ValueError(f"Zero-mass value distribution at row {row_index}.")
+        probabilities = probabilities / denominator
+        nonzero = probabilities > 0.0
+        entropy = -float(
+            np.sum(probabilities[nonzero] * np.log(probabilities[nonzero]))
+        )
+        entropies.append(entropy / float(np.log(len(probabilities))))
+    return np.asarray(entropies, dtype=np.float64)
+
+
 def _value_mae_from_report(
     comparison: dict[str, Any],
 ) -> dict[str, dict[str, float]]:
@@ -66,6 +122,104 @@ def _value_mae_from_report(
             "fused": float(fused),
         }
     return result
+
+
+def build_validation_diagnostics_frame(
+    comparison_path: Path,
+    *,
+    split: str,
+    num_tasks: int,
+    episodes_per_task: int,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Build held-out values, residuals, phases, and distribution entropy."""
+    comparison_path = comparison_path.expanduser().resolve()
+    comparison = json.loads(comparison_path.read_text(encoding="utf-8"))
+    advantages_path = _resolve_artifact(
+        str(comparison["advantages_path"]), comparison_path
+    )
+    predictions_path = _resolve_artifact(
+        str(comparison["predictions_path"]), comparison_path
+    )
+    advantages = pd.read_parquet(advantages_path)
+    predictions = pd.read_parquet(predictions_path)
+    _require_columns(
+        advantages,
+        {*KEY_COLUMNS, "return", "value_current"},
+        advantages_path,
+    )
+    _require_columns(
+        predictions,
+        {*KEY_COLUMNS, "split", "value_fused", "phase_true"},
+        predictions_path,
+    )
+    probability_column = None
+    values_are_logits = False
+    if "value_probs_current" in advantages.columns:
+        probability_column = "value_probs_current"
+    elif "value_logits_current" in advantages.columns:
+        probability_column = "value_logits_current"
+        values_are_logits = True
+    else:
+        raise ValueError(
+            f"{advantages_path} has neither value_probs_current nor "
+            "value_logits_current."
+        )
+
+    selected = predictions[predictions["split"].astype(str) == split].copy()
+    if selected.empty:
+        raise ValueError(f"No prediction rows for split={split!r}.")
+    frame = selected[
+        [*KEY_COLUMNS, "split", "value_fused", "phase_true"]
+    ].merge(
+        advantages[
+            [
+                *KEY_COLUMNS,
+                "return",
+                "value_current",
+                probability_column,
+            ]
+        ],
+        on=KEY_COLUMNS,
+        how="inner",
+        validate="one_to_one",
+    )
+    if frame.empty:
+        raise ValueError("No held-out value rows overlap source advantages.")
+    frame = frame.sort_values(KEY_COLUMNS).reset_index(drop=True)
+    frame["task_index"] = (
+        frame["episode_index"].astype(int) // int(episodes_per_task)
+    )
+    invalid_task = (frame["task_index"] < 0) | (
+        frame["task_index"] >= int(num_tasks)
+    )
+    if invalid_task.any():
+        raise ValueError("Held-out values contain episodes outside task ranges.")
+    frame["task"] = frame["task_index"].map(lambda index: f"task{index}")
+    frame["raw_prediction_return"] = _map_value_to_return(
+        frame["value_current"], comparison
+    )
+    frame["fused_prediction_return"] = _map_value_to_return(
+        frame["value_fused"], comparison
+    )
+    frame["raw_residual"] = (
+        frame["raw_prediction_return"] - frame["return"].astype(float)
+    )
+    frame["fused_residual"] = (
+        frame["fused_prediction_return"] - frame["return"].astype(float)
+    )
+    frame["raw_value_entropy"] = _normalized_distribution_entropy(
+        frame[probability_column],
+        values_are_logits=values_are_logits,
+    )
+    metadata = {
+        "value_distribution_column": probability_column,
+        "value_distribution_input": (
+            "logits" if values_are_logits else "probabilities"
+        ),
+        "value_entropy_normalization": "entropy / log(number_of_return_bins)",
+        "held_out_value_rows": int(len(frame)),
+    }
+    return frame, metadata
 
 
 def build_credit_progress_frame(
@@ -108,6 +262,7 @@ def build_credit_progress_frame(
             "split",
             "value_fused",
             "global_progress_true",
+            "phase_true",
         },
         predictions_path,
     )
@@ -135,6 +290,7 @@ def build_credit_progress_frame(
         "split",
         "value_fused",
         "global_progress_true",
+        "phase_true",
     ]
     current = selected_predictions[prediction_columns].merge(
         advantages[advantage_columns],
@@ -231,6 +387,7 @@ def build_credit_progress_frame(
         "raw_credit",
         "fused_credit",
         "global_progress_true",
+        "phase_true",
         "global_progress_next",
         "global_progress_delta",
     ]
@@ -281,6 +438,7 @@ def build_credit_progress_frame(
         "value_fused",
         "fused_value_next",
         "global_progress_true",
+        "phase_true",
         "global_progress_next",
         "global_progress_delta",
         "raw_credit",
@@ -289,6 +447,284 @@ def build_credit_progress_frame(
     ]
     aligned = aligned[keep_columns].sort_values(KEY_COLUMNS).reset_index(drop=True)
     return aligned, metadata
+
+
+def _boundary_indices(phases: np.ndarray) -> np.ndarray:
+    if len(phases) < 2:
+        return np.asarray([], dtype=np.int64)
+    return np.flatnonzero(phases[1:] != phases[:-1]).astype(np.int64) + 1
+
+
+def _near_boundary_mask(
+    length: int,
+    boundaries: np.ndarray,
+    window: int,
+) -> np.ndarray:
+    mask = np.zeros(length, dtype=bool)
+    for boundary in boundaries:
+        start = max(0, int(boundary) - window)
+        end = min(length, int(boundary) + window + 1)
+        mask[start:end] = True
+    return mask
+
+
+def _mean_or_nan(values: list[float]) -> float:
+    if not values:
+        return float("nan")
+    array = np.asarray(values, dtype=np.float64)
+    finite = array[np.isfinite(array)]
+    return float(finite.mean()) if len(finite) else float("nan")
+
+
+def _lower_is_better_improvement(raw: float, fused: float) -> float:
+    if not np.isfinite(raw) or not np.isfinite(fused) or raw <= 0.0:
+        return float("nan")
+    return 100.0 * (1.0 - fused / raw)
+
+
+def summarize_boundary_value_diagnostics(
+    validation: pd.DataFrame,
+    *,
+    num_tasks: int,
+    boundary_window: int,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Measure boundary-local residual jitter, MAE, and value entropy."""
+    rows = []
+    for task_index in range(num_tasks):
+        task = f"task{task_index}"
+        task_frame = validation[validation["task"] == task]
+        if task_frame.empty:
+            raise ValueError(f"No held-out value diagnostics for {task}.")
+        raw_boundary_jitter: list[float] = []
+        fused_boundary_jitter: list[float] = []
+        raw_boundary_error: list[float] = []
+        fused_boundary_error: list[float] = []
+        boundary_entropy: list[float] = []
+        interior_entropy: list[float] = []
+        boundary_events = 0
+        for _, episode in task_frame.groupby("episode_index", sort=True):
+            episode = episode.sort_values("frame_index")
+            phases = episode["phase_true"].to_numpy(dtype=np.int64)
+            boundaries = _boundary_indices(phases)
+            boundary_events += int(len(boundaries))
+            entropy = episode["raw_value_entropy"].to_numpy(dtype=np.float64)
+            if not len(boundaries):
+                interior_entropy.extend(entropy.tolist())
+                continue
+            near_boundary = _near_boundary_mask(
+                len(episode), boundaries, boundary_window
+            )
+            raw_residual = episode["raw_residual"].to_numpy(dtype=np.float64)
+            fused_residual = episode["fused_residual"].to_numpy(
+                dtype=np.float64
+            )
+            raw_boundary_error.extend(np.abs(raw_residual[near_boundary]).tolist())
+            fused_boundary_error.extend(
+                np.abs(fused_residual[near_boundary]).tolist()
+            )
+            boundary_entropy.extend(entropy[near_boundary].tolist())
+            interior_entropy.extend(entropy[~near_boundary].tolist())
+            if len(episode) >= 3:
+                raw_curvature = np.abs(np.diff(raw_residual, n=2))
+                fused_curvature = np.abs(np.diff(fused_residual, n=2))
+                curvature_near_boundary = near_boundary[1:-1]
+                raw_boundary_jitter.extend(
+                    raw_curvature[curvature_near_boundary].tolist()
+                )
+                fused_boundary_jitter.extend(
+                    fused_curvature[curvature_near_boundary].tolist()
+                )
+
+        raw_jitter = _mean_or_nan(raw_boundary_jitter)
+        fused_jitter = _mean_or_nan(fused_boundary_jitter)
+        raw_mae = _mean_or_nan(raw_boundary_error)
+        fused_mae = _mean_or_nan(fused_boundary_error)
+        entropy_error_rho = _optional_spearman(
+            task_frame["raw_value_entropy"], task_frame["raw_residual"].abs()
+        )
+        entropy_boundary = _mean_or_nan(boundary_entropy)
+        entropy_interior = _mean_or_nan(interior_entropy)
+        rows.append(
+            {
+                "task": task,
+                "task_index": task_index,
+                "episodes": int(task_frame["episode_index"].nunique()),
+                "frames": int(len(task_frame)),
+                "phase_boundaries": boundary_events,
+                "raw_boundary_residual_jitter": raw_jitter,
+                "fused_boundary_residual_jitter": fused_jitter,
+                "boundary_residual_jitter_improvement_pct": (
+                    _lower_is_better_improvement(raw_jitter, fused_jitter)
+                ),
+                "raw_boundary_mae": raw_mae,
+                "fused_boundary_mae": fused_mae,
+                "boundary_mae_improvement_pct": (
+                    _lower_is_better_improvement(raw_mae, fused_mae)
+                ),
+                "raw_entropy_error_spearman": entropy_error_rho,
+                "raw_boundary_value_entropy": entropy_boundary,
+                "raw_interior_value_entropy": entropy_interior,
+                "raw_boundary_entropy_lift": entropy_boundary - entropy_interior,
+            }
+        )
+    by_task = pd.DataFrame(rows)
+    raw_jitter_macro = float(by_task["raw_boundary_residual_jitter"].mean())
+    fused_jitter_macro = float(
+        by_task["fused_boundary_residual_jitter"].mean()
+    )
+    raw_mae_macro = float(by_task["raw_boundary_mae"].mean())
+    fused_mae_macro = float(by_task["fused_boundary_mae"].mean())
+    residual_jitter_available = by_task[
+        ["raw_boundary_residual_jitter", "fused_boundary_residual_jitter"]
+    ].notna().all(axis=1)
+    boundary_mae_available = by_task[
+        ["raw_boundary_mae", "fused_boundary_mae"]
+    ].notna().all(axis=1)
+    aggregate = {
+        "boundary_window_frames": int(boundary_window),
+        "jitter_definition": (
+            "mean absolute second temporal difference of prediction residual "
+            "within +/- boundary_window of a phase transition"
+        ),
+        "tasks": int(len(by_task)),
+        "tasks_with_phase_boundaries": int(
+            (by_task["phase_boundaries"] > 0).sum()
+        ),
+        "tasks_with_boundary_residual_jitter": int(
+            residual_jitter_available.sum()
+        ),
+        "tasks_with_boundary_residual_jitter_improved": int(
+            (
+                residual_jitter_available
+                & (
+                    by_task["fused_boundary_residual_jitter"]
+                    < by_task["raw_boundary_residual_jitter"]
+                )
+            ).sum()
+        ),
+        "tasks_with_boundary_mae": int(boundary_mae_available.sum()),
+        "tasks_with_boundary_mae_improved": int(
+            (
+                boundary_mae_available
+                & (
+                    by_task["fused_boundary_mae"]
+                    < by_task["raw_boundary_mae"]
+                )
+            ).sum()
+        ),
+        "phase_boundaries": int(by_task["phase_boundaries"].sum()),
+        "raw_boundary_residual_jitter": raw_jitter_macro,
+        "fused_boundary_residual_jitter": fused_jitter_macro,
+        "boundary_residual_jitter_improvement_pct": (
+            _lower_is_better_improvement(raw_jitter_macro, fused_jitter_macro)
+        ),
+        "raw_boundary_mae": raw_mae_macro,
+        "fused_boundary_mae": fused_mae_macro,
+        "boundary_mae_improvement_pct": (
+            _lower_is_better_improvement(raw_mae_macro, fused_mae_macro)
+        ),
+        "raw_entropy_error_spearman": float(
+            by_task["raw_entropy_error_spearman"].mean()
+        ),
+        "raw_boundary_value_entropy": float(
+            by_task["raw_boundary_value_entropy"].mean()
+        ),
+        "raw_interior_value_entropy": float(
+            by_task["raw_interior_value_entropy"].mean()
+        ),
+        "raw_boundary_entropy_lift": float(
+            by_task["raw_boundary_entropy_lift"].mean()
+        ),
+    }
+    return by_task, aggregate
+
+
+def summarize_boundary_credit_jitter(
+    aligned: pd.DataFrame,
+    *,
+    num_tasks: int,
+    boundary_window: int,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Measure boundary-local temporal variation of Raw and Fused credits."""
+    rows = []
+    for task_index in range(num_tasks):
+        task = f"task{task_index}"
+        task_frame = aligned[aligned["task"] == task]
+        raw_variation: list[float] = []
+        fused_variation: list[float] = []
+        boundary_events = 0
+        for _, episode in task_frame.groupby("episode_index", sort=True):
+            episode = episode.sort_values("frame_index")
+            phases = episode["phase_true"].to_numpy(dtype=np.int64)
+            boundaries = _boundary_indices(phases)
+            boundary_events += int(len(boundaries))
+            if not len(boundaries) or len(episode) < 2:
+                continue
+            near_boundary = _near_boundary_mask(
+                len(episode), boundaries, boundary_window
+            )
+            variation_near_boundary = near_boundary[1:]
+            raw_difference = np.abs(
+                np.diff(episode["raw_credit"].to_numpy(dtype=np.float64))
+            )
+            fused_difference = np.abs(
+                np.diff(episode["fused_credit"].to_numpy(dtype=np.float64))
+            )
+            raw_variation.extend(
+                raw_difference[variation_near_boundary].tolist()
+            )
+            fused_variation.extend(
+                fused_difference[variation_near_boundary].tolist()
+            )
+        raw_jitter = _mean_or_nan(raw_variation)
+        fused_jitter = _mean_or_nan(fused_variation)
+        rows.append(
+            {
+                "task": task,
+                "task_index": task_index,
+                "phase_boundaries": boundary_events,
+                "raw_boundary_credit_jitter": raw_jitter,
+                "fused_boundary_credit_jitter": fused_jitter,
+                "boundary_credit_jitter_improvement_pct": (
+                    _lower_is_better_improvement(raw_jitter, fused_jitter)
+                ),
+            }
+        )
+    by_task = pd.DataFrame(rows)
+    raw_macro = float(by_task["raw_boundary_credit_jitter"].mean())
+    fused_macro = float(by_task["fused_boundary_credit_jitter"].mean())
+    credit_jitter_available = by_task[
+        ["raw_boundary_credit_jitter", "fused_boundary_credit_jitter"]
+    ].notna().all(axis=1)
+    aggregate = {
+        "definition": (
+            "mean absolute first temporal difference of continuous credit "
+            "within +/- boundary_window of a phase transition"
+        ),
+        "boundary_window_frames": int(boundary_window),
+        "tasks": int(len(by_task)),
+        "tasks_with_phase_boundaries": int(
+            (by_task["phase_boundaries"] > 0).sum()
+        ),
+        "tasks_with_boundary_credit_jitter": int(
+            credit_jitter_available.sum()
+        ),
+        "tasks_with_boundary_credit_jitter_improved": int(
+            (
+                credit_jitter_available
+                & (
+                    by_task["fused_boundary_credit_jitter"]
+                    < by_task["raw_boundary_credit_jitter"]
+                )
+            ).sum()
+        ),
+        "raw_boundary_credit_jitter": raw_macro,
+        "fused_boundary_credit_jitter": fused_macro,
+        "boundary_credit_jitter_improvement_pct": (
+            _lower_is_better_improvement(raw_macro, fused_macro)
+        ),
+    }
+    return by_task, aggregate
 
 
 def summarize_credit_progress(
@@ -385,8 +821,99 @@ def _build_paper_table(
     )
 
 
+def _build_candidate_metric_table(
+    credit_aggregate: dict[str, Any],
+    boundary_aggregate: dict[str, Any],
+    credit_jitter_aggregate: dict[str, Any],
+) -> pd.DataFrame:
+    task_macro = credit_aggregate["task_macro"]
+    return pd.DataFrame(
+        [
+            {
+                "metric": "Credit-progress task-macro Spearman",
+                "claim": "credit ranking follows semantic task advancement",
+                "direction": "higher",
+                "raw": task_macro["raw"],
+                "fused": task_macro["fused"],
+                "absolute_gain": task_macro["gain"],
+                "improvement_pct": float("nan"),
+                "tasks_covered": task_macro["tasks"],
+                "tasks_improved": task_macro["tasks_improved"],
+            },
+            {
+                "metric": "Boundary residual jitter",
+                "claim": "remaining-cost prediction is stable at boundaries",
+                "direction": "lower",
+                "raw": boundary_aggregate[
+                    "raw_boundary_residual_jitter"
+                ],
+                "fused": boundary_aggregate[
+                    "fused_boundary_residual_jitter"
+                ],
+                "absolute_gain": (
+                    boundary_aggregate["raw_boundary_residual_jitter"]
+                    - boundary_aggregate["fused_boundary_residual_jitter"]
+                ),
+                "improvement_pct": boundary_aggregate[
+                    "boundary_residual_jitter_improvement_pct"
+                ],
+                "tasks_covered": boundary_aggregate[
+                    "tasks_with_boundary_residual_jitter"
+                ],
+                "tasks_improved": boundary_aggregate[
+                    "tasks_with_boundary_residual_jitter_improved"
+                ],
+            },
+            {
+                "metric": "Boundary continuous-credit jitter",
+                "claim": "step-level credit is stable at phase boundaries",
+                "direction": "lower",
+                "raw": credit_jitter_aggregate[
+                    "raw_boundary_credit_jitter"
+                ],
+                "fused": credit_jitter_aggregate[
+                    "fused_boundary_credit_jitter"
+                ],
+                "absolute_gain": (
+                    credit_jitter_aggregate["raw_boundary_credit_jitter"]
+                    - credit_jitter_aggregate["fused_boundary_credit_jitter"]
+                ),
+                "improvement_pct": credit_jitter_aggregate[
+                    "boundary_credit_jitter_improvement_pct"
+                ],
+                "tasks_covered": credit_jitter_aggregate[
+                    "tasks_with_boundary_credit_jitter"
+                ],
+                "tasks_improved": credit_jitter_aggregate[
+                    "tasks_with_boundary_credit_jitter_improved"
+                ],
+            },
+            {
+                "metric": "Boundary-local value MAE",
+                "claim": "remaining-cost prediction is accurate at boundaries",
+                "direction": "lower",
+                "raw": boundary_aggregate["raw_boundary_mae"],
+                "fused": boundary_aggregate["fused_boundary_mae"],
+                "absolute_gain": (
+                    boundary_aggregate["raw_boundary_mae"]
+                    - boundary_aggregate["fused_boundary_mae"]
+                ),
+                "improvement_pct": boundary_aggregate[
+                    "boundary_mae_improvement_pct"
+                ],
+                "tasks_covered": boundary_aggregate[
+                    "tasks_with_boundary_mae"
+                ],
+                "tasks_improved": boundary_aggregate[
+                    "tasks_with_boundary_mae_improved"
+                ],
+            },
+        ]
+    )
+
+
 def main() -> None:
-    """Run the fixed held-out credit-progress rank-correlation experiment."""
+    """Run the fixed held-out Critic diagnostic experiment."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--comparison", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
@@ -395,6 +922,7 @@ def main() -> None:
     parser.add_argument("--gamma", type=float, default=1.0)
     parser.add_argument("--num-tasks", type=int, default=10)
     parser.add_argument("--episodes-per-task", type=int, default=30)
+    parser.add_argument("--boundary-window", type=int, default=10)
     parser.add_argument("--raw-policy-sr", type=float)
     parser.add_argument("--fused-policy-sr", type=float)
     args = parser.parse_args()
@@ -404,6 +932,8 @@ def main() -> None:
         raise ValueError("--gamma must be non-negative.")
     if args.num_tasks <= 0 or args.episodes_per_task <= 0:
         raise ValueError("Task and episode counts must be positive.")
+    if args.boundary_window < 0:
+        raise ValueError("--boundary-window must be non-negative.")
     policy_rates = {
         "--raw-policy-sr": args.raw_policy_sr,
         "--fused-policy-sr": args.fused_policy_sr,
@@ -424,7 +954,57 @@ def main() -> None:
         aligned,
         num_tasks=args.num_tasks,
     )
-    report = {**metadata, **aggregate}
+    validation, validation_metadata = build_validation_diagnostics_frame(
+        args.comparison,
+        split=args.split,
+        num_tasks=args.num_tasks,
+        episodes_per_task=args.episodes_per_task,
+    )
+    boundary_by_task, boundary_aggregate = (
+        summarize_boundary_value_diagnostics(
+            validation,
+            num_tasks=args.num_tasks,
+            boundary_window=args.boundary_window,
+        )
+    )
+    credit_jitter_by_task, credit_jitter_aggregate = (
+        summarize_boundary_credit_jitter(
+            aligned,
+            num_tasks=args.num_tasks,
+            boundary_window=args.boundary_window,
+        )
+    )
+    candidates = _build_candidate_metric_table(
+        aggregate,
+        boundary_aggregate,
+        credit_jitter_aggregate,
+    )
+    report = {
+        **metadata,
+        **validation_metadata,
+        **aggregate,
+        "boundary_value_diagnostics": boundary_aggregate,
+        "boundary_credit_diagnostics": credit_jitter_aggregate,
+        "uncertainty_diagnostics": {
+            "raw_entropy_error_spearman": boundary_aggregate[
+                "raw_entropy_error_spearman"
+            ],
+            "raw_boundary_value_entropy": boundary_aggregate[
+                "raw_boundary_value_entropy"
+            ],
+            "raw_interior_value_entropy": boundary_aggregate[
+                "raw_interior_value_entropy"
+            ],
+            "raw_boundary_entropy_lift": boundary_aggregate[
+                "raw_boundary_entropy_lift"
+            ],
+            "scope_note": (
+                "Current artifacts preserve the Raw categorical value "
+                "distribution but not Fused logits; uncertainty calibration "
+                "is therefore a Raw-Critic diagnostic."
+            ),
+        },
+    }
     paper_table = _build_paper_table(
         metadata,
         aggregate,
@@ -436,11 +1016,17 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     aligned_path = output_dir / "credit_progress_aligned_frames.parquet"
     task_path = output_dir / "credit_progress_by_task.csv"
+    boundary_task_path = output_dir / "boundary_value_by_task.csv"
+    credit_jitter_task_path = output_dir / "boundary_credit_by_task.csv"
+    candidate_path = output_dir / "candidate_metrics.csv"
     table_path = output_dir / "credit_progress_paper_table.csv"
     summary_path = output_dir / "credit_progress_summary.json"
     text_path = output_dir / "credit_progress_summary.txt"
     aligned.to_parquet(aligned_path, index=False)
     by_task.to_csv(task_path, index=False)
+    boundary_by_task.to_csv(boundary_task_path, index=False)
+    credit_jitter_by_task.to_csv(credit_jitter_task_path, index=False)
+    candidates.to_csv(candidate_path, index=False)
     paper_table.to_csv(table_path, index=False)
     summary_path.write_text(
         json.dumps(report, indent=2, ensure_ascii=False) + "\n",
@@ -457,6 +1043,15 @@ def main() -> None:
                 index=False,
                 float_format=lambda value: f"{value:.6f}",
             ),
+            "",
+            "CANDIDATE METRICS",
+            candidates.to_string(
+                index=False,
+                float_format=lambda value: f"{value:.6f}",
+            ),
+            "",
+            "UNCERTAINTY DIAGNOSTICS",
+            json.dumps(report["uncertainty_diagnostics"], indent=2),
             "",
             "PAPER TABLE",
             paper_table.to_string(
@@ -476,6 +1071,9 @@ def main() -> None:
     print(text)
     print(f"Aligned frames: {aligned_path}")
     print(f"Per-task CSV: {task_path}")
+    print(f"Boundary value CSV: {boundary_task_path}")
+    print(f"Boundary credit CSV: {credit_jitter_task_path}")
+    print(f"Candidate metrics CSV: {candidate_path}")
     print(f"Paper table CSV: {table_path}")
     print(f"JSON summary: {summary_path}")
     print(f"Text summary: {text_path}")
