@@ -801,19 +801,23 @@ def _build_paper_table(
     raw_policy_sr: float | None,
     fused_policy_sr: float | None,
 ) -> pd.DataFrame:
-    all_mae = metadata.get("value_mae_from_comparison", {}).get("all", {})
+    split = str(metadata.get("split", "all"))
+    mae_by_split = metadata.get("value_mae_from_comparison", {})
+    selected_mae = mae_by_split.get(split, mae_by_split.get("all", {}))
     task_macro = aggregate["task_macro"]
     return pd.DataFrame(
         [
             {
                 "credit_source": "Raw Critic",
-                "value_mae": all_mae.get("raw"),
+                "value_mae_split": split,
+                "value_mae": selected_mae.get("raw"),
                 "credit_progress_rank_correlation": task_macro["raw"],
                 "policy_sr_percent": raw_policy_sr,
             },
             {
                 "credit_source": "Full GLC-Critic",
-                "value_mae": all_mae.get("fused"),
+                "value_mae_split": split,
+                "value_mae": selected_mae.get("fused"),
                 "credit_progress_rank_correlation": task_macro["fused"],
                 "policy_sr_percent": fused_policy_sr,
             },

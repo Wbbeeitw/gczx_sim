@@ -147,12 +147,19 @@ def test_fused_credit_has_higher_task_macro_progress_correlation(
     assert list(candidates["tasks_improved"]) == [2, 2, 2, 2]
 
     paper_table = MODULE._build_paper_table(
-        {"value_mae_from_comparison": {"all": {"raw": 124.24, "fused": 59.53}}},
+        {
+            "split": "val",
+            "value_mae_from_comparison": {
+                "all": {"raw": 124.24, "fused": 59.53},
+                "val": {"raw": 133.03, "fused": 97.78},
+            },
+        },
         aggregate,
         raw_policy_sr=75.8,
         fused_policy_sr=83.3,
     )
-    assert list(paper_table["value_mae"]) == pytest.approx([124.24, 59.53])
+    assert list(paper_table["value_mae_split"]) == ["val", "val"]
+    assert list(paper_table["value_mae"]) == pytest.approx([133.03, 97.78])
     assert list(paper_table["policy_sr_percent"]) == pytest.approx([75.8, 83.3])
 
 
