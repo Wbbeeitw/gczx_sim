@@ -861,6 +861,22 @@ computing held-out frame-micro MAE. Boundary MAE uses frames within `+/-10`
 steps of a privileged `phase_true` transition. Outputs include the paper table,
 per-task values, a JSON audit record, and a readable text summary.
 
+Plot the Raw-versus-Full task-wise Boundary MAE radar from those outputs with:
+
+```bash
+python examples/recap/process/plot_boundary_mae_radar.py \
+  --by-task-csv /workspace/results/round1_v3_critic_ablation/critic_ablation_by_task.csv \
+  --summary-csv /workspace/results/round1_v3_critic_ablation/critic_ablation_table.csv \
+  --output /workspace/results/round1_v3_critic_ablation/figures/taskwise_boundary_mae_radar \
+  --pace-color '#2364AA' \
+  --dpi 600
+```
+
+The plot keeps the fixed `task0` through `task9` order, labels Boundary MAE as
+lower-is-better, uses only outlined markers and very light fills, and obtains
+the frame-micro overall annotation from `critic_ablation_table.csv` rather than
+relabeling it as a task-macro statistic.
+
 Recovery stages are:
 
 ```bash
