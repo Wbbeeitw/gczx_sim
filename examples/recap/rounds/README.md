@@ -877,6 +877,22 @@ lower-is-better, uses only outlined markers and very light fills, and obtains
 the frame-micro overall annotation from `critic_ablation_table.csv` rather than
 relabeling it as a task-macro statistic.
 
+The matching five-method task-success radar accepts percentages in `[0, 100]`
+and deliberately omits an in-figure title so the LaTeX caption can describe the
+panel. Its input CSV has one row per `task0` through `task9` and columns named
+`OpenVLA`, `Xiaomi-Robotics-0`, `π₀.₅-SFT`, `ReCAP`, and `PACE (ours)`. Legacy
+column names `XR-0`, `π0.5 (ReCAP)`, and `Ours (PACE)` are accepted and renamed
+in the rendered legend:
+
+```bash
+python examples/recap/process/plot_task_success_rate_radar.py \
+  --input-csv /workspace/results/paper_figures/libero_long_task_success_rates.csv \
+  --output /workspace/results/paper_figures/taskwise_success_rate_radar \
+  --pace-color '#2364AA' \
+  --recap-color '#E76F51' \
+  --dpi 600
+```
+
 Recovery stages are:
 
 ```bash
