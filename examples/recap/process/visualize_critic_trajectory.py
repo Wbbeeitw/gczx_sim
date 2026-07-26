@@ -659,7 +659,7 @@ def _draw_compact_metric_strip(
         ),
         (
             0.755,
-            f"MAE IMPROVEMENT   {metrics['mae_improvement_pct']:.1f}%",
+            f"EPISODE MAE REDUCTION   {metrics['mae_improvement_pct']:.1f}%",
             SUCCESS_COLOR,
             "#F1F8F5",
         ),
@@ -832,7 +832,7 @@ def _plot_trajectory(
         color=TARGET_COLOR,
         linestyle="--",
         linewidth=2.15,
-        label="Return-to-go" if compact_paper else "Target return",
+        label="Target remaining return",
         zorder=4,
     )
     trajectory_axis.plot(
@@ -958,7 +958,7 @@ def _plot_trajectory(
             f"Raw bias  {metrics['raw_bias']:+.2f}\n"
             f"Fused MAE  {metrics['fused_mae']:.2f}\n"
             f"Fused bias  {metrics['fused_bias']:+.2f}\n"
-            f"MAE improvement  {metrics['mae_improvement_pct']:.1f}%"
+            f"Episode MAE reduction  {metrics['mae_improvement_pct']:.1f}%"
         )
         trajectory_axis.text(
             0.988,
