@@ -29,17 +29,25 @@ import numpy as np
 import pandas as pd
 
 
+PI05_SFT = "pi0.5-SFT"
 METHODS = (
     "OpenVLA",
     "Xiaomi-Robotics-0",
-    "π₀.₅-SFT",
+    PI05_SFT,
     "ReCAP",
     "PACE (ours)",
 )
+DISPLAY_LABELS = {
+    "OpenVLA": "OpenVLA",
+    "Xiaomi-Robotics-0": "Xiaomi-Robotics-0",
+    PI05_SFT: r"$\pi_{0.5}$-SFT",
+    "ReCAP": "ReCAP",
+    "PACE (ours)": "PACE (ours)",
+}
 ALIASES = {
     "OpenVLA": ("OpenVLA",),
     "Xiaomi-Robotics-0": ("Xiaomi-Robotics-0", "XR-0"),
-    "π₀.₅-SFT": (
+    PI05_SFT: (
         "π₀.₅-SFT",
         "π0.5-SFT",
         "pi0.5-SFT",
@@ -60,7 +68,7 @@ BASELINE_STYLES = {
         "linestyle": (0, (5, 2)),
         "marker": "^",
     },
-    "π₀.₅-SFT": {
+    PI05_SFT: {
         "color": "#D2B8C5",
         "linestyle": (0, (7, 2, 1, 2)),
         "marker": "D",
@@ -140,6 +148,7 @@ def _plot_radar(
         {
             "font.family": font_family,
             "font.weight": "semibold",
+            "mathtext.fontset": "stix",
             "axes.edgecolor": "#90A4AE",
             "text.color": "#243B53",
         }
@@ -188,7 +197,7 @@ def _plot_radar(
             markerfacecolor="white",
             markeredgecolor=style["color"],
             markeredgewidth=1.15,
-            label=method,
+            label=DISPLAY_LABELS[method],
             zorder=3,
         )
 
@@ -251,7 +260,7 @@ def _plot_radar(
     figure.text(
         0.925,
         0.045,
-        "Success rate (%)  ·  Higher is better",
+        r"Success rate (%)  $\uparrow$  Higher is better",
         ha="right",
         va="center",
         fontsize=10.5,
