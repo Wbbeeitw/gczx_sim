@@ -683,6 +683,19 @@ not crop or redraw the inputs; it normalizes their widths and stacks them with
 a narrow white gap. The final output is `critic_trajectory_success_failure.png` at
 600 DPI.
 
+To export one plain simulator frame from a randomly selected successful
+episode for every task, use the fixed-seed batch exporter. It writes exactly
+`task0.png` through `task9.png` plus CSV/JSON provenance manifests:
+
+```bash
+python examples/recap/process/export_success_task_frames.py \
+  --dataset-pattern '/data/libero_long/round1_v3_facd_30ep/{task}_30ep' \
+  --output-dir /workspace/results/critic_trajectory_figures/success_task_frames \
+  --num-tasks 10 \
+  --seed 42 \
+  --frame-fraction 0.65
+```
+
 ## Detailed ReCAP-vs-Ours critic bias
 
 Use the same fixed 300-episode return comparison for both methods: ReCAP is the
