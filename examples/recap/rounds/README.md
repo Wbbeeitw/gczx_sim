@@ -720,12 +720,15 @@ python examples/recap/process/compose_critic_trajectory_figure.py \
   --panel "$CURVE_ROOT/task9_success_episode16_curve" \
   --panel "$CURVE_ROOT/task0_failure_episode12_curve" \
   --output /workspace/results/critic_trajectory_figures/final_pair/critic_return_curves_success_failure.png \
+  --pdf-output /workspace/results/critic_trajectory_figures/final_pair/critic_return_curves_success_failure.pdf \
   --dpi 600 \
   --gap-px 18
 ```
 
-The resulting paper PNG is
-`/workspace/results/critic_trajectory_figures/final_pair/critic_return_curves_success_failure.png`.
+The resulting paper PNG and PDF are
+`/workspace/results/critic_trajectory_figures/final_pair/critic_return_curves_success_failure.png`
+and
+`/workspace/results/critic_trajectory_figures/final_pair/critic_return_curves_success_failure.pdf`.
 
 To export one plain simulator frame from a randomly selected successful
 episode for every task, use the fixed-seed batch exporter. It writes exactly

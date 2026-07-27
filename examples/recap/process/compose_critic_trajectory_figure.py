@@ -28,6 +28,7 @@ def _resize_to_width(image: Image.Image, width: int) -> Image.Image:
 def _stack_panels(
     panel_paths: list[Path],
     output_path: Path,
+    pdf_output_path: Path | None,
     dpi: int,
     gap_px: int,
 ) -> tuple[int, int]:
@@ -42,6 +43,13 @@ def _stack_panels(
         current_y += image.height + gap_px
     output_path.parent.mkdir(parents=True, exist_ok=True)
     canvas.save(output_path, format="PNG", dpi=(dpi, dpi))
+    if pdf_output_path is not None:
+        pdf_output_path.parent.mkdir(parents=True, exist_ok=True)
+        canvas.save(
+            pdf_output_path,
+            format="PDF",
+            resolution=float(dpi),
+        )
     return canvas.size
 
 
@@ -56,6 +64,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Panel PNG path or output stem; pass in top-to-bottom order.",
     )
     parser.add_argument("--output", required=True, help="Final PNG path.")
+    parser.add_argument(
+        "--pdf-output",
+        help="Optional final PDF path using the same stacked 600-DPI canvas.",
+    )
     parser.add_argument("--dpi", type=int, default=600)
     parser.add_argument(
         "--gap-px",
@@ -79,9 +91,15 @@ def main() -> None:
     output_path = Path(args.output).expanduser().resolve()
     if output_path.suffix.lower() != ".png":
         output_path = output_path.with_suffix(".png")
+    pdf_output_path = None
+    if args.pdf_output:
+        pdf_output_path = Path(args.pdf_output).expanduser().resolve()
+        if pdf_output_path.suffix.lower() != ".pdf":
+            pdf_output_path = pdf_output_path.with_suffix(".pdf")
     width, height = _stack_panels(
         panel_paths,
         output_path,
+        pdf_output_path,
         dpi=args.dpi,
         gap_px=args.gap_px,
     )
@@ -89,6 +107,9 @@ def main() -> None:
         json.dumps(
             {
                 "output": str(output_path),
+                "pdf_output": (
+                    str(pdf_output_path) if pdf_output_path is not None else None
+                ),
                 "panels": [str(path) for path in panel_paths],
                 "width": width,
                 "height": height,
