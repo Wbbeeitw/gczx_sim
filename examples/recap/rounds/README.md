@@ -683,6 +683,50 @@ not crop or redraw the inputs; it normalizes their widths and stacks them with
 a narrow white gap. The final output is `critic_trajectory_success_failure.png` at
 600 DPI.
 
+To make a curve-only two-row figure without simulator keyframes, titles,
+instructions, status badges, or the absolute-error subplot, add
+`--curve-only`. This mode skips image decoding and keeps only the enlarged
+phase labels, boundaries, Target/Raw/Fused curves, shared legend, and the
+per-trajectory MAE/bias summary:
+
+```bash
+CURVE_ROOT=/workspace/results/critic_trajectory_figures/final_pair/curves
+mkdir -p "$CURVE_ROOT"
+
+python examples/recap/process/visualize_critic_trajectory.py \
+  --dataset /data/libero_long/round1_v3_facd_30ep/task9_30ep \
+  --comparison "$COMPARISON" \
+  --episode 16 \
+  --episode-offset 270 \
+  --curve-only \
+  --font-family "Times New Roman" \
+  --font-weight bold \
+  --dpi 600 \
+  --output "$CURVE_ROOT/task9_success_episode16_curve"
+
+python examples/recap/process/visualize_critic_trajectory.py \
+  --dataset /data/libero_long/round1_v3_facd_30ep/task0_30ep \
+  --comparison "$COMPARISON" \
+  --episode 12 \
+  --episode-offset 0 \
+  --curve-only \
+  --hide-legend \
+  --font-family "Times New Roman" \
+  --font-weight bold \
+  --dpi 600 \
+  --output "$CURVE_ROOT/task0_failure_episode12_curve"
+
+python examples/recap/process/compose_critic_trajectory_figure.py \
+  --panel "$CURVE_ROOT/task9_success_episode16_curve" \
+  --panel "$CURVE_ROOT/task0_failure_episode12_curve" \
+  --output /workspace/results/critic_trajectory_figures/final_pair/critic_return_curves_success_failure.png \
+  --dpi 600 \
+  --gap-px 18
+```
+
+The resulting paper PNG is
+`/workspace/results/critic_trajectory_figures/final_pair/critic_return_curves_success_failure.png`.
+
 To export one plain simulator frame from a randomly selected successful
 episode for every task, use the fixed-seed batch exporter. It writes exactly
 `task0.png` through `task9.png` plus CSV/JSON provenance manifests:

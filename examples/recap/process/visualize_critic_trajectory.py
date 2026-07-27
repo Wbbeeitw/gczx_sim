@@ -512,6 +512,7 @@ def _add_phase_context(
     trajectory: pd.DataFrame,
     phase_names: list[str],
     show_labels: bool,
+    label_fontsize: float = 8.0,
 ) -> None:
     segments = _phase_segments(trajectory)
     for index, (start, end, phase) in enumerate(segments):
@@ -531,7 +532,7 @@ def _add_phase_context(
                 transform=axis.get_xaxis_transform(),
                 ha="center",
                 va="top",
-                fontsize=8,
+                fontsize=label_fontsize,
                 color="#52606D",
             )
     boundaries = trajectory[trajectory["is_boundary"]]
@@ -635,6 +636,137 @@ def _metric_summary(trajectory: pd.DataFrame) -> dict[str, float]:
     }
 
 
+def _plot_curve_only(
+    trajectory: pd.DataFrame,
+    output_base: Path,
+    phase_names: list[str],
+    dpi: int,
+    font_family: str | None,
+    font_scale: float,
+    font_weight: str | None,
+    hide_legend: bool,
+) -> None:
+    """Render only the phase-annotated return curves for one trajectory."""
+    frames = trajectory["frame_index"].to_numpy()
+    metrics = _metric_summary(trajectory)
+    figure, axis = plt.subplots(figsize=(16.0, 5.0), facecolor="white")
+    figure.subplots_adjust(left=0.075, right=0.99, bottom=0.18, top=0.82)
+
+    _add_phase_context(
+        axis,
+        trajectory,
+        phase_names,
+        show_labels=True,
+        label_fontsize=13.5,
+    )
+    axis.plot(
+        frames,
+        trajectory["target_return"],
+        color=TARGET_COLOR,
+        linestyle="--",
+        linewidth=2.8,
+        label="Target remaining return",
+        zorder=4,
+    )
+    axis.plot(
+        frames,
+        trajectory["raw_critic_plot"],
+        color=RAW_COLOR,
+        linewidth=2.6,
+        label="Raw Critic",
+        zorder=3,
+    )
+    axis.plot(
+        frames,
+        trajectory["fused_critic_plot"],
+        color=FUSED_COLOR,
+        linewidth=3.2,
+        label="Fused Critic",
+        zorder=5,
+    )
+    axis.set_ylabel(
+        "Return prediction",
+        fontsize=16.0,
+        fontweight="bold",
+        color="#334E68",
+        labelpad=10,
+    )
+    axis.set_xlabel(
+        "Time step",
+        fontsize=16.0,
+        fontweight="bold",
+        color="#334E68",
+        labelpad=8,
+    )
+    axis.grid(axis="y", color="#CFD8DC", alpha=0.58, linewidth=0.9)
+    axis.margins(x=0.008)
+    _style_plot_axis(axis)
+    axis.tick_params(axis="both", labelsize=13.0, width=1.0)
+
+    if not hide_legend:
+        legend = axis.legend(
+            loc="lower left",
+            ncol=3,
+            frameon=True,
+            framealpha=0.97,
+            facecolor="white",
+            edgecolor="#BCCCDC",
+            fontsize=13.0,
+            handlelength=2.4,
+            borderpad=0.45,
+            columnspacing=1.2,
+        )
+        for text_artist in legend.get_texts():
+            text_artist.set_fontweight("semibold")
+
+    metric_text = (
+        f"Raw MAE {metrics['raw_mae']:.2f}   |   "
+        f"Fused MAE {metrics['fused_mae']:.2f}   |   "
+        f"Episode MAE reduction {metrics['mae_improvement_pct']:.1f}%\n"
+        f"Raw bias {metrics['raw_bias']:+.2f}   |   "
+        f"Fused bias {metrics['fused_bias']:+.2f}"
+    )
+    figure.text(
+        0.99,
+        0.975,
+        metric_text,
+        ha="right",
+        va="top",
+        fontsize=12.5,
+        linespacing=1.35,
+        fontweight="semibold",
+        color="#243B53",
+        bbox={
+            "boxstyle": "round,pad=0.48",
+            "facecolor": "white",
+            "edgecolor": "#9FB3C8",
+            "linewidth": 1.0,
+            "alpha": 0.96,
+        },
+        zorder=10,
+    )
+
+    for text_artist in figure.findobj(match=Text):
+        if font_family is not None:
+            text_artist.set_fontfamily(font_family)
+        text_artist.set_fontsize(text_artist.get_fontsize() * font_scale)
+        if font_weight is not None:
+            text_artist.set_fontweight(font_weight)
+
+    figure.savefig(
+        output_base.with_suffix(".png"),
+        dpi=dpi,
+        bbox_inches="tight",
+        facecolor="white",
+    )
+    figure.savefig(
+        output_base.with_suffix(".pdf"),
+        bbox_inches="tight",
+        facecolor="white",
+    )
+    plt.close(figure)
+
+
 def _draw_compact_metric_strip(
     axis: plt.Axes,
     metrics: dict[str, float],
@@ -687,7 +819,7 @@ def _draw_compact_metric_strip(
 def _plot_trajectory(
     trajectory: pd.DataFrame,
     images: dict[int, np.ndarray],
-    image_key: str,
+    image_key: str | None,
     output_base: Path,
     title: str,
     task_description: str,
@@ -700,7 +832,23 @@ def _plot_trajectory(
     font_weight: str | None,
     compact_paper: bool,
     hide_legend: bool,
+    curve_only: bool,
 ) -> None:
+    if curve_only:
+        _plot_curve_only(
+            trajectory,
+            output_base,
+            phase_names,
+            dpi,
+            font_family,
+            font_scale,
+            font_weight,
+            hide_legend,
+        )
+        return
+
+    if image_key is None:
+        raise ValueError("image_key is required unless curve_only is enabled")
     keyframes = sorted(images)
     columns = max(1, len(keyframes))
     figure_width = max(14.8, 2.45 * columns)
@@ -1139,6 +1287,15 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--curve-only",
+        action="store_true",
+        help=(
+            "Render only the phase-annotated Target/Raw/Fused return curves; "
+            "omit simulator keyframes, title, description, status, metric strip, "
+            "and absolute-error panel."
+        ),
+    )
+    parser.add_argument(
         "--hide-legend",
         action="store_true",
         help="Hide the return-curve legend, useful after the first stacked panel.",
@@ -1155,7 +1312,7 @@ def main() -> None:
     args = _build_parser().parse_args()
     if args.episode < 0:
         raise ValueError("--episode must be non-negative.")
-    if args.num_keyframes < 2:
+    if not args.curve_only and args.num_keyframes < 2:
         raise ValueError("--num-keyframes must be at least 2.")
     if args.boundary_window < 0:
         raise ValueError("--boundary-window must be non-negative.")
@@ -1188,17 +1345,26 @@ def main() -> None:
         requested_phase_episode,
         comparison_episode,
     )
-    keyframes = _choose_keyframes(
-        trajectory, args.num_keyframes, args.boundary_window
+    keyframes = (
+        []
+        if args.curve_only
+        else _choose_keyframes(
+            trajectory, args.num_keyframes, args.boundary_window
+        )
     )
     trajectory["is_keyframe"] = trajectory["frame_index"].isin(keyframes)
-    images, image_key, detected_task_description = _load_keyframe_images(
-        dataset_path,
-        args.episode,
-        keyframes,
-        trajectory["frame_index"].astype(int).tolist(),
-        args.image_key,
-    )
+    if args.curve_only:
+        images: dict[int, np.ndarray] = {}
+        image_key = None
+        detected_task_description = None
+    else:
+        images, image_key, detected_task_description = _load_keyframe_images(
+            dataset_path,
+            args.episode,
+            keyframes,
+            trajectory["frame_index"].astype(int).tolist(),
+            args.image_key,
+        )
 
     phase_names = [name.strip() for name in args.phase_names.split(",") if name.strip()]
     task_name = args.task_name or dataset_path.name
@@ -1226,6 +1392,7 @@ def main() -> None:
         args.font_weight,
         args.compact_paper,
         args.hide_legend,
+        args.curve_only,
     )
 
     export_columns = [
@@ -1275,6 +1442,7 @@ def main() -> None:
         "font_scale": float(args.font_scale),
         "font_weight": args.font_weight,
         "compact_paper": bool(args.compact_paper),
+        "curve_only": bool(args.curve_only),
         "hide_legend": bool(args.hide_legend),
         "metrics": metrics,
         "outputs": {
