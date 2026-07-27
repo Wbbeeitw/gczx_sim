@@ -513,6 +513,7 @@ def _add_phase_context(
     phase_names: list[str],
     show_labels: bool,
     label_fontsize: float = 8.0,
+    boundary_linewidth: float = 1.25,
 ) -> None:
     segments = _phase_segments(trajectory)
     for index, (start, end, phase) in enumerate(segments):
@@ -542,7 +543,7 @@ def _add_phase_context(
             frame,
             color=BOUNDARY_COLOR,
             linestyle=(0, (4, 3)),
-            linewidth=1.25,
+            linewidth=boundary_linewidth,
             alpha=0.75,
             zorder=2,
         )
@@ -649,22 +650,23 @@ def _plot_curve_only(
     """Render only the phase-annotated return curves for one trajectory."""
     frames = trajectory["frame_index"].to_numpy()
     metrics = _metric_summary(trajectory)
-    figure, axis = plt.subplots(figsize=(16.0, 5.0), facecolor="white")
-    figure.subplots_adjust(left=0.075, right=0.99, bottom=0.18, top=0.82)
+    figure, axis = plt.subplots(figsize=(16.0, 5.4), facecolor="white")
+    figure.subplots_adjust(left=0.082, right=0.99, bottom=0.19, top=0.78)
 
     _add_phase_context(
         axis,
         trajectory,
         phase_names,
         show_labels=True,
-        label_fontsize=13.5,
+        label_fontsize=19.0,
+        boundary_linewidth=1.9,
     )
     axis.plot(
         frames,
         trajectory["target_return"],
         color=TARGET_COLOR,
         linestyle="--",
-        linewidth=2.8,
+        linewidth=3.5,
         label="Target remaining return",
         zorder=4,
     )
@@ -672,7 +674,7 @@ def _plot_curve_only(
         frames,
         trajectory["raw_critic_plot"],
         color=RAW_COLOR,
-        linewidth=2.6,
+        linewidth=3.3,
         label="Raw Critic",
         zorder=3,
     )
@@ -680,28 +682,28 @@ def _plot_curve_only(
         frames,
         trajectory["fused_critic_plot"],
         color=FUSED_COLOR,
-        linewidth=3.2,
+        linewidth=4.1,
         label="Fused Critic",
         zorder=5,
     )
     axis.set_ylabel(
         "Return prediction",
-        fontsize=16.0,
+        fontsize=22.0,
+        fontweight="bold",
+        color="#334E68",
+        labelpad=12,
+    )
+    axis.set_xlabel(
+        "Time step",
+        fontsize=22.0,
         fontweight="bold",
         color="#334E68",
         labelpad=10,
     )
-    axis.set_xlabel(
-        "Time step",
-        fontsize=16.0,
-        fontweight="bold",
-        color="#334E68",
-        labelpad=8,
-    )
-    axis.grid(axis="y", color="#CFD8DC", alpha=0.58, linewidth=0.9)
+    axis.grid(axis="y", color="#CFD8DC", alpha=0.58, linewidth=1.05)
     axis.margins(x=0.008)
     _style_plot_axis(axis)
-    axis.tick_params(axis="both", labelsize=13.0, width=1.0)
+    axis.tick_params(axis="both", labelsize=17.0, width=1.2, length=5.5)
 
     if not hide_legend:
         legend = axis.legend(
@@ -711,10 +713,10 @@ def _plot_curve_only(
             framealpha=0.97,
             facecolor="white",
             edgecolor="#BCCCDC",
-            fontsize=13.0,
-            handlelength=2.4,
-            borderpad=0.45,
-            columnspacing=1.2,
+            fontsize=17.0,
+            handlelength=2.6,
+            borderpad=0.5,
+            columnspacing=1.35,
         )
         for text_artist in legend.get_texts():
             text_artist.set_fontweight("semibold")
@@ -732,7 +734,7 @@ def _plot_curve_only(
         metric_text,
         ha="right",
         va="top",
-        fontsize=12.5,
+        fontsize=16.0,
         linespacing=1.35,
         fontweight="semibold",
         color="#243B53",
@@ -740,7 +742,7 @@ def _plot_curve_only(
             "boxstyle": "round,pad=0.48",
             "facecolor": "white",
             "edgecolor": "#9FB3C8",
-            "linewidth": 1.0,
+            "linewidth": 1.2,
             "alpha": 0.96,
         },
         zorder=10,
