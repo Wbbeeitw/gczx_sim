@@ -27,6 +27,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.text import Text
 
 
 PI05_SFT = "pi0.5-SFT"
@@ -140,6 +141,7 @@ def _plot_radar(
     pace_color: str,
     recap_color: str,
     font_family: str,
+    font_scale: float,
     dpi: int,
 ) -> dict[str, Any]:
     angles = np.linspace(0.0, 2.0 * np.pi, len(tasks), endpoint=False)
@@ -154,7 +156,7 @@ def _plot_radar(
         }
     )
     figure, axis = plt.subplots(
-        figsize=(9.2, 8.2),
+        figsize=(11.6, 10.4),
         subplot_kw={"projection": "polar"},
     )
     figure.patch.set_facecolor("white")
@@ -165,23 +167,23 @@ def _plot_radar(
     axis.set_xticks(angles)
     axis.set_xticklabels(
         [task.replace("task", "Task ") for task in tasks],
-        fontsize=12.5,
+        fontsize=18.0,
         fontweight="bold",
         color="#334E68",
     )
-    axis.tick_params(axis="x", pad=13)
+    axis.tick_params(axis="x", pad=18)
     radial_ticks = np.asarray([20.0, 40.0, 60.0, 80.0, 100.0])
     axis.set_yticks(radial_ticks)
     axis.set_yticklabels(
         [f"{tick:.0f}%" for tick in radial_ticks],
-        fontsize=9.5,
+        fontsize=14.5,
         color="#607D8B",
     )
     axis.set_rlabel_position(18)
-    axis.xaxis.grid(True, color="#B0BEC5", linewidth=0.75, alpha=0.55)
-    axis.yaxis.grid(True, color="#B0BEC5", linewidth=0.75, alpha=0.55)
+    axis.xaxis.grid(True, color="#B0BEC5", linewidth=1.0, alpha=0.55)
+    axis.yaxis.grid(True, color="#B0BEC5", linewidth=1.0, alpha=0.55)
     axis.spines["polar"].set_color("#90A4AE")
-    axis.spines["polar"].set_linewidth(0.9)
+    axis.spines["polar"].set_linewidth(1.15)
 
     for method in METHODS[:3]:
         style = BASELINE_STYLES[method]
@@ -190,13 +192,13 @@ def _plot_radar(
             _closed(values[method]),
             color=style["color"],
             linestyle=style["linestyle"],
-            linewidth=1.45,
+            linewidth=2.0,
             alpha=0.9,
             marker=style["marker"],
-            markersize=4.2,
+            markersize=6.2,
             markerfacecolor="white",
             markeredgecolor=style["color"],
-            markeredgewidth=1.15,
+            markeredgewidth=1.55,
             label=DISPLAY_LABELS[method],
             zorder=3,
         )
@@ -205,13 +207,13 @@ def _plot_radar(
         closed_angles,
         _closed(values["ReCAP"]),
         color=recap_color,
-        linewidth=2.35,
+        linewidth=3.2,
         linestyle="-",
         marker="o",
-        markersize=6.2,
+        markersize=8.5,
         markerfacecolor="white",
         markeredgecolor=recap_color,
-        markeredgewidth=1.8,
+        markeredgewidth=2.2,
         label="ReCAP",
         zorder=5,
     )
@@ -226,13 +228,13 @@ def _plot_radar(
         closed_angles,
         _closed(values["PACE (ours)"]),
         color=pace_color,
-        linewidth=3.1,
+        linewidth=4.1,
         linestyle="-",
         marker="s",
-        markersize=6.5,
+        markersize=9.0,
         markerfacecolor="white",
         markeredgecolor=pace_color,
-        markeredgewidth=2.0,
+        markeredgewidth=2.4,
         label="PACE (ours)",
         zorder=6,
     )
@@ -252,8 +254,8 @@ def _plot_radar(
         framealpha=0.96,
         facecolor="white",
         edgecolor="#CFD8DC",
-        fontsize=10.0,
-        handlelength=2.7,
+        fontsize=15.0,
+        handlelength=2.9,
     )
     for text in legend.get_texts():
         text.set_fontweight("semibold")
@@ -263,11 +265,14 @@ def _plot_radar(
         r"Success rate (%)  $\uparrow$  Higher is better",
         ha="right",
         va="center",
-        fontsize=10.5,
+        fontsize=15.5,
         fontstyle="italic",
         color="#607D8B",
     )
-    figure.subplots_adjust(left=0.08, right=0.89, top=0.91, bottom=0.10)
+    figure.subplots_adjust(left=0.08, right=0.86, top=0.89, bottom=0.12)
+
+    for text_artist in figure.findobj(match=Text):
+        text_artist.set_fontsize(text_artist.get_fontsize() * font_scale)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     png_path = output_path.with_suffix(".png")
@@ -302,6 +307,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pace-color", default=PACE_COLOR)
     parser.add_argument("--recap-color", default=RECAP_COLOR)
     parser.add_argument("--font-family", default="Times New Roman")
+    parser.add_argument(
+        "--font-scale",
+        type=float,
+        default=1.0,
+        help="Multiplier applied to all radar text after layout; defaults to 1.0.",
+    )
     parser.add_argument("--dpi", type=int, default=600)
     return parser
 
@@ -313,6 +324,8 @@ def main() -> None:
         raise ValueError("--num-tasks must be at least 3 for a radar chart")
     if args.dpi < 72:
         raise ValueError("--dpi must be at least 72")
+    if args.font_scale <= 0.0:
+        raise ValueError("--font-scale must be positive")
     input_path = args.input_csv.expanduser().resolve()
     if not input_path.is_file():
         raise FileNotFoundError(input_path)
@@ -326,6 +339,7 @@ def main() -> None:
         pace_color=args.pace_color,
         recap_color=args.recap_color,
         font_family=args.font_family,
+        font_scale=args.font_scale,
         dpi=args.dpi,
     )
     metadata.update(

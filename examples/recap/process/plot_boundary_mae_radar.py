@@ -28,6 +28,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.text import Text
 
 
 RAW_VARIANT = "Raw Critic"
@@ -118,6 +119,7 @@ def _plot_radar(
     raw_color: str,
     pace_color: str,
     font_family: str,
+    font_scale: float,
     dpi: int,
 ) -> dict[str, Any]:
     angles = np.linspace(0.0, 2.0 * np.pi, len(tasks), endpoint=False)
@@ -137,7 +139,7 @@ def _plot_radar(
         }
     )
     figure, axis = plt.subplots(
-        figsize=(9.2, 8.2),
+        figsize=(11.6, 10.4),
         subplot_kw={"projection": "polar"},
     )
     figure.patch.set_facecolor("white")
@@ -148,33 +150,33 @@ def _plot_radar(
     axis.set_xticks(angles)
     axis.set_xticklabels(
         [task.replace("task", "Task ") for task in tasks],
-        fontsize=12.5,
+        fontsize=18.0,
         fontweight="bold",
         color="#334E68",
     )
-    axis.tick_params(axis="x", pad=13)
+    axis.tick_params(axis="x", pad=18)
     axis.set_yticks(radial_ticks)
     axis.set_yticklabels(
         [f"{tick:.0f}" for tick in radial_ticks],
-        fontsize=9.5,
+        fontsize=14.5,
         color="#607D8B",
     )
     axis.set_rlabel_position(18)
-    axis.xaxis.grid(True, color="#B0BEC5", linewidth=0.75, alpha=0.55)
-    axis.yaxis.grid(True, color="#B0BEC5", linewidth=0.75, alpha=0.55)
+    axis.xaxis.grid(True, color="#B0BEC5", linewidth=1.0, alpha=0.55)
+    axis.yaxis.grid(True, color="#B0BEC5", linewidth=1.0, alpha=0.55)
     axis.spines["polar"].set_color("#90A4AE")
-    axis.spines["polar"].set_linewidth(0.9)
+    axis.spines["polar"].set_linewidth(1.15)
 
     axis.plot(
         closed_angles,
         closed_raw,
         color=raw_color,
-        linewidth=2.35,
+        linewidth=3.2,
         marker="o",
-        markersize=6.5,
+        markersize=9.0,
         markerfacecolor="white",
         markeredgecolor=raw_color,
-        markeredgewidth=1.8,
+        markeredgewidth=2.2,
         label=raw_label,
         zorder=4,
     )
@@ -183,12 +185,12 @@ def _plot_radar(
         closed_angles,
         closed_pace,
         color=pace_color,
-        linewidth=2.7,
+        linewidth=3.8,
         marker="s",
-        markersize=6.3,
+        markersize=9.0,
         markerfacecolor="white",
         markeredgecolor=pace_color,
-        markeredgewidth=1.9,
+        markeredgewidth=2.3,
         label=pace_label,
         zorder=5,
     )
@@ -196,8 +198,8 @@ def _plot_radar(
 
     axis.set_title(
         "Task-wise Boundary MAE ↓",
-        fontsize=18,
-        pad=28,
+        fontsize=24.0,
+        pad=35,
         color="#102A43",
     )
     legend = axis.legend(
@@ -208,8 +210,8 @@ def _plot_radar(
         framealpha=0.96,
         facecolor="white",
         edgecolor="#CFD8DC",
-        fontsize=10.5,
-        handlelength=2.6,
+        fontsize=15.0,
+        handlelength=2.8,
     )
     for text in legend.get_texts():
         text.set_fontweight("semibold")
@@ -226,14 +228,14 @@ def _plot_radar(
         f"(−{improvement:.1f}%)",
         ha="left",
         va="center",
-        fontsize=11.5,
+        fontsize=16.5,
         fontweight="bold",
         color="#334E68",
         bbox={
             "boxstyle": "round,pad=0.42",
             "facecolor": "#F5F8FA",
             "edgecolor": "#B0BEC5",
-            "linewidth": 0.9,
+            "linewidth": 1.1,
         },
     )
     figure.text(
@@ -242,11 +244,14 @@ def _plot_radar(
         "Lower is better",
         ha="right",
         va="center",
-        fontsize=10.5,
+        fontsize=15.0,
         fontstyle="italic",
         color="#607D8B",
     )
-    figure.subplots_adjust(left=0.08, right=0.89, top=0.88, bottom=0.12)
+    figure.subplots_adjust(left=0.08, right=0.87, top=0.86, bottom=0.14)
+
+    for text_artist in figure.findobj(match=Text):
+        text_artist.set_fontsize(text_artist.get_fontsize() * font_scale)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     png_path = output_path.with_suffix(".png")
@@ -288,6 +293,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--raw-color", default=RAW_COLOR)
     parser.add_argument("--pace-color", default=PACE_COLOR)
     parser.add_argument("--font-family", default="Times New Roman")
+    parser.add_argument(
+        "--font-scale",
+        type=float,
+        default=1.0,
+        help="Multiplier applied to all radar text after layout; defaults to 1.0.",
+    )
     parser.add_argument("--dpi", type=int, default=600)
     return parser
 
@@ -299,6 +310,8 @@ def main() -> None:
         raise ValueError("--num-tasks must be at least 3 for a radar chart")
     if args.dpi < 72:
         raise ValueError("--dpi must be at least 72")
+    if args.font_scale <= 0.0:
+        raise ValueError("--font-scale must be positive")
     by_task_path = args.by_task_csv.expanduser().resolve()
     summary_path = (
         args.summary_csv.expanduser().resolve()
@@ -339,6 +352,7 @@ def main() -> None:
         raw_color=args.raw_color,
         pace_color=args.pace_color,
         font_family=args.font_family,
+        font_scale=args.font_scale,
         dpi=args.dpi,
     )
     metadata.update(

@@ -916,6 +916,8 @@ python examples/recap/process/plot_boundary_mae_radar.py \
   --summary-csv /workspace/results/round1_v3_critic_ablation/critic_ablation_table.csv \
   --output /workspace/results/round1_v3_critic_ablation/figures/taskwise_boundary_mae_radar \
   --pace-color '#2364AA' \
+  --font-family 'STIXGeneral' \
+  --font-scale 1.0 \
   --dpi 600
 ```
 
@@ -937,8 +939,15 @@ python examples/recap/process/plot_task_success_rate_radar.py \
   --output /workspace/results/paper_figures/taskwise_success_rate_radar \
   --pace-color '#2364AA' \
   --recap-color '#E76F51' \
+  --font-family 'STIXGeneral' \
+  --font-scale 1.0 \
   --dpi 600
 ```
+
+Both radar scripts use enlarged paper-ready text by default. Increase
+`--font-scale` to `1.1` or `1.2` to uniformly enlarge every task label, radial
+tick, legend entry, title, and annotation without changing any data or line
+style.
 
 Recovery stages are:
 
