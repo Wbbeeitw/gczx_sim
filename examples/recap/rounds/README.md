@@ -743,6 +743,30 @@ python examples/recap/process/export_success_task_frames.py \
   --frame-fraction 0.65
 ```
 
+To publish a small but complete reproducibility dataset instead of screenshots,
+sample one full trainable episode per task with a fixed seed. The exporter
+copies the episode parquet, videos, training advantage sidecars, semantic
+traces, phase/progress labels, audits, and LeRobot metadata; it also writes
+source-provenance manifests, validates frame-level coverage, and creates
+SHA-256 checksums:
+
+```bash
+python examples/recap/process/export_reproducibility_dataset_sample.py \
+  --dataset-pattern '/data/libero_long/round1_v3_facd_30ep/{task}_30ep' \
+  --output-dataset /workspace/results/reproducibility/round1_v3_facd_sample_10ep \
+  --num-tasks 10 \
+  --episodes-per-task 1 \
+  --seed 42 \
+  --archive /workspace/results/reproducibility/round1_v3_facd_sample_10ep.tar.gz
+```
+
+The archive contains ten complete episodes and
+`reproducibility_manifest.json`, `reproducibility_manifest.csv`,
+`reproducibility_validation.json`, and `SHA256SUMS`. Sampling includes both
+successful and failed trajectories but excludes audit rows marked
+`trainable=false` by default. Pass `--include-untrainable` only when those
+known-invalid semantic annotations are intentionally required.
+
 ## Detailed ReCAP-vs-Ours critic bias
 
 Use the same fixed 300-episode return comparison for both methods: ReCAP is the
