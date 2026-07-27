@@ -139,7 +139,7 @@ def _plot_radar(
         }
     )
     figure, axis = plt.subplots(
-        figsize=(11.6, 10.4),
+        figsize=(12.4, 11.4),
         subplot_kw={"projection": "polar"},
     )
     figure.patch.set_facecolor("white")
@@ -150,15 +150,15 @@ def _plot_radar(
     axis.set_xticks(angles)
     axis.set_xticklabels(
         [task.replace("task", "Task ") for task in tasks],
-        fontsize=18.0,
+        fontsize=25.0,
         fontweight="bold",
         color="#334E68",
     )
-    axis.tick_params(axis="x", pad=18)
+    axis.tick_params(axis="x", pad=24)
     axis.set_yticks(radial_ticks)
     axis.set_yticklabels(
         [f"{tick:.0f}" for tick in radial_ticks],
-        fontsize=14.5,
+        fontsize=19.0,
         color="#607D8B",
     )
     axis.set_rlabel_position(18)
@@ -171,12 +171,12 @@ def _plot_radar(
         closed_angles,
         closed_raw,
         color=raw_color,
-        linewidth=3.2,
+        linewidth=4.0,
         marker="o",
-        markersize=9.0,
+        markersize=11.5,
         markerfacecolor="white",
         markeredgecolor=raw_color,
-        markeredgewidth=2.2,
+        markeredgewidth=2.8,
         label=raw_label,
         zorder=4,
     )
@@ -185,33 +185,35 @@ def _plot_radar(
         closed_angles,
         closed_pace,
         color=pace_color,
-        linewidth=3.8,
+        linewidth=4.8,
         marker="s",
-        markersize=9.0,
+        markersize=11.5,
         markerfacecolor="white",
         markeredgecolor=pace_color,
-        markeredgewidth=2.3,
+        markeredgewidth=2.9,
         label=pace_label,
         zorder=5,
     )
     axis.fill(closed_angles, closed_pace, color=pace_color, alpha=0.065, zorder=3)
 
-    axis.set_title(
+    figure.suptitle(
         "Task-wise Boundary MAE ↓",
-        fontsize=24.0,
-        pad=35,
+        fontsize=30.0,
+        y=0.985,
         color="#102A43",
     )
     legend = axis.legend(
-        loc="upper right",
-        bbox_to_anchor=(1.18, 1.13),
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.22),
+        ncol=2,
         frameon=True,
         fancybox=True,
         framealpha=0.96,
         facecolor="white",
         edgecolor="#CFD8DC",
-        fontsize=15.0,
-        handlelength=2.8,
+        fontsize=20.0,
+        handlelength=3.0,
+        columnspacing=1.5,
     )
     for text in legend.get_texts():
         text.set_fontweight("semibold")
@@ -228,7 +230,7 @@ def _plot_radar(
         f"(−{improvement:.1f}%)",
         ha="left",
         va="center",
-        fontsize=16.5,
+        fontsize=22.0,
         fontweight="bold",
         color="#334E68",
         bbox={
@@ -244,11 +246,11 @@ def _plot_radar(
         "Lower is better",
         ha="right",
         va="center",
-        fontsize=15.0,
+        fontsize=20.0,
         fontstyle="italic",
         color="#607D8B",
     )
-    figure.subplots_adjust(left=0.08, right=0.87, top=0.86, bottom=0.14)
+    figure.subplots_adjust(left=0.09, right=0.91, top=0.79, bottom=0.16)
 
     for text_artist in figure.findobj(match=Text):
         text_artist.set_fontsize(text_artist.get_fontsize() * font_scale)

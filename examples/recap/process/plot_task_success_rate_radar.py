@@ -156,7 +156,7 @@ def _plot_radar(
         }
     )
     figure, axis = plt.subplots(
-        figsize=(11.6, 10.4),
+        figsize=(12.4, 11.4),
         subplot_kw={"projection": "polar"},
     )
     figure.patch.set_facecolor("white")
@@ -167,16 +167,16 @@ def _plot_radar(
     axis.set_xticks(angles)
     axis.set_xticklabels(
         [task.replace("task", "Task ") for task in tasks],
-        fontsize=18.0,
+        fontsize=25.0,
         fontweight="bold",
         color="#334E68",
     )
-    axis.tick_params(axis="x", pad=18)
+    axis.tick_params(axis="x", pad=24)
     radial_ticks = np.asarray([20.0, 40.0, 60.0, 80.0, 100.0])
     axis.set_yticks(radial_ticks)
     axis.set_yticklabels(
         [f"{tick:.0f}%" for tick in radial_ticks],
-        fontsize=14.5,
+        fontsize=19.0,
         color="#607D8B",
     )
     axis.set_rlabel_position(18)
@@ -192,13 +192,13 @@ def _plot_radar(
             _closed(values[method]),
             color=style["color"],
             linestyle=style["linestyle"],
-            linewidth=2.0,
+            linewidth=2.7,
             alpha=0.9,
             marker=style["marker"],
-            markersize=6.2,
+            markersize=8.5,
             markerfacecolor="white",
             markeredgecolor=style["color"],
-            markeredgewidth=1.55,
+            markeredgewidth=2.0,
             label=DISPLAY_LABELS[method],
             zorder=3,
         )
@@ -207,13 +207,13 @@ def _plot_radar(
         closed_angles,
         _closed(values["ReCAP"]),
         color=recap_color,
-        linewidth=3.2,
+        linewidth=4.0,
         linestyle="-",
         marker="o",
-        markersize=8.5,
+        markersize=11.0,
         markerfacecolor="white",
         markeredgecolor=recap_color,
-        markeredgewidth=2.2,
+        markeredgewidth=2.8,
         label="ReCAP",
         zorder=5,
     )
@@ -228,13 +228,13 @@ def _plot_radar(
         closed_angles,
         _closed(values["PACE (ours)"]),
         color=pace_color,
-        linewidth=4.1,
+        linewidth=5.0,
         linestyle="-",
         marker="s",
-        markersize=9.0,
+        markersize=11.5,
         markerfacecolor="white",
         markeredgecolor=pace_color,
-        markeredgewidth=2.4,
+        markeredgewidth=3.0,
         label="PACE (ours)",
         zorder=6,
     )
@@ -247,15 +247,17 @@ def _plot_radar(
     )
 
     legend = axis.legend(
-        loc="upper right",
-        bbox_to_anchor=(1.20, 1.13),
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.29),
+        ncol=3,
         frameon=True,
         fancybox=True,
         framealpha=0.96,
         facecolor="white",
         edgecolor="#CFD8DC",
-        fontsize=15.0,
-        handlelength=2.9,
+        fontsize=20.0,
+        handlelength=3.0,
+        columnspacing=1.35,
     )
     for text in legend.get_texts():
         text.set_fontweight("semibold")
@@ -265,11 +267,11 @@ def _plot_radar(
         r"Success rate (%)  $\uparrow$  Higher is better",
         ha="right",
         va="center",
-        fontsize=15.5,
+        fontsize=20.0,
         fontstyle="italic",
         color="#607D8B",
     )
-    figure.subplots_adjust(left=0.08, right=0.86, top=0.89, bottom=0.12)
+    figure.subplots_adjust(left=0.09, right=0.91, top=0.77, bottom=0.15)
 
     for text_artist in figure.findobj(match=Text):
         text_artist.set_fontsize(text_artist.get_fontsize() * font_scale)
